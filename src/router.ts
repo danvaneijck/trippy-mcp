@@ -65,11 +65,23 @@ export async function resolveToken(rt: Runtime, query: string): Promise<Resolved
     };
   }
 
+  // Choice resolve payload: {q, matches: [{type, address, symbol, name, price_usd}], ambiguous}
   const choiceHit = (await rt.choiceApi.resolve(q, "token").catch(() => null)) as {
-    match?: { id?: string; token_id?: string; denom?: string };
-    alternatives?: unknown[];
+    matches?: { address?: string; denom?: string; symbol?: string; name?: string }[];
+    ambiguous?: boolean;
   } | null;
-  const id = choiceHit?.match?.id ?? choiceHit?.match?.token_id ?? choiceHit?.match?.denom;
+  const matches = choiceHit?.matches ?? [];
+  if (choiceHit?.ambiguous && matches.length > 1) {
+    return {
+      venue: "ambiguous",
+      candidates: matches.slice(0, 5).map((m) => ({
+        tokenId: m.address ?? m.denom,
+        symbol: m.symbol,
+        name: m.name,
+      })),
+    };
+  }
+  const id = matches[0]?.address ?? matches[0]?.denom;
   if (id) return { venue: "choice", tokenId: String(id) };
 
   throw new ToolError(

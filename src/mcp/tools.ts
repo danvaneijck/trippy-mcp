@@ -20,7 +20,7 @@ import type { Runtime } from "../runtime.js";
 import { deepSanitize, untrustedMeta } from "../untrusted.js";
 import { LAUNCH_STATE_LABEL, LaunchState } from "../venues/shroom/abi.js";
 import { sweep as walletSweep, walletStatus } from "../wallet.js";
-import { balanceOf, bankBalances } from "../api/lcd.js";
+import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
 
 // ---------------------------------------------------------------------------
 // shaping helpers
@@ -275,7 +275,9 @@ export async function sell(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<
         'for CW20 tokens pass an explicit amount instead of "all"',
       );
     }
-    amount = formatUnits(bal, 18);
+    // Choice quotes take HUMAN units — per-denom decimals from LCD metadata
+    // (USDT/USDC are 6, not 18; a wrong exponent rounds the amount to zero).
+    amount = formatUnits(bal, await denomDecimals(rt.net.lcdUrl, target.tokenId));
   }
   return rt.choice.swap(target.tokenId, counter, amount, slippageBps / 100);
 }
