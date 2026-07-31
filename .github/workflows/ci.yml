@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    # Weekly upstream ABI drift check — the deployed contract only changes on
+    # a redeploy, but a drifted mirror fails with opaque reverts, so we look.
+    - cron: "17 6 * * 1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: node scripts/sync-abi.mjs --check
+      - name: pack size gate (sdk-ts bloat guard)
+        run: |
+          SIZE=$(npm pack --dry-run --json | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d)[0].size))")
+          echo "packed size: $SIZE bytes"
+          if [ "$SIZE" -gt 3000000 ]; then
+            echo "package tarball exceeds 3MB — check what got bundled"; exit 1
+          fi

@@ -1,0 +1,53 @@
+{
+  "name": "trippy-mcp",
+  "version": "0.1.0",
+  "description": "Trippy MCP — let AI agents (Claude Code, Codex, Cursor) launch and trade tokens on Injective: SHROOM Pad bonding curves + any-token swaps through the Choice aggregator. Non-custodial: the key is generated and stays on your machine.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "trippy-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "abi",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "sync-abi": "node scripts/sync-abi.mjs",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build && node scripts/sync-abi.mjs --check"
+  },
+  "dependencies": {
+    "@injectivelabs/networks": "^1.15.4",
+    "@injectivelabs/sdk-ts": "1.20.17",
+    "@injectivelabs/utils": "^1.15.4",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "bech32": "^2.0.0",
+    "viem": "^2.21.50",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "overrides": {
+    "@noble/hashes": "1.8.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "injective",
+    "trading",
+    "launchpad",
+    "shroom",
+    "choice",
+    "claude",
+    "agent"
+  ]
+}

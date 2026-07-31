@@ -1,0 +1,131 @@
+/**
+ * The policy engine — the non-negotiable backstop between the model and the
+ * key. `enforce()` runs INSIDE the two signers (chain/evm.ts writeTx and
+ * venues/choice broadcast), never in the tool layer, so no tool wiring
+ * mistake or prompt-injected instruction can route around it.
+ *
+ * What it guards:
+ *  - kill switch (`tradingEnabled`)
+ *  - target allowlist: writes only to known contracts; ERC20 approvals only
+ *    to the LaunchpadCore; sweeps/transfers only to the owner address
+ *  - per-tx and rolling-24h USD caps on trades/swaps/launches
+ *  - slippage clamp
+ */
+
+import type { PolicyConfig } from "../config.js";
+import { PolicyError } from "../errors.js";
+import type { SpendLedger } from "./spend.js";
+
+export type IntentKind = "trade" | "swap" | "launch" | "claim" | "sweep" | "approve";
+
+export interface WriteIntent {
+  kind: IntentKind;
+  /**
+   * The security-relevant counterparty:
+   *  - trade/launch/claim: the contract being called
+   *  - swap: the Choice aggregation contract the route executes on
+   *  - approve: the SPENDER being authorized (not the token contract)
+   *  - sweep: the destination address
+   */
+  target: string;
+  /** Human-readable, for the audit log. */
+  detail: string;
+  /**
+   * USD value leaving the wallet. `undefined` = no spend (claims, approvals);
+   * `null` = spend of unknown USD value (refused unless allowUnpricedSpend).
+   */
+  spendUsd?: number | null;
+}
+
+export class PolicyEngine {
+  constructor(
+    private readonly cfg: PolicyConfig,
+    /** Lowercased addresses writes may target (contracts + approve spenders). */
+    private readonly allowedTargets: ReadonlySet<string>,
+    /** Lowercased owner sweep destination — the ONLY allowed transfer dest. */
+    private readonly sweepDestination: string,
+    private readonly ledger: SpendLedger,
+  ) {}
+
+  /** Throws PolicyError when the intent is not permitted. */
+  enforce(intent: WriteIntent): void {
+    const target = intent.target.toLowerCase();
+
+    if (intent.kind === "sweep") {
+      if (target !== this.sweepDestination) {
+        throw new PolicyError(
+          `sweep destination ${intent.target} is not the owner address`,
+          "sweeps can only go to ownerSweepAddress fixed at init",
+        );
+      }
+      return; // sweeps are never capped — getting funds home is always allowed
+    }
+
+    if (!this.allowedTargets.has(target)) {
+      throw new PolicyError(
+        `target ${intent.target} is not on the contract allowlist`,
+        "writes are restricted to the LaunchpadCore, its quote assets and the Choice aggregator",
+      );
+    }
+
+    if (intent.kind === "claim" || intent.kind === "approve") return;
+
+    // trade / swap / launch — spend-bearing actions
+    if (!this.cfg.tradingEnabled) {
+      throw new PolicyError(
+        "trading is disabled by policy",
+        "set policy.tradingEnabled=true in config.json to re-enable",
+      );
+    }
+
+    const spend = intent.spendUsd;
+    if (spend === null || spend === undefined) {
+      if (this.cfg.allowUnpricedSpend) return;
+      throw new PolicyError(
+        `cannot price this ${intent.kind} in USD — refusing under policy`,
+        "set policy.allowUnpricedSpend=true to permit spends without a USD valuation",
+      );
+    }
+    if (spend > this.cfg.perTxCapUsd) {
+      throw new PolicyError(
+        `spend ~$${spend.toFixed(2)} exceeds the per-tx cap $${this.cfg.perTxCapUsd}`,
+        "raise policy.perTxCapUsd in config.json (a human action) or trade smaller",
+      );
+    }
+    const spent = this.ledger.spent();
+    if (spent + spend > this.cfg.dailyBudgetUsd) {
+      throw new PolicyError(
+        `spend ~$${spend.toFixed(2)} would exceed the 24h budget ` +
+          `($${spent.toFixed(2)} of $${this.cfg.dailyBudgetUsd} used)`,
+        "wait for the window to roll or raise policy.dailyBudgetUsd in config.json",
+      );
+    }
+  }
+
+  /** Record a broadcast spend against the 24h budget. */
+  recordSpend(intent: WriteIntent): void {
+    if (typeof intent.spendUsd === "number" && intent.spendUsd > 0) {
+      this.ledger.record(intent.spendUsd, intent.detail);
+    }
+  }
+
+  /** Clamp a tool-supplied slippage to the policy ceiling. */
+  clampSlippageBps(requested?: number): number {
+    const req = requested ?? Math.min(100, this.cfg.maxSlippageBps);
+    return Math.max(1, Math.min(req, this.cfg.maxSlippageBps));
+  }
+
+  remainingDailyUsd(): number {
+    return Math.max(0, this.cfg.dailyBudgetUsd - this.ledger.spent());
+  }
+
+  snapshot(): Record<string, unknown> {
+    return {
+      tradingEnabled: this.cfg.tradingEnabled,
+      perTxCapUsd: this.cfg.perTxCapUsd,
+      dailyBudgetUsd: this.cfg.dailyBudgetUsd,
+      remainingDailyUsd: this.remainingDailyUsd(),
+      maxSlippageBps: this.cfg.maxSlippageBps,
+    };
+  }
+}
