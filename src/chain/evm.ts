@@ -120,6 +120,35 @@ export class EvmSigner {
     this.policy.recordSpend(intent);
     this.audit.append("tx:broadcast", { fn: functionName, to: address, hash, detail: intent.detail });
 
+    return this.settle(hash, confirm);
+  }
+
+  /** Native INJ transfer — used ONLY by sweep (policy pins the destination). */
+  async sendNative(
+    to: Address,
+    value: bigint,
+    intent: WriteIntent,
+    confirm?: () => Promise<boolean>,
+  ): Promise<WriteTxResult> {
+    this.policy.enforce(intent);
+    if (this.dryRun) return { hash: null, status: "dry-run" };
+    const hash = await this.walletClient.sendTransaction({
+      to,
+      value,
+      gas: 100_000n,
+      gasPrice: this.gasPriceWei,
+      chain: this.walletClient.chain,
+      account: this.account,
+    });
+    this.audit.append("sweep:sent", { to, valueWei: value.toString(), hash });
+    return this.settle(hash, confirm);
+  }
+
+  /** Receipt wait with the state-reread fallback — receipts lag or vanish on inj-EVM public RPCs. */
+  private async settle(
+    hash: `0x${string}`,
+    confirm?: () => Promise<boolean>,
+  ): Promise<WriteTxResult> {
     try {
       const receipt = await this.publicClient.waitForTransactionReceipt({
         hash,
@@ -147,30 +176,6 @@ export class EvmSigner {
         }
       }
       this.audit.append("tx:unconfirmed", { hash });
-      return { hash, status: "unconfirmed" };
-    }
-  }
-
-  /** Native INJ transfer — used ONLY by sweep (policy pins the destination). */
-  async sendNative(to: Address, value: bigint, intent: WriteIntent): Promise<WriteTxResult> {
-    this.policy.enforce(intent);
-    if (this.dryRun) return { hash: null, status: "dry-run" };
-    const hash = await this.walletClient.sendTransaction({
-      to,
-      value,
-      gas: 100_000n,
-      gasPrice: this.gasPriceWei,
-      chain: this.walletClient.chain,
-      account: this.account,
-    });
-    this.audit.append("sweep:sent", { to, valueWei: value.toString(), hash });
-    try {
-      const receipt = await this.publicClient.waitForTransactionReceipt({
-        hash,
-        timeout: RECEIPT_TIMEOUT_MS,
-      });
-      return { hash, status: receipt.status === "success" ? "confirmed" : "reverted" };
-    } catch {
       return { hash, status: "unconfirmed" };
     }
   }

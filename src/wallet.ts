@@ -95,7 +95,12 @@ export async function sweep(rt: Runtime, asset: string, amount: string | "all"):
         `nothing sweepable — balance ${formatUnits(bal, 18)} INJ minus 0.05 gas reserve`,
       );
     }
-    const res = await rt.signer.sendNative(owner, value, intent);
+    // Confirm-by-balance: the agent is the only spender of this key, so a bank
+    // balance drop of ≥ value proves the send landed even without a receipt.
+    const res = await rt.signer.sendNative(owner, value, intent, async () => {
+      const now = balanceOf(await bankBalances(rt.net.lcdUrl, rt.injAddress), "inj");
+      return now <= bal - value;
+    });
     return { asset: "INJ", amount: formatUnits(value, 18), to: owner, hash: res.hash, status: res.status };
   }
 
@@ -130,6 +135,15 @@ export async function sweep(rt: Runtime, asset: string, amount: string | "all"):
     functionName: "transfer",
     args: [owner, value],
     intent,
+    confirm: async () => {
+      const now = await rt.signer.readContract<bigint>({
+        address: token,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [rt.signer.address],
+      });
+      return now <= bal - value;
+    },
   });
   return {
     asset: known ? known.symbol : token,
