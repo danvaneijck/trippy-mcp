@@ -11,13 +11,14 @@
 
 import { formatUnits } from "viem";
 
-import type { ApiLaunch, ApiTrade } from "../api/pump.js";
+import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
 import { quoteAssetBySlot } from "../chain/networks.js";
 import { ToolError } from "../errors.js";
 import { decodeMetadataUri, resolveImage, type LaunchMetadata } from "../metadata.js";
-import { resolveToken, type ResolvedTarget } from "../router.js";
+import { CURVE_STATES, resolveToken, type ResolvedTarget } from "../router.js";
 import type { Runtime } from "../runtime.js";
-import { deepSanitize, untrustedMeta } from "../untrusted.js";
+import { deepSanitize, sanitizeText, untrustedMeta } from "../untrusted.js";
+import { extractUsdPrice } from "../venues/choice/swap.js";
 import { LAUNCH_STATE_LABEL, LaunchState } from "../venues/shroom/abi.js";
 import { sweep as walletSweep, walletStatus } from "../wallet.js";
 import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
@@ -171,11 +172,113 @@ export async function recentTrades(
   return { trades: items.map((t) => tradeSummary(rt, t)) };
 }
 
-export async function myActivity(rt: Runtime): Promise<unknown> {
-  const { items } = await rt.pump.profileTrades(rt.signer.address.toLowerCase(), 50);
+export async function myActivity(
+  rt: Runtime,
+  args: { limit?: number; days?: number } = {},
+): Promise<unknown> {
+  const limit = Math.min(Math.max(args.limit ?? 20, 1), 100);
+  const days = Math.min(Math.max(args.days ?? 30, 1), 365);
+  const out: Record<string, unknown> = { agent: rt.signer.address, injAddress: rt.injAddress };
+  // Each venue fails soft: one API being down should not blank the other's history.
+  try {
+    const { items } = await rt.pump.profileTrades(rt.signer.address.toLowerCase(), 50);
+    out.trades = items.map((t) => tradeSummary(rt, t));
+  } catch (e) {
+    out.curveNote = `SHROOM Pad history unavailable: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  try {
+    out.choice = deepSanitize(await rt.choiceApi.wallet(rt.injAddress, limit, days));
+  } catch (e) {
+    out.choiceNote = `Choice swap history unavailable: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// candles
+// ---------------------------------------------------------------------------
+
+export const CANDLE_INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
+export type CandleInterval = (typeof CANDLE_INTERVALS)[number];
+
+export interface CandlesArgs {
+  query: string;
+  interval?: CandleInterval;
+  limit?: number;
+}
+
+/**
+ * Curve candles arrive as raw spot_price_wad values: the base-unit pair/token
+ * ratio scaled by 1e18. Launch tokens are always 18-decimal, so the human
+ * quote-per-token price is wad/1e18 × 10^(18 − pairDecimals). Volume is raw
+ * quote base units. `rateUsd` (quote→USD at the bucket's close trade) converts
+ * close/volume to USD without rescaling history by today's rate.
+ */
+export function shapeCurveCandles(
+  items: ApiCandle[],
+  pairDecimals: number,
+): Record<string, unknown>[] {
+  const px = (v: string): number => (Number(v) / 1e18) * 10 ** (18 - pairDecimals);
+  return items.map((cd) => {
+    const close = px(cd.c);
+    const vol = Number(cd.v) / 10 ** pairDecimals;
+    const rate = cd.rateUsd == null ? null : Number(cd.rateUsd);
+    const hasRate = rate !== null && Number.isFinite(rate) && rate > 0;
+    return {
+      t: cd.t,
+      o: px(cd.o),
+      h: px(cd.h),
+      l: px(cd.l),
+      c: close,
+      v: vol,
+      n: cd.n,
+      rateUsd: hasRate ? rate : null,
+      ...(hasRate ? { cUsd: close * rate, vUsd: vol * rate } : {}),
+    };
+  });
+}
+
+/** Choice agent-API candles are compact oldest→newest [t,o,h,l,c,v] arrays. */
+export function shapeChoiceCandles(raw: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Record<string, unknown>[] = [];
+  for (const row of raw.slice(0, 500)) {
+    if (!Array.isArray(row) || row.length < 6) continue;
+    const [t, o, h, l, c, v] = row.map((x) => Number(x));
+    if (!Number.isFinite(t)) continue;
+    out.push({ t, o, h, l, c, v });
+  }
+  return out;
+}
+
+export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> {
+  const interval = args.interval ?? "1h";
+  const limit = Math.min(Math.max(args.limit ?? 100, 1), 500);
+  const target = await routed(rt, args.query);
+
+  if (target.venue === "curve") {
+    const q = rt.shroom.quoteInfo(target.launch.quoteAsset);
+    const res = await rt.pump.getCandles(target.launchId, { interval, limit });
+    return {
+      venue: "curve",
+      launchId: target.launch.id,
+      interval: res.interval,
+      pricedIn: q.symbol,
+      candles: shapeCurveCandles(res.items, q.decimals),
+      note: `o/h/l/c are ${q.symbol} per token; cUsd/vUsd use each bucket's quote→USD rate (rateUsd). Only buckets containing trades are returned.`,
+    };
+  }
+
+  const payload = await rt.choiceApi.marketCandles(target.tokenId, interval, limit);
   return {
-    agent: rt.signer.address,
-    trades: items.map((t) => tradeSummary(rt, t)),
+    venue: "choice",
+    tokenId: target.tokenId,
+    pair: sanitizeText(payload.pair),
+    kind: payload.kind,
+    interval: payload.interval ?? interval,
+    pricedIn: "USD",
+    candles: shapeChoiceCandles(payload.candles),
+    note: "o/h/l/c/v are USD when the backend has USD marks for the bucket, else raw quote prices.",
   };
 }
 
@@ -355,6 +458,177 @@ export async function claimFees(rt: Runtime, args: { launchIds?: string[] }): Pr
 
 export async function walletStatusTool(rt: Runtime): Promise<unknown> {
   return walletStatus(rt);
+}
+
+// ---------------------------------------------------------------------------
+// portfolio
+// ---------------------------------------------------------------------------
+
+export interface PortfolioRow {
+  denom: string;
+  symbol: string | null;
+  amount: number;
+  priceUsd: number | null;
+  valueUsd: number | null;
+  pricedVia: "quote-rate" | "curve" | "choice" | "unpriced";
+  launchId?: string;
+  untrusted_metadata?: Record<string, string>;
+}
+
+export function portfolioTotals(rows: PortfolioRow[]): { totalUsd: number; unpriced: number } {
+  let totalUsd = 0;
+  let unpriced = 0;
+  for (const r of rows) {
+    if (r.valueUsd !== null && Number.isFinite(r.valueUsd)) totalUsd += r.valueUsd;
+    else unpriced += 1;
+  }
+  return { totalUsd, unpriced };
+}
+
+/** Most balances a single portfolio call will try to price via lookups. */
+const MAX_PRICE_LOOKUPS = 25;
+
+export async function portfolio(rt: Runtime): Promise<unknown> {
+  const all = await bankBalances(rt.net.lcdUrl, rt.injAddress);
+  const quoteByDenom = new Map(Object.values(rt.net.quoteAssets).map((q) => [q.bankDenom, q]));
+  const rows: PortfolioRow[] = [];
+  let lookups = 0;
+
+  for (const b of all) {
+    const raw = BigInt(b.amount);
+    if (raw <= 0n) continue;
+
+    const q = quoteByDenom.get(b.denom);
+    if (q) {
+      const amount = Number(formatUnits(raw, q.decimals));
+      const valueUsd = await rt.shroom.usdValue(q.slot, raw);
+      rows.push({
+        denom: b.denom,
+        symbol: q.symbol,
+        amount,
+        priceUsd: valueUsd !== null && amount > 0 ? valueUsd / amount : null,
+        valueUsd,
+        pricedVia: valueUsd !== null ? "quote-rate" : "unpriced",
+      });
+      continue;
+    }
+
+    if (lookups >= MAX_PRICE_LOOKUPS) {
+      // Past the lookup cap: still report the holding in human units (the
+      // LCD decimals fetch is cached/cheap), just skip price discovery.
+      rows.push({
+        denom: b.denom,
+        symbol: null,
+        amount: Number(formatUnits(raw, await denomDecimals(rt.net.lcdUrl, b.denom))),
+        priceUsd: null,
+        valueUsd: null,
+        pricedVia: "unpriced",
+      });
+      continue;
+    }
+    lookups += 1;
+
+    const erc20 = /^erc20:(0x[0-9a-fA-F]{40})$/.exec(b.denom);
+    const launch = erc20 ? await findLaunchByToken(rt, erc20[1]!) : null;
+
+    if (launch && CURVE_STATES.has(launch.state)) {
+      rows.push(await curveHoldingRow(rt, b.denom, raw, launch));
+      continue;
+    }
+    rows.push(await choiceHoldingRow(rt, b.denom, raw, launch, erc20?.[1]));
+  }
+
+  rows.sort((a, z) => (z.valueUsd ?? -1) - (a.valueUsd ?? -1));
+  const { totalUsd, unpriced } = portfolioTotals(rows);
+  return {
+    agent: rt.signer.address,
+    injAddress: rt.injAddress,
+    holdings: rows,
+    totalUsd,
+    ...(unpriced > 0 ? { unpricedHoldings: unpriced } : {}),
+    note: "prices are indicative (quote-rate feed / last curve trade / Choice stats) — always `quote` before trading on them; token names under untrusted_metadata are third-party text",
+  };
+}
+
+async function findLaunchByToken(rt: Runtime, token: string): Promise<ApiLaunch | null> {
+  try {
+    const { items } = await rt.pump.listLaunches({ q: token, limit: 3 });
+    return items.find((l) => l.token.toLowerCase() === token.toLowerCase()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Active-curve launch token: last trade's spot price × current quote→USD rate. */
+async function curveHoldingRow(
+  rt: Runtime,
+  denom: string,
+  raw: bigint,
+  launch: ApiLaunch,
+): Promise<PortfolioRow> {
+  const meta = (decodeMetadataUri(launch.metadataURI) ?? {}) as LaunchMetadata;
+  const amount = Number(formatUnits(raw, 18)); // launch tokens are always 18-decimal
+  let priceUsd: number | null = null;
+  try {
+    const q = rt.shroom.quoteInfo(launch.quoteAsset);
+    const { items } = await rt.pump.getTrades(launch.id, 1);
+    const wad = items[0]?.spotPriceWad;
+    if (wad) {
+      const priceQuote = (Number(wad) / 1e18) * 10 ** (18 - q.decimals);
+      const rate = await rt.shroom.usdValue(q.slot, 10n ** BigInt(q.decimals));
+      if (rate !== null && Number.isFinite(priceQuote)) priceUsd = priceQuote * rate;
+    }
+  } catch {
+    // leave unpriced
+  }
+  return {
+    denom,
+    symbol: null,
+    amount,
+    priceUsd,
+    valueUsd: priceUsd !== null ? priceUsd * amount : null,
+    pricedVia: priceUsd !== null ? "curve" : "unpriced",
+    launchId: launch.id,
+    untrusted_metadata: untrustedMeta({
+      symbol: meta.symbol,
+      name: meta.name,
+    }),
+  };
+}
+
+/** Anything else: Choice token stats (try the held denom, then the raw 0x). */
+async function choiceHoldingRow(
+  rt: Runtime,
+  denom: string,
+  raw: bigint,
+  launch: ApiLaunch | null,
+  erc20Token?: string,
+): Promise<PortfolioRow> {
+  const decimals = launch ? 18 : await denomDecimals(rt.net.lcdUrl, denom);
+  const amount = Number(formatUnits(raw, decimals));
+  let priceUsd: number | null = null;
+  let overview: Record<string, unknown> | null = null;
+  for (const query of [denom, ...(erc20Token ? [erc20Token] : [])]) {
+    try {
+      overview = await rt.choiceApi.token(query);
+      priceUsd = extractUsdPrice(overview);
+      if (priceUsd !== null) break;
+    } catch {
+      // try the next query form
+    }
+  }
+  return {
+    denom,
+    symbol: null,
+    amount,
+    priceUsd,
+    valueUsd: priceUsd !== null ? priceUsd * amount : null,
+    pricedVia: priceUsd !== null ? "choice" : "unpriced",
+    untrusted_metadata: untrustedMeta({
+      symbol: (overview as { symbol?: unknown } | null)?.symbol,
+      name: (overview as { name?: unknown } | null)?.name,
+    }),
+  };
 }
 
 export async function sweepTool(rt: Runtime, args: { asset: string; amount: string }): Promise<unknown> {

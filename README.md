@@ -35,12 +35,15 @@ Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit lo
 | Tool | What it does |
 |---|---|
 | `search_tokens` / `token_info` | resolve + inspect any token (curve state, graduation progress, Choice market data) |
-| `trending` / `new_launches` / `recent_trades` / `my_activity` | discovery + tape |
+| `trending` / `new_launches` / `recent_trades` | discovery + tape |
+| `candles` | OHLCV price history — curve launches (quote-priced + per-bucket USD rate) or Choice markets (USD-priced) |
+| `my_activity` | the agent's own history on both venues: curve trades + Choice swaps, orderbook fills, window-flow PnL |
 | `quote` | preview a buy/sell — auto-routes curve vs Choice |
 | `buy` / `sell` | execute — curve trades on SHROOM Pad, everything else via the Choice aggregator |
 | `create_token` | launch on the bonding curve (image upload → IPFS, ~0.2 INJ creation fee, optional initial buy) |
 | `claim_fees` | creator fees, referral fees, cancelled-launch refunds (reads first, only claims non-zero) |
 | `wallet_status` / `sweep` | balances + policy budget; send funds home |
+| `portfolio` | every holding valued in USD (quote-rate feed / last curve trade / Choice stats) |
 | `agent_info` | identity + how to claim the agent to your Terminal profile |
 
 ## Agent identity

@@ -56,6 +56,17 @@ export interface QuotePriceRow {
   fetchedAt: string;
 }
 
+export interface ApiCandle {
+  t: number; // unix seconds, bucket open
+  o: string; // spot_price_wad (1e18-scaled pair-per-token, raw base-unit ratio)
+  h: string;
+  l: string;
+  c: string;
+  v: string; // pair volume in raw quote base units
+  n: number; // trade count
+  rateUsd: string | null; // quote→USD rate at the bucket's close trade
+}
+
 export interface AgentIdentity {
   agentAddress: string;
   name: string;
@@ -143,6 +154,18 @@ export class PumpApi {
 
   recentTrades(limit = 30): Promise<{ items: ApiTrade[] }> {
     return this.get("/trades/recent", { limit });
+  }
+
+  getCandles(
+    launchId: string | bigint,
+    opts: { interval?: string; from?: number; to?: number; limit?: number },
+  ): Promise<{ interval: string; from: number; to: number; items: ApiCandle[] }> {
+    return this.get(`/launches/${launchId}/candles`, {
+      interval: opts.interval,
+      from: opts.from,
+      to: opts.to,
+      limit: opts.limit,
+    });
   }
 
   profileTrades(address: string, limit = 50): Promise<{ items: ApiTrade[] }> {

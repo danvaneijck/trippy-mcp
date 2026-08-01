@@ -19,7 +19,7 @@ export type ResolvedTarget =
   | { venue: "choice"; tokenId: string; launch?: ApiLaunch }
   | { venue: "ambiguous"; candidates: unknown[] };
 
-const CURVE_STATES = new Set<number>([
+export const CURVE_STATES = new Set<number>([
   LaunchState.Trading,
   LaunchState.CurveFilled,
   LaunchState.PendingSettlement,

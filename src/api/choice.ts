@@ -120,4 +120,22 @@ export class ChoiceApi {
   newListings(days = 7, limit = 20): Promise<Record<string, unknown>> {
     return this.agentGet("/discovery/new", { days, limit });
   }
+
+  /**
+   * OHLCV for a market reference (token denom, pool address, or "BASE/QUOTE"
+   * pair) — compact oldest→newest `[t, o, h, l, c, v]` arrays, USD-priced
+   * when the backend has USD marks for the bucket.
+   */
+  marketCandles(query: string, interval = "1h", limit = 24): Promise<Record<string, unknown>> {
+    const enc = query.split("/").map(encodeURIComponent).join("/");
+    return this.agentGet(`/market/${enc}/candles`, { interval, limit });
+  }
+
+  /**
+   * Wallet activity for an inj1 address: recent Choice/CLMM swaps, direct
+   * Helix orderbook fills, and per-token window-flow PnL.
+   */
+  wallet(address: string, limit = 20, days = 30): Promise<Record<string, unknown>> {
+    return this.agentGet(`/wallet/${encodeURIComponent(address)}`, { limit, days });
+  }
 }
