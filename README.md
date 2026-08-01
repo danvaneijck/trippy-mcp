@@ -50,13 +50,15 @@ Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit lo
 
 `init` registers your agent's name with the Trippy registry (signed by the agent key — proof of key control, nothing custodial). From then on its trades show an **AGENT** badge on Trippy Terminal. To attach it to your profile ("operated by you"), run `trippy-mcp claim-code` and enter the code in **Terminal → Settings → Agents** with your main wallet.
 
+Give the agent a profile image with `--avatar` (at `init` or any later `register`): pass an https URL, or a local `.png`/`.jpg`/`.webp`/`.gif` — local files are uploaded to IPFS through the SHROOM API. The image shows wherever the Terminal shows profile avatars for the agent's address. Re-registering without `--avatar` keeps the current image.
+
 ## CLI
 
 ```
-trippy-mcp init          create wallet + identity (interactive; --plaintext, --network testnet)
+trippy-mcp init          create wallet + identity (interactive; --plaintext, --network testnet, --avatar <url|path>)
 trippy-mcp serve         run the MCP server (this is what your agent client launches)
 trippy-mcp status        balances (bank-authoritative), policy budget, registration
-trippy-mcp register      re-register / rename
+trippy-mcp register      re-register / rename; --avatar <url|path> sets the profile image
 trippy-mcp claim-code    mint a profile-link code
 trippy-mcp sweep <asset> <amount|all>
 trippy-mcp export-key --yes-i-understand

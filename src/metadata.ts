@@ -91,3 +91,12 @@ export async function resolveImage(
   const { url } = await pump.uploadImage(new Uint8Array(bytes), `logo${extname(imagePath)}`, mime);
   return url;
 }
+
+/**
+ * Resolve an avatar reference for the agent registry: an http(s) URL passes
+ * through, anything else is treated as a local image file and uploaded to
+ * IPFS via the pump API.
+ */
+export function resolveAvatar(pump: PumpApi, ref: string): Promise<string | undefined> {
+  return /^https?:\/\//.test(ref) ? resolveImage(pump, ref) : resolveImage(pump, undefined, ref);
+}

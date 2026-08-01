@@ -23,11 +23,13 @@ import {
   injToEvm,
   saveKeystore,
 } from "../keystore.js";
+import { resolveAvatar } from "../metadata.js";
 import { clientSnippets, fundingInstructions } from "./snippets.js";
 
 interface InitFlags {
   name?: string;
   owner?: string;
+  avatar?: string;
   network: NetworkName;
   plaintext: boolean;
   force: boolean;
@@ -39,6 +41,7 @@ function parseFlags(argv: string[]): InitFlags {
     const a = argv[i]!;
     if (a === "--name") flags.name = argv[++i];
     else if (a === "--owner") flags.owner = argv[++i];
+    else if (a === "--avatar") flags.avatar = argv[++i];
     else if (a === "--network") flags.network = argv[++i] === "testnet" ? "testnet" : "mainnet";
     else if (a === "--plaintext") flags.plaintext = true;
     else if (a === "--force") flags.force = true;
@@ -131,6 +134,7 @@ export async function initCommand(argv: string[]): Promise<void> {
     let registered = false;
     if (net.pumpApiBase) {
       try {
+        const avatarUrl = flags.avatar ? await resolveAvatar(pump, flags.avatar) : undefined;
         const agentAddress = account.address.toLowerCase();
         const { nonce, message } = await pump.registerNonce({
           agentAddress,
@@ -142,11 +146,13 @@ export async function initCommand(argv: string[]): Promise<void> {
           agentAddress,
           name,
           client: detectClient(),
+          avatarUrl,
           nonce,
           signature,
         });
         registered = true;
         out(`✓ registered on Trippy as "${name}" — trades from this wallet get the AGENT badge`);
+        if (avatarUrl) out(`✓ profile image set      ${avatarUrl}`);
       } catch (e) {
         out(`! registration failed (${e instanceof Error ? e.message : e})`);
         out("  trading works anyway — retry later with `trippy-mcp register`");

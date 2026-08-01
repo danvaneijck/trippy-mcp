@@ -7,6 +7,7 @@ import { createInterface } from "node:readline/promises";
 
 import { loadConfig, homeDir } from "../config.js";
 import { loadKeystore, unlockKeystore } from "../keystore.js";
+import { resolveAvatar } from "../metadata.js";
 import { buildRuntime } from "../runtime.js";
 import { walletStatus, sweep } from "../wallet.js";
 import { initCommand } from "./init.js";
@@ -14,16 +15,24 @@ import { initCommand } from "./init.js";
 const HELP = `trippy-mcp — Injective trading MCP (SHROOM Pad + Choice)
 
 Usage:
-  trippy-mcp init [--name <n>] [--owner <0x|inj1>] [--network mainnet|testnet] [--plaintext] [--force]
+  trippy-mcp init [--name <n>] [--owner <0x|inj1>] [--avatar <url|image-path>]
+                  [--network mainnet|testnet] [--plaintext] [--force]
   trippy-mcp serve                 start the stdio MCP server (what your agent runs)
   trippy-mcp status                wallet balances, policy budget, registration
-  trippy-mcp register              (re)register the agent name with the Trippy registry
+  trippy-mcp register [--avatar <url|image-path>]
+                                   (re)register the agent name / set its profile image
+                                   (local files upload to IPFS; omitting --avatar keeps the current one)
   trippy-mcp claim-code            mint a code to link this agent to your Terminal profile
   trippy-mcp sweep <asset> <amt>   send funds to the owner wallet (asset: INJ|USDC|SAI|0x…, amt or "all")
   trippy-mcp export-key --yes-i-understand   print the raw private key (DANGER)
 
 Docs & source: https://github.com/danvaneijck/trippy-mcp
 `;
+
+function flagValue(argv: string[], flag: string): string | undefined {
+  const i = argv.indexOf(flag);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
 
 async function withPassphrase<T>(fn: (passphrase?: string) => T): Promise<T> {
   // CLI convenience: prompt when the keystore is encrypted and no env is set.
@@ -62,16 +71,19 @@ export async function runCli(argv: string[]): Promise<void> {
     }
 
     case "register": {
+      const avatarRef = flagValue(rest, "--avatar");
       const rt = await withPassphrase((p) => buildRuntime(p));
+      const avatarUrl = avatarRef ? await resolveAvatar(rt.pump, avatarRef) : undefined;
       const agentAddress = rt.signer.address.toLowerCase();
       const { nonce, message } = await rt.pump.registerNonce({
         agentAddress,
         name: rt.cfg.agentName,
       });
       const signature = await rt.signer.account.signMessage({ message });
-      await rt.pump.register({ agentAddress, name: rt.cfg.agentName, nonce, signature });
-      rt.audit.append("agent:registered", { agentAddress, name: rt.cfg.agentName });
+      await rt.pump.register({ agentAddress, name: rt.cfg.agentName, avatarUrl, nonce, signature });
+      rt.audit.append("agent:registered", { agentAddress, name: rt.cfg.agentName, avatarUrl });
       out(`registered as "${rt.cfg.agentName}" (${agentAddress})`);
+      if (avatarUrl) out(`avatar set: ${avatarUrl}`);
       return;
     }
 
