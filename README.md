@@ -12,12 +12,22 @@ Let your coding agent trade on Injective. `trippy-mcp` is a stdio [MCP](https://
 ## Quickstart
 
 ```bash
-npx trippy-mcp init      # generate the agent wallet, pick a name, register
-# fund the printed address with a small INJ budget, then connect a client:
-claude mcp add trippy -e TRIPPY_MCP_PASSPHRASE=... -- npx -y trippy-mcp serve
+npx trippy-mcp init      # generate the agent wallet, pick a name, register,
+                         # and wire up every coding agent found on this machine
+# then fund the printed address with a small INJ budget
 ```
 
 Then just talk to your agent: *"what's trending on shroom pad? quote a 0.5 INJ buy on the top one"* — or *"launch a token called ... with this logo"*.
+
+`init` writes the MCP entry for you. To add more clients later, or to wire up a repo:
+
+```bash
+trippy-mcp connect --client claude,codex,cursor,windsurf   # or --client all
+trippy-mcp connect --scope project                         # writes ./.mcp.json
+trippy-mcp connect --print                                 # just show the snippets
+```
+
+Writes are merge-then-rename with a `.trippy-bak` copy kept behind, so nothing else in `~/.claude.json` (or your Codex TOML, comments and all) is disturbed. The keystore passphrase is only ever embedded in **user-scope** files, chmod `0600` — project config gets committed to git, so it is left out with a note.
 
 ## Security model
 
@@ -46,6 +56,31 @@ Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit lo
 | `portfolio` | every holding valued in USD (quote-rate feed / last curve trade / Choice stats) |
 | `agent_info` | identity + how to claim the agent to your Terminal profile |
 
+`buy`/`sell`/`quote`/`portfolio`/`sweep` state their scope in their descriptions, so a model with the Injective MCP also connected picks the right server (and the right wallet) — see [below](#alongside-the-injective-ai-sdk).
+
+Tool names are bare verbs. Claude Code namespaces them for you (`mcp__trippy__buy`); in harnesses that show a flat list, set `TRIPPY_MCP_TOOL_PREFIX=trippy` in the server env to register `trippy_buy`, `trippy_sell` and so on.
+
+## Alongside the Injective AI SDK
+
+[`@injectivelabs/ainj`](https://github.com/InjectiveLabs/ainj) ships its own MCP server, and the two are meant to be run together — nothing collides by name and the split is clean:
+
+| Concern | trippy-mcp | Injective MCP (`ainj mcp main`) |
+|---|---|---|
+| Owns | spot: bonding curves, aggregator swaps, launches | perps, subaccounts, bridges, transfers, authz, chain queries |
+| Trade | `buy` / `sell` / `quote` | `trade_open` / `trade_close` / `trade_limit_*` |
+| Balances | `portfolio`, `wallet_status` | `account_balances`, `account_positions` |
+| Token data | `token_info` (market + curve state) | `token_metadata` (on-chain denom metadata) |
+
+**They sign for different wallets.** The Injective MCP's `wallet_generate` / `wallet_import` write to `~/.injective-agent/keys/`; those addresses cannot trade here. When that keystore is present, `wallet_status` and `agent_info` report it under `otherAgentWallets` so the model says so out loud instead of reporting a confusing zero.
+
+Keep it that way. The intended pairing is a funding loop — fund this agent from your own wallet (the Injective MCP's `transfer_send` works fine), `sweep` profits back — **not** a shared key. That server signs with no spend policy and takes the keystore password as a tool argument, so importing this agent's key into it would void the per-tx cap, the daily budget and the fixed sweep destination in one move.
+
+There is a [skill](./skills/injective-memecoin-trading/SKILL.md) that teaches an agent all of the above:
+
+```bash
+npx skills add danvaneijck/trippy-mcp --skill injective-memecoin-trading
+```
+
 ## Agent identity
 
 `init` registers your agent's name with the Trippy registry (signed by the agent key — proof of key control, nothing custodial). From then on its trades show an **AGENT** badge on Trippy Terminal. To attach it to your profile ("operated by you"), run `trippy-mcp claim-code` and enter the code in **Terminal → Settings → Agents** with your main wallet.
@@ -55,8 +90,12 @@ Give the agent a profile image with `--avatar` (at `init` or any later `register
 ## CLI
 
 ```
-trippy-mcp init          create wallet + identity (interactive; --plaintext, --network testnet, --avatar <url|path>)
+trippy-mcp init          create wallet + identity, then connect detected clients
+                         (interactive; --plaintext, --network testnet, --avatar <url|path>, --no-connect)
 trippy-mcp serve         run the MCP server (this is what your agent client launches)
+trippy-mcp connect       write the MCP entry into your coding agent's config
+                         (--client claude|codex|cursor|windsurf|all, --scope user|project,
+                          --name <server-name>, --no-passphrase, --print)
 trippy-mcp status        balances (bank-authoritative), policy budget, registration
 trippy-mcp register      re-register / rename; --avatar <url|path> sets the profile image
 trippy-mcp claim-code    mint a profile-link code

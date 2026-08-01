@@ -24,6 +24,8 @@ import {
   saveKeystore,
 } from "../keystore.js";
 import { resolveAvatar } from "../metadata.js";
+import { report } from "./connect.js";
+import { connect, detectClients } from "./harness.js";
 import { clientSnippets, fundingInstructions } from "./snippets.js";
 
 interface InitFlags {
@@ -33,10 +35,16 @@ interface InitFlags {
   network: NetworkName;
   plaintext: boolean;
   force: boolean;
+  connect: boolean;
 }
 
 function parseFlags(argv: string[]): InitFlags {
-  const flags: InitFlags = { network: "mainnet", plaintext: false, force: false };
+  const flags: InitFlags = {
+    network: "mainnet",
+    plaintext: false,
+    force: false,
+    connect: true,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--name") flags.name = argv[++i];
@@ -45,8 +53,36 @@ function parseFlags(argv: string[]): InitFlags {
     else if (a === "--network") flags.network = argv[++i] === "testnet" ? "testnet" : "mainnet";
     else if (a === "--plaintext") flags.plaintext = true;
     else if (a === "--force") flags.force = true;
+    else if (a === "--no-connect") flags.connect = false;
   }
   return flags;
+}
+
+/**
+ * Wire the detected coding agents up directly. We hold the passphrase here, so
+ * this is the one moment we can write a complete, working entry without asking
+ * the user to re-supply it. Falls back to printable snippets on any trouble —
+ * a failed config write must never look like a failed init.
+ */
+function connectClients(
+  opts: { encrypted: boolean; passphrase: string },
+  out: (s: string) => void,
+): void {
+  const clients = detectClients();
+  if (clients.length === 0) {
+    out(clientSnippets({ encrypted: opts.encrypted }));
+    return;
+  }
+  const env =
+    opts.encrypted && opts.passphrase ? { TRIPPY_MCP_PASSPHRASE: opts.passphrase } : undefined;
+  try {
+    const results = connect({ clients, scope: "user", serverName: "trippy", env });
+    out("");
+    report(results, { serverName: "trippy" }, out);
+  } catch (e) {
+    out(`! could not write the client config (${e instanceof Error ? e.message : e})`);
+    out(clientSnippets({ encrypted: opts.encrypted }));
+  }
 }
 
 export async function initCommand(argv: string[]): Promise<void> {
@@ -160,7 +196,8 @@ export async function initCommand(argv: string[]): Promise<void> {
     }
 
     out(fundingInstructions(account.address, injAddress));
-    out(clientSnippets({ encrypted }));
+    if (flags.connect) connectClients({ encrypted, passphrase }, out);
+    else out(clientSnippets({ encrypted }));
     if (registered) {
       out("Optional: link this agent to your profile — run `trippy-mcp claim-code` and");
       out("enter the code in Trippy Terminal → Settings → Agents with your main wallet.");

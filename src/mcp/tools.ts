@@ -14,6 +14,7 @@ import { formatUnits } from "viem";
 import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
 import { quoteAssetBySlot } from "../chain/networks.js";
 import { ToolError } from "../errors.js";
+import { detectAinj } from "../interop.js";
 import { decodeMetadataUri, resolveImage, type LaunchMetadata } from "../metadata.js";
 import { CURVE_STATES, resolveToken, type ResolvedTarget } from "../router.js";
 import type { Runtime } from "../runtime.js";
@@ -457,7 +458,9 @@ export async function claimFees(rt: Runtime, args: { launchIds?: string[] }): Pr
 }
 
 export async function walletStatusTool(rt: Runtime): Promise<unknown> {
-  return walletStatus(rt);
+  const status = await walletStatus(rt);
+  const other = detectAinj({ injAddress: rt.injAddress });
+  return other ? { ...status, otherAgentWallets: { ainj: other } } : status;
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +645,7 @@ export async function agentInfo(rt: Runtime): Promise<unknown> {
   } catch {
     // registry unreachable
   }
+  const other = detectAinj({ injAddress: rt.injAddress });
   return {
     agentName: rt.cfg.agentName,
     evmAddress: rt.signer.address,
@@ -651,6 +655,7 @@ export async function agentInfo(rt: Runtime): Promise<unknown> {
     ownerAddress: agent?.ownerAddress ?? null,
     howToClaim:
       "the human operator runs `trippy-mcp claim-code` on this machine, then enters the code in Trippy Terminal → Settings → Agents (or opens the printed link) and signs with their main wallet — that links the agent to their profile",
+    ...(other ? { otherAgentWallets: { ainj: other } } : {}),
   };
 }
 

@@ -10,14 +10,19 @@ import { loadKeystore, unlockKeystore } from "../keystore.js";
 import { resolveAvatar } from "../metadata.js";
 import { buildRuntime } from "../runtime.js";
 import { walletStatus, sweep } from "../wallet.js";
+import { connectCommand } from "./connect.js";
 import { initCommand } from "./init.js";
 
 const HELP = `trippy-mcp — Injective trading MCP (SHROOM Pad + Choice)
 
 Usage:
   trippy-mcp init [--name <n>] [--owner <0x|inj1>] [--avatar <url|image-path>]
-                  [--network mainnet|testnet] [--plaintext] [--force]
+                  [--network mainnet|testnet] [--plaintext] [--force] [--no-connect]
   trippy-mcp serve                 start the stdio MCP server (what your agent runs)
+  trippy-mcp connect [--client claude|codex|cursor|windsurf|all] [--scope user|project]
+                     [--name <server-name>] [--no-passphrase] [--print]
+                                   write the MCP entry into your coding agent's config
+                                   (auto-detects installed agents when --client is omitted)
   trippy-mcp status                wallet balances, policy budget, registration
   trippy-mcp register [--avatar <url|image-path>]
                                    (re)register the agent name / set its profile image
@@ -61,6 +66,10 @@ export async function runCli(argv: string[]): Promise<void> {
   switch (cmd) {
     case "init":
       await initCommand(rest);
+      return;
+
+    case "connect":
+      await connectCommand(rest);
       return;
 
     case "status": {

@@ -9,7 +9,7 @@ export function clientSnippets(opts: { encrypted: boolean }): string {
     ? `,\n      "env": { "TRIPPY_MCP_PASSPHRASE": "<your-passphrase>" }`
     : "";
   return `
-Connect your coding agent (pick one):
+Connect your coding agent — \`trippy-mcp connect\` writes these for you, or paste one:
 
   Claude Code:
     claude mcp add trippy${env} -- npx -y trippy-mcp serve
