@@ -114,7 +114,7 @@ export async function tokenInfo(rt: Runtime, args: { query: string }): Promise<u
         graduationProgressPct: progress,
         tokensSold: formatUnits(live.tokensSold, 18),
       },
-      terminalUrl: rt.net.terminalBase ? `${rt.net.terminalBase}/token/shroom/${target.launch.id}` : undefined,
+      terminalUrl: rt.net.terminalBase ? `${rt.net.terminalBase}/t/shroom-curve%3A${target.launch.id}` : undefined,
     };
   }
   const payload = await rt.choiceApi.token(target.tokenId);
@@ -437,7 +437,7 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
     ...created,
     ...(initialBuy !== undefined ? { initialBuy } : {}),
     ...(rt.net.terminalBase
-      ? { terminalUrl: `${rt.net.terminalBase}/token/shroom/${created.launchId}` }
+      ? { terminalUrl: `${rt.net.terminalBase}/t/shroom-curve%3A${created.launchId}` }
       : {}),
   };
 }
