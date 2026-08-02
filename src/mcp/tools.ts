@@ -13,6 +13,7 @@ import { formatUnits } from "viem";
 
 import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
 import { quoteAssetBySlot } from "../chain/networks.js";
+import { explain as explainTopic } from "../docs/index.js";
 import { ToolError } from "../errors.js";
 import { detectAinj } from "../interop.js";
 import { decodeMetadataUri, resolveImage, type LaunchMetadata } from "../metadata.js";
@@ -21,6 +22,7 @@ import type { Runtime } from "../runtime.js";
 import { deepSanitize, sanitizeText, untrustedMeta } from "../untrusted.js";
 import { extractUsdPrice } from "../venues/choice/swap.js";
 import { LAUNCH_STATE_LABEL, LaunchState } from "../venues/shroom/abi.js";
+import type { LaunchView } from "../venues/shroom/launchpad.js";
 import { sweep as walletSweep, walletStatus } from "../wallet.js";
 import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
 
@@ -115,11 +117,82 @@ export async function tokenInfo(rt: Runtime, args: { query: string }): Promise<u
         graduationProgressPct: progress,
         tokensSold: formatUnits(live.tokensSold, 18),
       },
+      terms: await launchTerms(rt, live),
       terminalUrl: rt.net.terminalBase ? `${rt.net.terminalBase}/t/shroom-curve%3A${target.launch.id}` : undefined,
     };
   }
   const payload = await rt.choiceApi.token(target.tokenId);
   return { venue: "choice", tokenId: target.tokenId, data: deepSanitize(payload) };
+}
+
+/**
+ * This launch's OWN fee and gate terms.
+ *
+ * These belong here and not in `explain` because they are queryable state, not
+ * documentation: LaunchpadCore snapshots the quote-asset config onto a launch
+ * at createLaunch, so a launch created before a parameter changed keeps the old
+ * terms forever. `explain` answers "what would a new launch get"; this answers
+ * "what does THIS one charge me".
+ *
+ * `qualifies` is the question an agent actually has — "does holding the gate
+ * token cut my fee here?" — and it is reported for this agent's own wallet,
+ * which is the wallet that would trade. It is advisory: the authoritative
+ * answer is a `quote`, because quoteBuy/quoteSell take an account and apply the
+ * discount per-account, so a quote is already bit-exact.
+ */
+async function launchTerms(rt: Runtime, live: LaunchView): Promise<Record<string, unknown>> {
+  const now = BigInt(Math.floor(Date.now() / 1000));
+  const gated = live.gate.gateToken !== ZERO_ADDRESS && live.gate.minBalance > 0n;
+  const gateActive = gated && live.gate.windowEndsAt > now;
+
+  const terms: Record<string, unknown> = {
+    tradeFeeBps: live.tradeFeeBps,
+    creatorFeeShareBps: live.creatorFeeShareBps,
+    note: "fee terms are snapshotted at launch creation — they are this launch's own, not the current protocol defaults (see explain topic `shroom_pad_fees`)",
+  };
+
+  if (!gated) {
+    terms.gate = null;
+    return terms;
+  }
+
+  const gate: Record<string, unknown> = {
+    gateToken: live.gate.gateToken,
+    minBalance: live.gate.minBalance.toString(),
+    discountBps: live.gate.discountBps,
+    windowEndsAt: new Date(Number(live.gate.windowEndsAt) * 1000).toISOString(),
+    active: gateActive,
+    kind:
+      live.gate.discountBps === 0
+        ? "access gate — non-qualifying wallets cannot buy while the window is open"
+        : `fee discount — up to ${live.gate.discountBps / 100}% of the CREATOR's cut is waived for qualifying wallets (the platform leg is never reduced)`,
+  };
+
+  if (gateActive) {
+    try {
+      const held = await rt.shroom.erc20Balance(live.gate.gateToken, rt.signer.address);
+      gate.agentBalance = held.toString();
+      gate.qualifies = held >= live.gate.minBalance;
+    } catch {
+      // A gate token that is not a working ERC20 qualifies nobody; the contract
+      // reaches the same conclusion via a non-reverting balanceOf.
+      gate.qualifies = false;
+      gate.note = "the gate token did not answer balanceOf — no wallet qualifies";
+    }
+  }
+
+  terms.gate = gate;
+  return terms;
+}
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+// ---------------------------------------------------------------------------
+// docs
+// ---------------------------------------------------------------------------
+
+export function explain(rt: Runtime, args: { topic?: string }): Promise<Record<string, unknown>> {
+  return explainTopic(rt, args.topic);
 }
 
 export async function trending(

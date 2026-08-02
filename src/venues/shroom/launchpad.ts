@@ -32,6 +32,8 @@ export interface LaunchView {
   state: number;
   creator: Address;
   token: Address;
+  /** Per-launch sink contract — holds unsold curve supply, never a recipient. */
+  sink: Address;
   quoteAsset: number;
   pairAsset: Address;
   gate: { gateToken: Address; minBalance: bigint; windowEndsAt: bigint; discountBps: number };
@@ -42,8 +44,31 @@ export interface LaunchView {
   realPair: bigint;
   tokensSold: bigint;
   graduationPairTarget: bigint;
+  /** Snapshotted at createLaunch — NOT the current global quote-asset config. */
+  tradeFeeBps: number;
+  creatorFeeShareBps: number;
   metadataURI: string;
   bankDenom: string;
+}
+
+/**
+ * The live per-quote terms a NEW launch would get. LaunchpadCore copies this
+ * whole struct onto a launch at createLaunch, so an existing launch keeps the
+ * config it launched with — these are the terms on offer today, not the terms
+ * of any particular launch (which live on `LaunchView`).
+ */
+export interface QuoteAssetConfigView {
+  pairAsset: Address;
+  virtualPair: bigint;
+  virtualToken: bigint;
+  curveSupply: bigint;
+  graduationPairTarget: bigint;
+  graduationTokenReserve: bigint;
+  enabled: boolean;
+  bankDenom: string;
+  requiresChoiceFactoryDust: boolean;
+  tradeFeeBps: number;
+  creatorFeeShareBps: number;
 }
 
 export interface TradeResult {
@@ -91,6 +116,7 @@ export class ShroomVenue {
       state: Number(l.state),
       creator: l.creator,
       token: l.token,
+      sink: l.sink,
       quoteAsset: Number(l.quoteAsset),
       pairAsset: l.pairAsset,
       gate: {
@@ -106,9 +132,106 @@ export class ShroomVenue {
       realPair: BigInt(l.realPair),
       tokensSold: BigInt(l.tokensSold),
       graduationPairTarget: BigInt(l.graduationPairTarget),
+      tradeFeeBps: Number(l.tradeFeeBps),
+      creatorFeeShareBps: Number(l.creatorFeeShareBps),
       metadataURI: String(l.metadataURI),
       bankDenom: String(l.bankDenom),
     };
+  }
+
+  // ---- protocol parameters (live — the docs quote no baked numbers) --------
+
+  /** Creation fee in wei of INJ. Changeable by the owner without a redeploy. */
+  async denomCreationFeeInj(): Promise<bigint> {
+    return this.signer.readContract<bigint>({
+      address: this.core,
+      abi: LAUNCHPAD_ABI,
+      functionName: "denomCreationFeeInj",
+      args: [],
+    });
+  }
+
+  /**
+   * Referrer's share of the CREATOR's fee cut, in bps. Global and NOT
+   * snapshotted onto a launch, unlike everything in QuoteAssetConfig — a change
+   * here applies to every existing launch immediately.
+   */
+  async referralShareBps(): Promise<number> {
+    const v = await this.signer.readContract<number>({
+      address: this.core,
+      abi: LAUNCHPAD_ABI,
+      functionName: "referralShareBps",
+      args: [],
+    });
+    return Number(v);
+  }
+
+  /** Platform fee treasury — also the default curve-buy referrer. */
+  async treasury(): Promise<Address> {
+    return this.signer.readContract<Address>({
+      address: this.core,
+      abi: LAUNCHPAD_ABI,
+      functionName: "treasury",
+      args: [],
+    });
+  }
+
+  async getQuoteAssetConfig(slot: number): Promise<QuoteAssetConfigView> {
+    const c = await this.signer.readContract<QuoteAssetConfigView & Record<string, unknown>>({
+      address: this.core,
+      abi: LAUNCHPAD_ABI,
+      functionName: "getQuoteAssetConfig",
+      args: [slot],
+    });
+    return {
+      pairAsset: c.pairAsset,
+      virtualPair: BigInt(c.virtualPair),
+      virtualToken: BigInt(c.virtualToken),
+      curveSupply: BigInt(c.curveSupply),
+      graduationPairTarget: BigInt(c.graduationPairTarget),
+      graduationTokenReserve: BigInt(c.graduationTokenReserve),
+      enabled: Boolean(c.enabled),
+      bankDenom: String(c.bankDenom),
+      requiresChoiceFactoryDust: Boolean(c.requiresChoiceFactoryDust),
+      tradeFeeBps: Number(c.tradeFeeBps),
+      creatorFeeShareBps: Number(c.creatorFeeShareBps),
+    };
+  }
+
+  /**
+   * Decimals of a quote asset's pair token. Known slots come from the vendored
+   * registry; unknown ones (slots 4..255 can be added without a redeploy) are
+   * read off the ERC20 itself so a new quote asset explains correctly on the
+   * day it appears.
+   */
+  async quoteDecimals(slot: number, pairAsset: Address): Promise<number> {
+    const known = quoteAssetBySlot(this.net, slot);
+    if (known) return known.decimals;
+    try {
+      const d = await this.signer.readContract<number>({
+        address: pairAsset,
+        abi: ERC20_ABI,
+        functionName: "decimals",
+        args: [],
+      });
+      return Number(d);
+    } catch {
+      return 18;
+    }
+  }
+
+  /** ERC20 `symbol()`, for quote-asset slots not in the vendored registry. */
+  async erc20Symbol(token: Address): Promise<string | null> {
+    try {
+      return await this.signer.readContract<string>({
+        address: token,
+        abi: ERC20_ABI,
+        functionName: "symbol",
+        args: [],
+      });
+    } catch {
+      return null;
+    }
   }
 
   async getState(launchId: bigint): Promise<number> {

@@ -44,7 +44,8 @@ Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit lo
 
 | Tool | What it does |
 |---|---|
-| `search_tokens` / `token_info` | resolve + inspect any token (curve state, graduation progress, Choice market data) |
+| `explain` | how the protocols work — curve mechanics, quote-asset choice, every fee/discount/gate, Choice routing gotchas, the agent's own policy. Every number is read from the chain at call time, so the docs cannot go stale between releases |
+| `search_tokens` / `token_info` | resolve + inspect any token (curve state, graduation progress, this launch's own fee/gate terms, Choice market data) |
 | `trending` / `new_launches` / `recent_trades` | discovery + tape |
 | `candles` | OHLCV price history — curve launches (quote-priced + per-bucket USD rate) or Choice markets (USD-priced) |
 | `my_activity` | the agent's own history on both venues: curve trades + Choice swaps, orderbook fills, window-flow PnL |

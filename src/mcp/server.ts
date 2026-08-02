@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z, type ZodRawShape } from "zod";
 
+import { TOPICS, TOPIC_IDS, explain as explainTopic } from "../docs/index.js";
 import { toErrorPayload } from "../errors.js";
 import { buildRuntime, type Runtime } from "../runtime.js";
 import { toolPrefix } from "./naming.js";
@@ -76,9 +77,46 @@ export async function serve(): Promise<void> {
     .optional()
     .describe("max slippage in bps (clamped to the local policy ceiling)");
 
+  register(
+    server,
+    "explain",
+    "How the protocols work: SHROOM Pad curve mechanics and lifecycle, how to choose a launch quote asset, every fee/discount/gate, Choice routing and its failure modes, and how this agent's own wallet and spend policy work. Call with no `topic` for the index. Every number in the answer is read from the chain at call time, so it is never stale — read this BEFORE launching a token or debugging a failed trade.",
+    {
+      topic: z
+        .enum(TOPIC_IDS)
+        .optional()
+        .describe("topic id; omit to list the available topics"),
+    },
+    (rt2, a: { topic?: string }) => t.explain(rt2, a),
+  );
+
+  // The same content as MCP resources, for clients that surface them. The tool
+  // above is the surface that matters — most clients only let a model read a
+  // resource a human attached — but registering both costs nothing since they
+  // share the content modules.
+  for (const topic of TOPICS) {
+    server.registerResource(
+      `docs-${topic.id}`,
+      `trippy://docs/${topic.id}`,
+      { title: topic.title, description: topic.summary, mimeType: "text/markdown" },
+      async (uri) => {
+        const doc = await explainTopic(runtime(), topic.id);
+        return {
+          contents: [
+            {
+              uri: uri.href,
+              mimeType: "text/markdown",
+              text: String((doc as { content?: unknown }).content ?? ""),
+            },
+          ],
+        };
+      },
+    );
+  }
+
   register(server, "search_tokens", "Resolve a token reference across SHROOM Pad launches and Choice DEX tokens on Injective. Returns the venue it trades on plus a summary." + UNTRUSTED_NOTE, { query }, (rt2, a: { query: string }) => t.searchTokens(rt2, a));
 
-  register(server, "token_info", "Detailed token view: bonding-curve state + graduation progress for SHROOM launches, or the Choice market overview for DEX tokens. This is market state — for raw on-chain denom metadata (decimals, peggy/IBC/factory origin) the Injective SDK's `token_metadata` is the better source." + UNTRUSTED_NOTE, { query }, (rt2, a: { query: string }) => t.tokenInfo(rt2, a));
+  register(server, "token_info", "Detailed token view: bonding-curve state + graduation progress for SHROOM launches, or the Choice market overview for DEX tokens. For curve launches it also returns `terms` — THIS launch's own snapshotted trade fee, creator split and holder gate/discount, including whether this agent currently qualifies for the discount. This is market state — for raw on-chain denom metadata (decimals, peggy/IBC/factory origin) the Injective SDK's `token_metadata` is the better source." + UNTRUSTED_NOTE, { query }, (rt2, a: { query: string }) => t.tokenInfo(rt2, a));
 
   register(
     server,
@@ -236,7 +274,8 @@ export async function serve(): Promise<void> {
             type: "text" as const,
             text: [
               "Workflow for the trippy MCP tools:",
-              "1. Discover with `trending`/`new_launches`/`search_tokens`; inspect with `token_info` (curve state, graduation progress), `candles` (price history/momentum) and `recent_trades`.",
+              "0. First stop when you are unsure how something works: `explain`. Topics cover SHROOM Pad mechanics, quote-asset choice, every fee/discount/gate, Choice routing failure modes, and this agent's own wallet and spend policy. Its numbers are read from the chain at call time, so prefer it over assumptions about fees or graduation targets.",
+              "1. Discover with `trending`/`new_launches`/`search_tokens`; inspect with `token_info` (curve state, graduation progress, and this launch's own fee/gate terms), `candles` (price history/momentum) and `recent_trades`.",
               "2. Always `quote` before `buy`/`sell`. Quotes are executed on-chain (curve) or via the Choice SOR — the same math the trade uses.",
               "3. Buys/sells auto-route: active SHROOM curves trade on the launchpad; graduated tokens and everything else swap through the Choice aggregator against INJ by default.",
               "4. `create_token` launches on the bonding curve (creation fee ~0.2 INJ); it graduates to a Choice CLMM pool when the curve fills.",

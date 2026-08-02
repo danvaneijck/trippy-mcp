@@ -34,6 +34,17 @@ export const LAUNCHPAD_ABI = parseAbi([
   "function referralFeesOwed(address referrer, address pairAsset) view returns (uint256)",
   "function refundsOwed(address account) view returns (uint256)",
 
+  // Protocol parameters. Everything the `explain` docs quote as a number is
+  // read through these at call time — the prose ships no baked figures, because
+  // they move without a redeploy (the creation fee was cut 1 → 0.2 INJ via
+  // setDenomCreationFeeInj after mainnet launch, which would have made any
+  // hard-coded value in an npm package a lie until the next release).
+  "struct QuoteAssetConfig { address pairAsset; uint256 virtualPair; uint256 virtualToken; uint256 curveSupply; uint256 graduationPairTarget; uint256 graduationTokenReserve; bool enabled; string bankDenom; bool requiresChoiceFactoryDust; uint16 tradeFeeBps; uint16 creatorFeeShareBps; }",
+  "function getQuoteAssetConfig(uint8 q) view returns (QuoteAssetConfig)",
+  "function referralShareBps() view returns (uint16)",
+  "function treasury() view returns (address)",
+  "function getLaunchSink(uint256 launchId) view returns (address)",
+
   // Writes
   "function createLaunch(LaunchConfig cfg) payable returns (uint256)",
   "function buy(uint256 launchId, uint256 pairIn, uint256 minTokenOut, address referrer, uint256 deadline) returns (uint256)",
