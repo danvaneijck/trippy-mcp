@@ -42,6 +42,8 @@ export interface StoredPlan {
   totalUsd: number | null;
   criteria: string;
   snapshotAt: string;
+  /** Set only for at-height sources (gov voters) — everything else is live. */
+  snapshotHeight?: number;
   /**
    * Set immediately BEFORE the create tx is broadcast, and never cleared.
    *

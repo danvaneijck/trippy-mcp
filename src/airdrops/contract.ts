@@ -7,7 +7,7 @@
  * transport this package did not already have.
  */
 
-import { ToolError } from "../errors.js";
+import { smartQuery as wasmSmartQuery } from "./wasm.js";
 
 export interface ContractConfig {
   owner: string;
@@ -107,22 +107,8 @@ export function createOneShotDropMsg(p: {
 
 // ---- reads ----------------------------------------------------------------
 
-async function smartQuery<T>(lcdUrl: string, contract: string, query: object): Promise<T> {
-  const encoded = Buffer.from(JSON.stringify(query)).toString("base64");
-  const url = `${lcdUrl.replace(/\/$/, "")}/cosmwasm/wasm/v1/contract/${contract}/smart/${encodeURIComponent(encoded)}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new ToolError(
-      "claim_drops_query_failed",
-      `claim-drops query failed (HTTP ${res.status})`,
-    );
-  }
-  const body = (await res.json()) as { data?: T };
-  if (body.data === undefined) {
-    throw new ToolError("claim_drops_query_failed", "claim-drops query returned no data");
-  }
-  return body.data;
-}
+const smartQuery = <T>(lcdUrl: string, contract: string, query: object): Promise<T> =>
+  wasmSmartQuery<T>(lcdUrl, contract, query, { errorCode: "claim_drops_query_failed" });
 
 export const queryContractConfig = (lcdUrl: string, contract: string): Promise<ContractConfig> =>
   smartQuery<ContractConfig>(lcdUrl, contract, { config: {} });

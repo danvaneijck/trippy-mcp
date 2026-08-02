@@ -17,6 +17,7 @@ import {
   status as airdropCampaignStatus,
   type PreviewArgs,
 } from "../airdrops/campaign.js";
+import { manage as manageAirdrop, type ManageArgs } from "../airdrops/manage.js";
 import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
 import { quoteAssetBySlot } from "../chain/networks.js";
 import { explain as explainTopic } from "../docs/index.js";
@@ -221,6 +222,10 @@ export function airdropStatus(
   args: { campaignId?: number; planId?: string },
 ): Promise<unknown> {
   return airdropCampaignStatus(rt, args);
+}
+
+export function airdropManage(rt: Runtime, args: ManageArgs): Promise<unknown> {
+  return manageAirdrop(rt, args);
 }
 
 export async function trending(

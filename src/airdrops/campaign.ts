@@ -28,6 +28,7 @@ import {
   applyMinAmount,
   applyMinWeight,
   applyTopN,
+  applyVoteOptions,
   type DistMode,
   type SourceRow,
 } from "./allocate.js";
@@ -44,12 +45,18 @@ import {
 import { publishLeaves, recordCampaign } from "./hasura.js";
 import { buildTree } from "./merkle.js";
 import { loadPlan, planId as makePlanId, savePlan, updatePlan, type StoredPlan } from "./plan.js";
-import { loadSource, type Source } from "./sources.js";
+import { loadSource, normalizeVoteOption, type Source } from "./sources.js";
 import { buildLeavesFromRows, fromBaseUnits, isValidAmount, toBaseUnits } from "./units.js";
 
 export interface PreviewArgs {
   source: Source;
-  filters?: { topN?: number; minWeight?: number; minAmount?: string; exclude?: string[] };
+  filters?: {
+    topN?: number;
+    minWeight?: number;
+    minAmount?: string;
+    exclude?: string[];
+    voteOptions?: string[];
+  };
   allocation: { mode?: DistMode; total?: string; asset: string };
   delivery?: { title?: string; description?: string; expiryDays?: number; perpetual?: boolean };
 }
@@ -65,11 +72,19 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
 
   const decimals = await dropDecimals(rt, asset);
   const loaded = await loadSource(rt, args.source);
-  const warnings: string[] = [];
+  // Source-level caveats (an in-progress vote, tokens with no resolvable owner,
+  // a gov snapshot's weights being vote weight rather than stake) surface in
+  // the same list as everything else the preview wants read before executing.
+  const warnings: string[] = [...(loaded.warnings ?? [])];
 
   // ---- rows -> per-address whole-token amounts ----------------------------
   let amountRows: { address: string; amount: string }[];
-  let mode: DistMode = args.allocation.mode ?? "proportionate";
+  // Proportionate is the right default for a holdings snapshot. A gov snapshot
+  // has no stake weight to be proportionate TO — every voter's weight is the
+  // weight of their vote, which is ~1 — so it defaults the other way rather
+  // than producing an equal split under a name that implies otherwise.
+  let mode: DistMode =
+    args.allocation.mode ?? (args.source.kind === "gov_voters" ? "fair" : "proportionate");
   let allocatorDroppedZero = 0;
   let allocatorMergedRows = 0;
 
@@ -101,6 +116,16 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
     let rows: SourceRow[] = loaded.rows;
     const excludeSet = new Set((args.filters?.exclude ?? []).map((a) => a.trim()));
     if (excludeSet.size > 0) rows = rows.filter((r) => !excludeSet.has(r.address));
+    if (args.filters?.voteOptions && args.filters.voteOptions.length > 0) {
+      const wanted = args.filters.voteOptions.map(normalizeVoteOption);
+      const before = rows.length;
+      rows = applyVoteOptions(rows, wanted);
+      if (rows.length === before && !loaded.rows.some((r) => r.voteOption !== undefined)) {
+        warnings.push(
+          `filters.voteOptions was ignored — ${args.source.kind} rows carry no vote, so there was nothing to filter on`,
+        );
+      }
+    }
     if (args.filters?.minWeight) rows = applyMinWeight(rows, args.filters.minWeight);
     if (args.filters?.topN) rows = applyTopN(rows, args.filters.topN);
     if (args.filters?.minAmount) {
@@ -249,6 +274,7 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
     totalUsd,
     criteria,
     snapshotAt: loaded.snapshotAt,
+    ...(loaded.snapshotHeight !== undefined ? { snapshotHeight: loaded.snapshotHeight } : {}),
   };
   savePlan(rt.home, plan);
 
@@ -262,6 +288,10 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
     mode,
     criteria,
     snapshotAt: loaded.snapshotAt,
+    ...(loaded.snapshotHeight !== undefined
+      ? { snapshotHeight: loaded.snapshotHeight, snapshotIsAtHeight: true }
+      : {}),
+    weightUnit: loaded.weightUnit,
     topRecipients: [...tree.leaves]
       .sort((a, z) => {
         const d = BigInt(z.amount) - BigInt(a.amount);

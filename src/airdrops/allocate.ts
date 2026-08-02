@@ -24,6 +24,13 @@ export interface SourceRow {
   address: string;
   /** Tokens held, NFTs owned, INJ committed — source-dependent. */
   weight: number;
+  /**
+   * Gov sources only: the option this wallet voted for, so a drop can go to
+   * (say) only the wallets that voted yes. Carried on the row rather than in a
+   * side map because filters run before allocation and the allocator's dedupe
+   * discards everything it does not need.
+   */
+  voteOption?: string;
 }
 
 export type DistMode = "fair" | "proportionate";
@@ -179,6 +186,19 @@ export function applyTopN(rows: SourceRow[], n: number): SourceRow[] {
 export function applyMinWeight(rows: SourceRow[], minWeight: number): SourceRow[] {
   if (!Number.isFinite(minWeight) || minWeight <= 0) return rows;
   return rows.filter((r) => (Number(r.weight) || 0) >= minWeight);
+}
+
+/**
+ * Keep only the wallets that voted one of `options` (gov sources).
+ *
+ * Rows with no `voteOption` at all are kept: the filter is meaningless on a
+ * token snapshot, and dropping every row because the source does not carry the
+ * field would turn a nonsensical filter into an empty drop rather than a no-op.
+ */
+export function applyVoteOptions(rows: SourceRow[], options: string[]): SourceRow[] {
+  const wanted = new Set(options);
+  if (wanted.size === 0) return rows;
+  return rows.filter((r) => r.voteOption === undefined || wanted.has(r.voteOption));
 }
 
 /**

@@ -44,7 +44,8 @@ export const PolicySchema = z.object({
    * everywhere else — so it gets its own ceiling on top of the shared budget
    * rather than riding on perTxCapUsd. Set to 0 to switch the airdrop tools off
    * entirely (they are not registered at all, so an injected prompt cannot even
-   * see them).
+   * see them) — including `airdrop_manage`, so wind down any live campaign
+   * before turning them off or the clawback has to be done from the site.
    *
    * It does NOT get its own budget: a campaign also consumes `dailyBudgetUsd`
    * through the same ledger as every trade, so the 24h ceiling is the real
