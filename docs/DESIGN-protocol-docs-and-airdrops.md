@@ -1,6 +1,6 @@
 # Design: protocol knowledge + airdrop tools for trippy-mcp
 
-Status: **PR 1 and PR 2 BUILT** (2026-08-02, branch `feat/explain-and-airdrops`). PRs 3 and 4 remain designed-not-built. Decisions taken during the build are recorded in "Decisions" at the bottom, which supersedes the original "Open questions" list.
+Status: **ALL FOUR PRs BUILT** (2026-08-02, branch `feat/explain-and-airdrops`, unpushed). Nothing has been broadcast on any network — the whole rail is unit-tested only. Decisions taken during the build are recorded in "Decisions" at the bottom, which supersedes the original "Open questions" list.
 Scope: (1) endpoints that teach agents how Shroom Pad and Choice work (quote choice, fees, discounts, mechanics); (2) airdrop endpoints replicating the trippytools criteria types; (3) hooks for future work (liquidity positions, streaming rewards).
 
 ---
@@ -60,6 +60,8 @@ A launch's *own* gate/discount/fee snapshot is queryable state, not documentatio
 | Failure modes | leaves-publish ordering, root squat (both already solved in trippytools) | partial runs, per-recipient failures |
 | Agent risk | bounded: one tx, deterministic total | unbounded tail of retries |
 
+*(Built: claim drop in PR 2, push in PR 4. The push rail's ceiling ended up at 1000 recipients for a policy reason rather than a gas one — see decision 10.)*
+
 **Phase 1 ships the claim-drop rail only.** One tx regardless of size is the right shape for an autonomous agent, the contract + backend (Hasura leaves at `api.trippyinj.xyz/claim-drops/leaves/<root>.json`, anon insert-only) are live and battle-tested, and the claim page already exists. Push comes in phase 2 for small lists (≤1 chunk / 1000 recipients initially) where "recipients shouldn't have to claim" matters.
 
 Cosmos-side signing is not new ground — `ChoiceVenue.swap` already signs MsgExecuteContract via sdk-ts with the same key; `create_campaign` + the SHROOM fee transfers are the same message family.
@@ -92,7 +94,7 @@ airdrop_status { planId? | campaignId? }
 - **Execute only accepts a planId** — the agent can never go straight from "criteria" to "broadcast"; the exact recipient set that will be funded is inspectable between the two calls. Plans expire (1h) so stale snapshots can't fire.
 - The trippytools ordering discipline is kept verbatim: leaves → Hasura **before** anything else (with the root-squat re-verify on conflict), then fee, then the single create+fund+auto-freeze tx, then campaign row insert + Telegram. A failed leaves publish hard-stops before any value moves.
 - Default **30-day expiry** → clawback stays possible. Perpetual (frozen forever, un-clawback-able) only via an explicit `perpetual: true`.
-- v1 is one-shot campaigns only on Dan's instance. Streaming campaigns / manage tools (freeze early, extend expiry, clawback after expiry) are a later `airdrop_manage` tool — smaller surface for the risky first release. Clawback is the one we'll want soonest.
+- v1 is one-shot campaigns only on Dan's instance. Streaming campaigns / manage tools (freeze early, extend expiry, clawback after expiry) are a later `airdrop_manage` tool — smaller surface for the risky first release. Clawback is the one we'll want soonest. *(Built in PR 3: `clawback` / `set_expiry` / `freeze` / `pause`, plus a no-action mode that returns which of them the contract will accept and why not.)*
 
 ### 2.3 Criteria: the six trippytools sources, phased
 
@@ -103,10 +105,10 @@ airdrop_status { planId? | campaignId? }
 | `csv` | rows `[{address, amount}]` inline or file path | none (fixed amounts, bypasses allocator) | 1 — **gated, see 2.5** |
 | `token_holders` | bank denom OR CW20 address | LCD `denom_owners` paging; CW20 `fetchContractAccountsBalance` + bank-wrapped half merged (÷10^decimals) | 1 |
 | `launch_holders` | launchId or token query | the launch token's bank denom via sink `token_denom` → `denom_owners` (bank+ERC20 are one balance, so curve-phase holders included). Prefer a pump-api holders endpoint if present | 1 — the agent-native case: "reward my token's holders" |
-| `nft_holders` | collection address (+is404) | `all_tokens` paging + owner batch resolve; CW404 raw-state scan | 2 |
+| `nft_holders` | collection address (+is404) | `all_tokens` paging + owner batch resolve; CW404 raw-state scan | 2 — built, capped at 20k supply |
 | `gov_voters` | proposal id (+height or auto-find) | LCD votes with `x-cosmos-block-height` (the only true at-height snapshot) + the binary-search block finder | 2 |
 | `mito_vault` | vault address, stake\|non-stake | IndexerGrpcMitoApi `fetchLPHolders` | 3 |
-| `buyback_round` | round, expectedTotalInj | raw contract-state paging with the hand-built key prefix | 3 |
+| `buyback_round` | round (`expectedTotalInj` is read from the round, not asked for) | raw contract-state paging with the hand-built key prefix | 3 |
 
 All sources are public-endpoint reads — they port into `src/airdrops/sources/` with no backend work. Everything except gov is live-at-query (snapshotAt recorded in the plan and campaign meta).
 
@@ -152,8 +154,10 @@ Mentioned as future scope; the docs/airdrop design leaves room:
 |---|---|---|
 | 1 | `explain` tool + resources + live param hydration; `token_info` gate/discount fields; `trippy_usage` prompt update | none — read-only |
 | 2 | Claim-drop rail: `src/airdrops/` (sources csv+token+launch, allocateExact+merkle w/ golden vectors, plan cache), 3 tools, policy knob, SHROOM fee, Hasura publish + squat guard | new signing path — full testnet e2e against instance `inj1f2ht…` (campaigns cost ~0.22M gas), then one small real mainnet drop |
-| 3 | Sources: nft, gov (+block finder); `airdrop_manage` (clawback/extend) | low |
+| 3 | Sources: nft, gov (+block finder); `airdrop_manage` (clawback/extend/freeze/pause) | low |
 | 4 | Push rail (≤1000 recipients, checkpoint+bisection in `~/.trippy-mcp`), mito + buyback sources, history logging | medium |
+
+All four are built. PR 4 turned out to be the risky one, not for the reason the table guessed: the checkpoint is straightforward, and the hard part is that a broadcast which throws has not told you whether it happened.
 
 Each PR follows the house pattern: impl in `tools.ts` (pure pieces exported for vitest), registration in `server.ts`, ToolError envelopes, CI typecheck/test/pack-gate.
 
@@ -175,6 +179,25 @@ Each PR follows the house pattern: impl in `tools.ts` (pure pieces exported for 
 - **`allowUnpricedSpend` does not extend to airdrops.** It is a trading convenience for illiquid tokens; an uncappable outbound transfer is refused outright.
 - Cosmos signing went into a shared `CosmosSigner` (policy enforced inside it, plus a check that the built messages target the contract the policy check was made against). `ChoiceVenue` still has its own broadcast path and was left alone.
 
+## Decisions (PRs 3 and 4, 2026-08-02)
+
+7. **`airdrop_manage` actions are all `kind: "claim"`, not `kind: "airdrop"`.** Three of the four move nothing. Clawback moves the campaign's remainder TOWARD this wallet along a path the contract fixes and no argument can redirect, so capping it under `airdropCapUsd` would mean a wallet that had spent its budget could not recover its own expired funds. The allowlist and kill switch still apply.
+8. **`airdrop_manage` is registered with the rest of the airdrop tools**, so `airdropCapUsd: 0` also removes clawback. Noted at the config field: wind campaigns down before turning airdrops off, or do it from the site.
+9. **Gov snapshots default to `fair`.** The weight available is the weight of the VOTE (~1 per wallet), not stake — nothing here reads delegations — so `proportionate` over a gov source is an equal split with extra steps. It defaults the other way and warns if asked for explicitly.
+10. **Push is capped at 1000 recipients AND 1000 per transaction — the same number, for a policy reason rather than a gas one.** `PolicyEngine.enforce` runs once per signed transaction, so a campaign split across two chunks would pass twice `airdropCapUsd` as two legal halves. One transaction per campaign is what makes the per-campaign cap true. Raising the ceiling above one chunk requires revisiting the cap first.
+11. **A push plan is re-executable; a claim plan is not.** The single-use mark exists to stop a second campaign being funded for the same list. For push it is the opposite — re-running the same planId IS the resume — so push skips the mark and the TTL, but only once the checkpoint shows progress. A push plan with nothing paid is just an un-executed plan and its snapshot goes stale like any other.
+
+### Built differently from the design (PRs 3 and 4)
+
+- **The signer simulates as a separate step on the push path.** A rejected simulation and a lost broadcast are indistinguishable from outside — no sequence consumed, no balance moved — but the first must be bisected at once and the second must never be resent before it is resolved. The rejected simulation is the COMMON case (a bank-blocked recipient is refused during simulation), so collapsing them would mean one bad address halting a whole drop rather than being routed around. `bankMultiSend` reports `simulate_rejected` distinctly for that reason.
+- **"Did it land" is answered by the account SEQUENCE plus a probe recipient's balance**, persisted to a pending-attempt file written before every broadcast. A transaction is valid at exactly one sequence, so a sequence that has moved past it proves it can never be included; the probe's balance then says which way it went. Unresolvable means the run STOPS with the attempt saved, not that it resends.
+- **CW404 holders come out of raw contract state with a derived `0x00 <len> "balance"` prefix**, so the scan starts at the balance map instead of the contract's first key. The site needs a hand-collected table of per-contract start keys for the same effect; deriving it works for every CW404.
+- **The block finder brackets directionally from a block-interval seed**, not `[1, tip]` — a plain bisection would open by asking a pruned public LCD for a height it discarded years ago.
+- **`buyback_round` reads the round's own `total_deposit`** rather than taking `expectedTotalInj` from the caller, and uses it to stop the scan as soon as every committed INJ is accounted for.
+- **Push history rows are per RUN, not cumulative**, so a drop finished across two invocations produces two rows that partition the recipients instead of two that double-count them.
+- `airdrop_manage` with no `action` returns the availability table instead of doing anything — the rules are a local restatement of the contract's, so "what can I do" costs nothing.
+- Valuation/decimals/balance helpers moved to `airdrops/pricing.ts` so both rails share them without an import cycle.
+
 ### Still not built
 
-PR 3 (nft/gov sources, block finder, `airdrop_manage` clawback/extend) and PR 4 (push rail, mito + buyback sources, history logging) are unchanged from the rollout table above. No mainnet or testnet broadcast has been run — the rail is unit-tested only.
+Nothing from the rollout table. **No mainnet or testnet broadcast has been run** — every rail is unit-tested only, and the push rail's uncertainty handling in particular has never met a real mempool.
