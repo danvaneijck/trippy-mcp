@@ -51,6 +51,15 @@ export interface NetworkDef {
   /** Ordered EVM JSON-RPC endpoints — first is preferred, rest are fallback. */
   rpcUrls: string[];
   lcdUrl: string;
+  /**
+   * Cosmos gRPC-web gateway.
+   *
+   * Not interchangeable with `lcdUrl`: the public LCD does not implement the
+   * bank module's `DenomOwners` query (code 12, "Not Implemented", on every
+   * public node and on both networks), while gRPC-web answers it fine. Holder
+   * snapshots therefore go through here.
+   */
+  grpcUrl: string;
   explorerTxBase: string;
   pumpApiBase: string;
   choiceApiBase: string;
@@ -86,6 +95,7 @@ const MAINNET: NetworkDef = {
     "https://injectiveevm-rpc.polkachu.com",
   ],
   lcdUrl: "https://sentry.lcd.injective.network",
+  grpcUrl: "https://sentry.chain.grpc-web.injective.network",
   explorerTxBase: "https://blockscout.injective.network/tx/",
   pumpApiBase: "https://pump-api.trippyinj.xyz",
   choiceApiBase: "https://api.choice.exchange",
@@ -140,6 +150,7 @@ const TESTNET: NetworkDef = {
   cosmosChainId: "injective-888",
   rpcUrls: ["https://injectiveevm-testnet-rpc.polkachu.com"],
   lcdUrl: "https://testnet.sentry.lcd.injective.network",
+  grpcUrl: "https://testnet.sentry.chain.grpc-web.injective.network",
   explorerTxBase: "https://testnet.blockscout.injective.network/tx/",
   // Testnet pump API base is deployment-specific — override via config.
   pumpApiBase: "",

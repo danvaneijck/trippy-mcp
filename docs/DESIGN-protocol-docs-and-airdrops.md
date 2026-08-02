@@ -103,7 +103,7 @@ airdrop_status { planId? | campaignId? }
 | Source | Inputs | Backing read | Phase |
 |---|---|---|---|
 | `csv` | rows `[{address, amount}]` inline or file path | none (fixed amounts, bypasses allocator) | 1 — **gated, see 2.5** |
-| `token_holders` | bank denom OR CW20 address | LCD `denom_owners` paging; CW20 `fetchContractAccountsBalance` + bank-wrapped half merged (÷10^decimals) | 1 |
+| `token_holders` | bank denom OR CW20 address | `denom_owners` paging over gRPC-web (the LCD does not implement it); CW20 `fetchContractAccountsBalance` + bank-wrapped half merged (÷10^decimals) | 1 |
 | `launch_holders` | launchId or token query | the launch token's bank denom via sink `token_denom` → `denom_owners` (bank+ERC20 are one balance, so curve-phase holders included). Prefer a pump-api holders endpoint if present | 1 — the agent-native case: "reward my token's holders" |
 | `nft_holders` | collection address (+is404) | `all_tokens` paging + owner batch resolve; CW404 raw-state scan | 2 — built, capped at 20k supply |
 | `gov_voters` | proposal id (+height or auto-find) | LCD votes with `x-cosmos-block-height` (the only true at-height snapshot) + the binary-search block finder | 2 |

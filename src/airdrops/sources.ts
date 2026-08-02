@@ -111,40 +111,52 @@ export interface SourceResult {
   warnings?: string[];
 }
 
-/** Page every holder of a bank denom. */
+/**
+ * Page every holder of a bank denom.
+ *
+ * Over gRPC-web, not the LCD. The bank module's `DenomOwners` query is not
+ * implemented on any public LCD — mainnet or testnet, it answers code 12 "Not
+ * Implemented" — so the REST version of this could only ever work against a
+ * self-hosted indexed node. The same query over the public gRPC-web gateway
+ * answers fine, which is what the Choice backend and the trippytools airdrop
+ * UI have always used.
+ *
+ * Two shape differences from the REST endpoint, both load-bearing: the
+ * pagination cursor is `pagination.next` rather than `next_key`, and
+ * `pagination.total` comes back as 0, so paging must terminate on the cursor
+ * and never on a count.
+ */
 async function denomOwners(
-  lcdUrl: string,
+  grpcUrl: string,
   denom: string,
   decimals: number,
 ): Promise<{ address: string; weight: number }[]> {
+  const { ChainGrpcBankApi } = await import("@injectivelabs/sdk-ts");
+  const api = new ChainGrpcBankApi(grpcUrl);
+
   const out: { address: string; weight: number }[] = [];
-  let nextKey: string | null = null;
+  let key: string | undefined;
   // 1000/page against a hard page cap: a denom with >500k holders is not a
   // list any single drop should be built from, and an unbounded loop against a
-  // public LCD is how you get rate-limited mid-snapshot.
+  // public endpoint is how you get rate-limited mid-snapshot.
   for (let page = 0; page < 500; page++) {
-    const params = new URLSearchParams({ "pagination.limit": "1000" });
-    if (nextKey) params.set("pagination.key", nextKey);
-    const url = `${lcdUrl.replace(/\/$/, "")}/cosmos/bank/v1beta1/denom_owners/${encodeURIComponent(denom)}?${params}`;
-    const res = await fetch(url);
-    if (!res.ok) {
+    let res: Awaited<ReturnType<InstanceType<typeof ChainGrpcBankApi>["fetchDenomOwners"]>>;
+    try {
+      res = await api.fetchDenomOwners(denom, { limit: 1000, key });
+    } catch (e) {
       throw new ToolError(
         "holders_query_failed",
-        `could not page holders of ${denom} (HTTP ${res.status})`,
+        `could not page holders of ${denom}: ${e instanceof Error ? e.message : String(e)}`,
         page === 0 ? "check the denom is exactly as the chain spells it" : undefined,
       );
     }
-    const body = (await res.json()) as {
-      denom_owners?: { address: string; balance?: { amount?: string } }[];
-      pagination?: { next_key?: string | null };
-    };
-    for (const o of body.denom_owners ?? []) {
+    for (const o of res.denomOwners ?? []) {
       const raw = BigInt(o.balance?.amount ?? "0");
       if (raw <= 0n) continue;
       out.push({ address: o.address, weight: Number(formatUnits(raw, decimals)) });
     }
-    nextKey = body.pagination?.next_key ?? null;
-    if (!nextKey) return out;
+    key = res.pagination?.next || undefined;
+    if (!key) return out;
   }
   throw new ToolError(
     "holders_too_many",
@@ -199,7 +211,7 @@ export async function loadSource(rt: Runtime, source: Source): Promise<SourceRes
   if (source.kind === "token_holders") {
     const denom = requireField(raw, "denom", "token_holders");
     const decimals = await denomDecimals(rt.net.lcdUrl, denom);
-    const all = await denomOwners(rt.net.lcdUrl, denom, decimals);
+    const all = await denomOwners(rt.net.grpcUrl, denom, decimals);
     return filterHolders(all, [], `holders of ${denom}`, snapshotAt, decimals, "whole tokens held");
   }
 
@@ -270,12 +282,35 @@ async function launchHolders(
       "wait for the keeper to bind it, then snapshot again",
     );
   }
-  if (!live.bankDenom) {
-    throw new ToolError("no_denom", `launch #${launchIdRaw} has no bank denom to snapshot`);
+  // NOT `live.bankDenom`.
+  //
+  // That field is the launch's PAIR/QUOTE denom — `inj` for an INJ-quoted
+  // launch, the SAI factory denom for a SAI-quoted one — so snapshotting it
+  // targets every holder of the quote asset instead of the launch's own
+  // holders. On launch #2 that is every INJ holder on mainnet.
+  //
+  // The launch token's own denom carries a per-launch salt in its subdenom, so
+  // it cannot be derived from the launch fields. It lives on the sink, from
+  // token-bind onward — which covers the whole curve phase, and the curve
+  // phase is usually the point of snapshotting a launch.
+  const sink = evmToInj(live.sink as `0x${string}`);
+  const sinkConfig = await smartQuery<{ token_denom?: string }>(
+    rt.net.lcdUrl,
+    sink,
+    { sink_config: {} },
+    { errorCode: "no_denom" },
+  );
+  const tokenDenom = sinkConfig.token_denom;
+  if (!tokenDenom) {
+    throw new ToolError(
+      "no_denom",
+      `launch #${launchIdRaw}'s sink did not report a token_denom`,
+      "the launch may not be bound yet — wait for the keeper and snapshot again",
+    );
   }
 
   // Launch tokens are always 18-decimal.
-  const all = await denomOwners(rt.net.lcdUrl, live.bankDenom, 18);
+  const all = await denomOwners(rt.net.grpcUrl, tokenDenom, 18);
   // The EVM-side contracts hold the token under their bech32 mirror — the same
   // 20 bytes, addressed the way the bank module indexes them.
   const launchOwned = [live.sink, rt.net.addresses.launchpadCore, rt.net.addresses.feeTreasury].map(
@@ -284,7 +319,7 @@ async function launchHolders(
   return filterHolders(
     all,
     launchOwned,
-    `holders of launch #${launchIdRaw} (${live.bankDenom})`,
+    `holders of launch #${launchIdRaw} (${tokenDenom})`,
     snapshotAt,
     18,
     "whole tokens held",
