@@ -1,6 +1,6 @@
 # Design: protocol knowledge + airdrop tools for trippy-mcp
 
-Status: DRAFT for review — nothing built.
+Status: **PR 1 and PR 2 BUILT** (2026-08-02, branch `feat/explain-and-airdrops`). PRs 3 and 4 remain designed-not-built. Decisions taken during the build are recorded in "Decisions" at the bottom, which supersedes the original "Open questions" list.
 Scope: (1) endpoints that teach agents how Shroom Pad and Choice work (quote choice, fees, discounts, mechanics); (2) airdrop endpoints replicating the trippytools criteria types; (3) hooks for future work (liquidity positions, streaming rewards).
 
 ---
@@ -157,11 +157,24 @@ Mentioned as future scope; the docs/airdrop design leaves room:
 
 Each PR follows the house pattern: impl in `tools.ts` (pure pieces exported for vitest), registration in `server.ts`, ToolError envelopes, CI typecheck/test/pack-gate.
 
-## Open questions for Dan
+## Decisions (2026-08-02) — supersedes the open questions
 
-1. **SHROOM fee**: keep 25k parity for agent-created drops? (Design assumes yes.)
-2. **`airdropCapUsd` default 0 (feature off until configured)** — confirm.
-3. **CSV recipients behind `allowArbitraryRecipients`, default off** — confirm.
-4. **Claim URL**: reuse trippytools `/claim/:id` as the canonical claim page for agent drops? (Design assumes yes; the alternative is a claim view in the Terminal.)
-5. `explain` content tone: pure mechanics, or also strategy guidance ("SAI quote maximizes your creator take", "set a dev-buy guard window")? Design assumes mechanics + a light "why you'd pick each quote."
-6. Related loose end from the smoke: curve-buy `referrer` currently defaults to the feeTreasury — still unconfirmed as the intended default; the fees doc topic will document whatever we settle on.
+1. **SHROOM fee: none.** Agent-created drops are not charged. `ensureCw20ShroomMessages` and the whole fee step (§2.6) were dropped from the build, which also removes the fee-paid flag and the "never bill for a drop the chain will refuse" balance re-read.
+2. **`airdropCapUsd` defaults to 1000** (the whole daily budget), not 0. It REPLACES `perTxCapUsd` for airdrop intents rather than stacking under it — otherwise the $200 trade cap would silently govern every drop and the knob would be inert. The campaign still consumes the shared 24h budget. `0` still means the tools are not registered at all.
+3. **`csv` is allowed by default.** No `allowArbitraryRecipients` flag. The blocked-address list is applied to csv rows too (it is not applied by the snapshot path there, so it is applied at the leaf builder).
+4. **Claim page: trippytools `/claim/:id`, flagged as agent-made.** The plan meta carries `createdBy: "trippy-mcp:<agent>"`, which is written on-chain as the campaign meta and stored on the campaign row; the claim page renders an AGENT chip from it (trippytools branch `feat/claim-drop-agent-badge`, **not pushed** — that repo auto-deploys).
+5. **`explain` tone: mechanics + a light "why you'd pick each quote."** As assumed.
+6. **Curve-buy `referrer` keeps the feeTreasury default.** Documented plainly in the `shroom_pad_fees` topic, including that referralShareBps is a share of the creator's cut (~1bp on INJ, ~9bps on SAI) and that the contract zeroes it when the referrer is the buyer or the creator.
+
+### Built differently from the design
+
+- **Topic content is a `render(params)` function, not a `{{slot}}` template.** Same "prose carries no numbers" rule, but a mistyped slot fails typecheck instead of shipping `{{graduationTarget}}` to an agent. A test asserts the prose stays numberless when every live read fails.
+- **Quote-asset slots 0-7 are probed live** rather than read off the vendored registry, so a quote asset enabled without a redeploy appears the day it exists. Unknown slots get their symbol/decimals from the ERC20.
+- **Duplicate-funding guard is three-part**, added after an audit found the original ordering could double-fund: execute checks the chain for a campaign already at this root before acting, marks the plan BEFORE broadcasting (a tx can land and still throw when the client stops waiting), and on failure re-asks the chain whether it landed instead of reporting that nothing moved. The plan file is **kept** after execution, not deleted — it is the only thing that maps a planId back to a root when the campaign id cannot be read out of the tx.
+- **The policy cap is applied at execute time** to a fresh price of the funds actually attached (total + the instance's fee), not to the preview's figure, which can be an hour old.
+- **`allowUnpricedSpend` does not extend to airdrops.** It is a trading convenience for illiquid tokens; an uncappable outbound transfer is refused outright.
+- Cosmos signing went into a shared `CosmosSigner` (policy enforced inside it, plus a check that the built messages target the contract the policy check was made against). `ChoiceVenue` still has its own broadcast path and was left alone.
+
+### Still not built
+
+PR 3 (nft/gov sources, block finder, `airdrop_manage` clawback/extend) and PR 4 (push rail, mito + buyback sources, history logging) are unchanged from the rollout table above. No mainnet or testnet broadcast has been run — the rail is unit-tested only.
