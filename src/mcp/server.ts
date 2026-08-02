@@ -89,7 +89,15 @@ function registerAirdropTools(server: McpServer): void {
 
   const sourceSchema = z
     .object({
-      kind: z.enum(["csv", "token_holders", "launch_holders", "nft_holders", "gov_voters"]),
+      kind: z.enum([
+        "csv",
+        "token_holders",
+        "launch_holders",
+        "nft_holders",
+        "gov_voters",
+        "mito_vault",
+        "buyback_round",
+      ]),
       rows: z
         .array(z.object({ address: z.string(), amount: z.string() }))
         .max(50_000)
@@ -112,6 +120,17 @@ function registerAirdropTools(server: McpServer): void {
         .min(1)
         .optional()
         .describe("gov_voters only: snapshot height; omit to use the last block before voting closed"),
+      vault: z.string().optional().describe("mito_vault only: the Mito vault contract address"),
+      holderType: z
+        .enum(["stake", "non-stake"])
+        .optional()
+        .describe("mito_vault only: weight by staked LP, or by all LP held (default)"),
+      round: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("buyback_round only: the Community BuyBack round number (mainnet)"),
     })
     .describe("where the recipient list comes from");
 
@@ -141,10 +160,16 @@ function registerAirdropTools(server: McpServer): void {
       }),
       delivery: z
         .object({
+          rail: z
+            .enum(["claim_drop", "push"])
+            .optional()
+            .describe(
+              'how recipients get the tokens. "claim_drop" (default) funds a merkle campaign in one tx and recipients claim from a link — any list size, recoverable after expiry. "push" sends straight to every wallet with MsgMultiSend: nobody has to claim, but it is irreversible, capped at 1000 recipients, and a wrong address is somebody else\'s money.',
+            ),
           title: z.string().max(120).optional(),
           description: z.string().max(500).optional(),
-          expiryDays: z.number().int().min(1).max(3650).optional().describe("default 30; after expiry unclaimed funds can be clawed back"),
-          perpetual: z.boolean().optional().describe("never expires — unclaimed funds can NEVER be recovered. Only set when that is intended."),
+          expiryDays: z.number().int().min(1).max(3650).optional().describe("claim_drop only: default 30; after expiry unclaimed funds can be clawed back"),
+          perpetual: z.boolean().optional().describe("claim_drop only: never expires — unclaimed funds can NEVER be recovered. Only set when that is intended."),
         })
         .optional(),
     },
@@ -154,7 +179,7 @@ function registerAirdropTools(server: McpServer): void {
   register(
     server,
     "airdrop_execute",
-    "Fund and publish a previewed claim drop. Takes ONLY a planId — the recipient set is whatever airdrop_preview cached, so criteria can never go straight to a broadcast. Publishes the leaves, then creates + funds + freezes the campaign in one transaction, then indexes it for the claim page. IRREVERSIBLE: the funds leave the wallet and the recipient list is frozen. If it returns without a campaignId the drop is still LIVE — use airdrop_status to find it, never re-run execute (that would fund a second duplicate campaign).",
+    "Fund a previewed drop. Takes ONLY a planId — the recipient set is whatever airdrop_preview cached, so criteria can never go straight to a broadcast. IRREVERSIBLE either way. For a claim_drop plan: publishes the leaves, creates + funds + freezes the campaign in one transaction, indexes it for the claim page; if it returns without a campaignId the drop is still LIVE, so use airdrop_status to find it and never re-run execute (that would fund a second duplicate campaign). For a push plan: sends to every recipient by MsgMultiSend and IS resumable — if it stops partway, call it again with the same planId and it settles the unfinished send against the chain before continuing. Nobody is ever paid twice.",
     {
       planId: z.string().describe("from airdrop_preview"),
       confirm: z.literal(true).describe("must be true — this moves funds"),
@@ -165,7 +190,7 @@ function registerAirdropTools(server: McpServer): void {
   register(
     server,
     "airdrop_status",
-    "State of a claim-drop campaign: total, claimed so far, claimant count, remaining, expiry and whether it is frozen/paused/swept. Pass a campaignId, or a planId to resolve a campaign this agent created by its merkle root (the recovery path when execute could not read the id back).",
+    "State of a drop. For a claim drop: total, claimed so far, claimant count, remaining, expiry and whether it is frozen/paused/swept — pass a campaignId, or a planId to resolve a campaign this agent created by its merkle root (the recovery path when execute could not read the id back). For a push plan: how many recipients have been paid, the landed tx hashes, any address the chain refuses, and whether a send is still in the air.",
     {
       campaignId: z.number().int().min(1).optional(),
       planId: z.string().optional(),

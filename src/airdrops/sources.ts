@@ -29,7 +29,9 @@ export type SourceKind =
   | "token_holders"
   | "launch_holders"
   | "nft_holders"
-  | "gov_voters";
+  | "gov_voters"
+  | "mito_vault"
+  | "buyback_round";
 
 export interface CsvSource {
   kind: "csv";
@@ -64,12 +66,28 @@ export interface GovVotersSource {
   height?: number;
 }
 
+export interface MitoVaultSource {
+  kind: "mito_vault";
+  /** Mito vault contract address. */
+  vault: string;
+  /** `stake` weights by staked LP only; `non-stake` (default) by total LP held. */
+  holderType?: "stake" | "non-stake";
+}
+
+export interface BuybackRoundSource {
+  kind: "buyback_round";
+  /** Community BuyBack round number. Mainnet only. */
+  round: number;
+}
+
 export type Source =
   | CsvSource
   | TokenHoldersSource
   | LaunchHoldersSource
   | NftHoldersSource
-  | GovVotersSource;
+  | GovVotersSource
+  | MitoVaultSource
+  | BuybackRoundSource;
 
 export interface SourceResult {
   rows: SourceRow[];
@@ -196,6 +214,26 @@ export async function loadSource(rt: Runtime, source: Source): Promise<SourceRes
 
   if (source.kind === "gov_voters") {
     return govVoters(rt, requireField(raw, "proposalId", "gov_voters"), source.height, snapshotAt);
+  }
+
+  if (source.kind === "mito_vault") {
+    return mitoVaultHolders(
+      rt,
+      requireField(raw, "vault", "mito_vault"),
+      source.holderType === "stake" ? "stake" : "non-stake",
+      snapshotAt,
+    );
+  }
+
+  if (source.kind === "buyback_round") {
+    const round = Number(raw.round);
+    if (!Number.isInteger(round) || round < 1) {
+      throw new ToolError(
+        "bad_input",
+        'source.round is required when source.kind is "buyback_round" (the round number)',
+      );
+    }
+    return buybackParticipants(rt, round, snapshotAt);
   }
 
   return launchHolders(rt, requireField(raw, "launchId", "launch_holders"), snapshotAt);
@@ -654,6 +692,232 @@ async function govVoters(
   );
   result.snapshotHeight = height;
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Mito vaults
+// ---------------------------------------------------------------------------
+
+/** Mito's own staking contract — LP staked here is held on holders' behalf. */
+const MITO_STAKING_CONTRACT = "inj1gtze7qm07nky47n7mwgj4zatf2s77xqvh3k2n8";
+
+const MITO_ENDPOINT: Record<string, string> = {
+  mainnet: "https://k8s.mainnet.mito.grpc-web.injective.network",
+  testnet: "https://k8s.testnet.mito.grpc-web.injective.network",
+};
+
+interface MitoHolder {
+  holderAddress?: string;
+  amount?: string;
+  stakedAmount?: string;
+}
+
+/**
+ * Mito vault LP holders.
+ *
+ * The one source that does not come from a chain endpoint: LP holdings are
+ * indexed by Mito's own service, and passing it the staking contract is what
+ * makes staked LP resolve back to the wallet that staked it rather than to the
+ * contract holding it. Without that, a vault's largest "holder" is the staking
+ * contract and the drop goes to a contract with no keys.
+ */
+async function mitoVaultHolders(
+  rt: Runtime,
+  vault: string,
+  holderType: "stake" | "non-stake",
+  snapshotAt: string,
+): Promise<SourceResult> {
+  if (!vault.startsWith("inj1")) {
+    throw new ToolError("bad_input", `source.vault must be a Mito vault address, got "${vault}"`);
+  }
+  const endpoint = MITO_ENDPOINT[rt.net.name];
+  if (!endpoint) {
+    throw new ToolError("unsupported_network", `Mito vaults are not indexed on ${rt.net.name}`);
+  }
+
+  const { IndexerGrpcMitoApi } = await import("@injectivelabs/sdk-ts");
+  const api = new IndexerGrpcMitoApi(endpoint);
+
+  const holders: MitoHolder[] = [];
+  let total = 0;
+  for (let page = 0; page < 200; page++) {
+    const res = await api
+      .fetchLPHolders({
+        limit: 100,
+        skip: holders.length,
+        vaultAddress: vault,
+        stakingContractAddress: MITO_STAKING_CONTRACT,
+      })
+      .catch((e: unknown) => {
+        throw new ToolError(
+          "mito_query_failed",
+          `Mito would not list holders of ${vault}: ${e instanceof Error ? e.message : String(e)}`,
+          "check the vault address — it is the vault contract, not its LP denom",
+        );
+      });
+    const batch = (res.holders ?? []) as MitoHolder[];
+    if (batch.length === 0) break;
+    holders.push(...batch);
+    total = Number(res.pagination?.total ?? 0);
+    if (total > 0 && holders.length >= total) break;
+  }
+
+  if (holders.length === 0) {
+    throw new ToolError("no_holders", `Mito reports no LP holders for vault ${vault}`);
+  }
+
+  // Mito LP is a tokenfactory denom minted at 18 decimals. Scaling here is what
+  // makes filters.minWeight mean "1 LP token" rather than "1 wei of one"; the
+  // relative weights are unaffected either way.
+  const rows = holders
+    .filter((h) => typeof h.holderAddress === "string" && h.holderAddress.startsWith("inj1"))
+    .map((h) => ({
+      address: h.holderAddress as string,
+      weight: Number(
+        formatUnits(BigInt((holderType === "stake" ? h.stakedAmount : h.amount) ?? "0"), 18),
+      ),
+    }))
+    .filter((r) => r.weight > 0);
+
+  if (rows.length === 0) {
+    throw new ToolError(
+      "no_holders",
+      `no wallet holds ${holderType === "stake" ? "STAKED " : ""}LP in vault ${vault}`,
+      holderType === "stake" ? "try holderType 'non-stake' to include unstaked LP" : undefined,
+    );
+  }
+
+  return filterHolders(
+    rows,
+    [],
+    `${holderType === "stake" ? "stakers" : "LP holders"} of Mito vault ${vault}`,
+    snapshotAt,
+    18,
+    "whole LP tokens",
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Community BuyBack
+// ---------------------------------------------------------------------------
+
+/** The Injective Community BuyBack auction contract (mainnet only). */
+const BUYBACK_CONTRACT = "inj10n78w79xhxmytnuhjcck633nj4e7hrqaglgnfz";
+/** cw-storage-plus namespace of its participants map. */
+const BUYBACK_NS = "user_round_info";
+
+/**
+ * Everyone who committed INJ in a buyback round, weighted by how much.
+ *
+ * The contract has no "list participants" query, so this walks its raw state:
+ * participants live in a `Map<(u64 round_id, Addr), UserRoundInfo>` whose values
+ * already carry the wallet, the round and the deposit — no key parsing needed,
+ * only a start key crafted so paging begins at this round's first entry.
+ *
+ * The subtlety worth keeping: whitelisting a wallet writes a row with deposit
+ * ZERO, so a round can hold thousands of reservations against a couple of
+ * hundred actual committers. Only deposit > 0 rows count, and the round's own
+ * `total_deposit` (read here rather than asked of the caller) is used to stop
+ * early the moment every committed INJ is accounted for — which also means the
+ * currently-open round, with a huge whitelist and nothing committed, costs one
+ * query rather than five hundred.
+ */
+async function buybackParticipants(
+  rt: Runtime,
+  round: number,
+  snapshotAt: string,
+): Promise<SourceResult> {
+  if (rt.net.name !== "mainnet") {
+    throw new ToolError(
+      "unsupported_network",
+      "the Community BuyBack contract only exists on mainnet",
+    );
+  }
+  const lcd = rt.net.lcdUrl;
+
+  const info = await smartQuery<{ total_deposit?: string; id?: unknown }>(
+    lcd,
+    BUYBACK_CONTRACT,
+    { get_round_info: { round_id: round } },
+    { errorCode: "no_such_round", attempts: 3 },
+  ).catch(() => null);
+  if (info === null || info.id === undefined) {
+    throw new ToolError("no_such_round", `buyback round ${round} does not exist`);
+  }
+  const expectedTotalInj = Number(info.total_deposit ?? 0) / 1e18;
+  if (!(expectedTotalInj > 0)) {
+    throw new ToolError(
+      "round_empty",
+      `buyback round ${round} has no committed INJ`,
+      "an open round holds only whitelist reservations until people bid — snapshot a completed round",
+    );
+  }
+
+  // start key = 0x00 <len> "user_round_info" 0x00 0x08 <round: u64 big-endian>
+  const ns = mapPrefix(BUYBACK_NS);
+  const startKey = new Uint8Array(ns.length + 2 + 8);
+  startKey.set(ns, 0);
+  startKey[ns.length] = 0;
+  startKey[ns.length + 1] = 8;
+  new DataView(startKey.buffer).setBigUint64(ns.length + 2, BigInt(round), false);
+
+  const rows: { address: string; weight: number }[] = [];
+  let committed = 0;
+  let pageKey: Uint8Array | string | null = startKey;
+
+  for (let page = 0; page < 500; page++) {
+    const { models, nextKey } = await contractStatePage(lcd, BUYBACK_CONTRACT, pageKey, 100);
+    if (models.length === 0) break;
+    let done = false;
+    for (const m of models) {
+      if (!startsWith(m.key, ns)) {
+        done = true; // walked out of the participants map entirely
+        break;
+      }
+      let v: { round_id?: unknown; wallet?: unknown; deposit?: unknown };
+      try {
+        v = JSON.parse(Buffer.from(m.value).toString("utf8")) as typeof v;
+      } catch {
+        continue;
+      }
+      if (typeof v.round_id !== "number" || typeof v.wallet !== "string") continue;
+      if (v.round_id > round) {
+        done = true; // crossed into a later round
+        break;
+      }
+      if (v.round_id !== round) continue;
+      const deposit = Number(v.deposit ?? 0) / 1e18;
+      if (deposit > 0) {
+        rows.push({ address: v.wallet, weight: deposit });
+        committed += deposit;
+      }
+    }
+    // Every committed INJ accounted for — the rest of the round is whitelist.
+    if (committed >= expectedTotalInj - 1e-6) done = true;
+    if (done || !nextKey) break;
+    pageKey = nextKey;
+  }
+
+  if (rows.length === 0) {
+    throw new ToolError("no_participants", `no wallet committed INJ in buyback round ${round}`);
+  }
+
+  const warnings: string[] = [];
+  if (committed < expectedTotalInj - 1e-6) {
+    warnings.push(
+      `found ${committed.toFixed(4)} of the ${expectedTotalInj.toFixed(4)} INJ this round reports committed — the participant scan may be short`,
+    );
+  }
+
+  return filterHolders(
+    rows,
+    [],
+    `participants in Community BuyBack round ${round} (${expectedTotalInj.toFixed(2)} INJ committed)`,
+    snapshotAt,
+    18,
+    "INJ committed to the round",
+    warnings,
+  );
 }
 
 // ---------------------------------------------------------------------------

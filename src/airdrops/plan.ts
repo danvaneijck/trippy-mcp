@@ -28,6 +28,12 @@ export interface StoredPlan {
   planId: string;
   createdAt: string;
   network: string;
+  /**
+   * Which rail funds this plan. Optional on the type so a plan file written
+   * before the push rail existed still loads; absent means `claim_drop`, which
+   * is what those plans are.
+   */
+  rail?: "claim_drop" | "push";
   /** The agent wallet that previewed it — a plan is not portable between wallets. */
   sender: string;
   denom: string;

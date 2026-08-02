@@ -20,16 +20,22 @@ export const sources = [
 ];
 
 export function render(_p: LiveParams): string {
-  return `# Airdrops — the claim-drop rail
+  return `# Airdrops
 
-An airdrop here is a **merkle claim drop**: you publish a list of allocations,
-fund the total in ONE transaction, and recipients claim their share from the
-contract. One transaction regardless of whether the list has 10 wallets or
-10,000 — there is no per-recipient send to retry, resume or bisect.
+Two rails, chosen with \`delivery.rail\`.
 
-The trade-off is that recipients must claim. Nobody receives anything
-passively. If a token must LAND in wallets without action, this rail is the
-wrong one.
+**\`claim_drop\` (default)** — a merkle claim drop. You publish a list of
+allocations, fund the total in ONE transaction, and recipients claim their
+share from a link. One transaction whether the list has 10 wallets or 10,000:
+there is no per-recipient send to retry, resume or bisect, and unclaimed funds
+come back to you after the expiry.
+
+**\`push\`** — MsgMultiSend straight to every wallet. Nobody has to claim.
+
+Pick \`push\` when recipients must not have to do anything, and only then. It
+is capped at 1000 recipients, it is irreversible with no expiry and no
+clawback, and a wrong address is not an unclaimed leaf sitting in a contract —
+it is somebody else's money. Everything else is better served by a claim drop.
 
 ## The two-step commit
 
@@ -66,6 +72,12 @@ change to the allocation produces a different plan and a different merkle root.
   for an hour.
 - \`gov_voters\` — everyone who voted on a governance proposal. Filter with
   \`filters.voteOptions: ["yes"]\` etc.
+- \`mito_vault\` — LP holders of a Mito vault, weighted by LP held or (with
+  \`holderType: "stake"\`) by LP staked. Staked LP resolves back to the wallet
+  that staked it rather than to the staking contract.
+- \`buyback_round\` — everyone who committed INJ in a Community BuyBack round,
+  weighted by how much (mainnet only). Whitelisted-but-never-bid wallets hold a
+  zero-deposit row in the same map and are not participants; they are excluded.
 
 Every source except \`gov_voters\` is read live at preview time and the
 timestamp is recorded.
@@ -115,13 +127,15 @@ signal to look before executing.
 
 ## Irreversible things
 
+- A **push** drop is irreversible the instant it lands and has no expiry,
+  clawback or claim page. Everything below is about \`claim_drop\`.
 - The campaign **freezes on creation**. The root, the total and the recipient
   list cannot be changed afterwards. There is no edit.
 - **Expiry defaults to 30 days**, and expiry is what makes unclaimed funds
   recoverable later.
 - **\`perpetual: true\` means unclaimed funds can NEVER be clawed back.** They
   stay in the contract forever. Only use it when that is genuinely intended.
-- **A plan is single-use.** It is marked the moment a broadcast is attempted,
+- **A claim_drop plan is single-use.** It is marked the moment a broadcast is attempted,
   before the result is known, so a second \`airdrop_execute\` on the same planId
   is refused. That is deliberate: a transaction can LAND and still return an
   error (the client stops waiting while it sits in the mempool), and the
@@ -132,6 +146,40 @@ signal to look before executing.
   not assumed.
 - If execute returns without a campaign id, the drop is still LIVE. Use
   \`airdrop_status\` with the planId to find it. Never execute again.
+
+## The push rail specifically
+
+One MsgMultiSend pays everyone, because the per-campaign policy cap is enforced
+per signed transaction — splitting the drop over two transactions would let
+one worth twice the cap through, a legal half at a time. That is where the 1000
+ceiling comes from, not from gas.
+
+Two failure modes shape everything else about it, and both are worth knowing
+before you run one:
+
+- **A transaction can land and still throw.** The client gives up on the
+  inclusion wait while the transaction sits in the mempool. So an error from a
+  send is never read as "it failed" — it is read as UNKNOWN and settled against
+  the chain (the account sequence proves whether that transaction can still
+  land; the first recipient's balance says which way it went). If it cannot be
+  settled, the run STOPS with the attempt saved rather than resending, because
+  resending something that lands pays those wallets twice.
+- **Some addresses cannot receive.** The bank module refuses its own module
+  accounts, and the refusal fires during gas simulation, so one bad recipient
+  reverts the whole transaction and strands everyone in it. The known ones are
+  filtered out at preview; an unknown one causes the group to be halved and
+  retried down to single addresses, so it only ever strands itself.
+
+**A push execute is resumable, and that is what makes it safe.** If it stops
+partway — an unresolved send, an interrupted process, an empty wallet — call
+\`airdrop_execute\` again with the SAME planId. It settles whatever was in the
+air, skips everyone a landed transaction already paid, and finishes the rest.
+That is the only correct response to a partial push run: do not preview again,
+which would build a fresh plan that knows nothing about who has been paid.
+
+\`airdrop_status\` on a push planId reports paid/total, the landed tx hashes,
+any unsendable addresses and whether a send is still in the air. Completed push
+drops are written to the site's airdrop history with the plan's criteria string.
 
 ## After it is live: \`airdrop_manage\`
 

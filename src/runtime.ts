@@ -6,7 +6,7 @@
 import { AuditLog } from "./audit.js";
 import { ChoiceApi } from "./api/choice.js";
 import { PumpApi } from "./api/pump.js";
-import { CosmosSigner } from "./chain/cosmos.js";
+import { BANK_MULTISEND_TARGET, CosmosSigner } from "./chain/cosmos.js";
 import { EvmSigner } from "./chain/evm.js";
 import { getNetwork, makeChain, type NetworkDef } from "./chain/networks.js";
 import { makeTransport } from "./chain/transport.js";
@@ -66,6 +66,10 @@ export function buildRuntime(passphrase?: string): Runtime {
       // The claim-drops instance. Listed unconditionally: reaching it still
       // requires an `airdrop` intent, which airdropCapUsd governs separately.
       net.claimDrops.contract,
+      // The push rail's bank-multisend leg. Not an address — a MsgMultiSend
+      // executes no contract — but the allowlist check is not skipped for it,
+      // so it declares a named target instead. See chain/cosmos.ts.
+      BANK_MULTISEND_TARGET,
     ]
       .filter((a) => a && a.length > 0)
       .map((a) => a.toLowerCase()),

@@ -18,7 +18,6 @@
  * `airdrop_status` re-resolves it.
  */
 
-import { denomDecimals } from "../api/lcd.js";
 import { ToolError } from "../errors.js";
 import type { Runtime } from "../runtime.js";
 import { untrustedMeta } from "../untrusted.js";
@@ -42,9 +41,12 @@ import {
   leavesUriForRoot,
   secondsToNanos,
 } from "./contract.js";
-import { publishLeaves, recordCampaign } from "./hasura.js";
+import { publishLeaves, recordAirdropLog, recordCampaign } from "./hasura.js";
 import { buildTree } from "./merkle.js";
 import { loadPlan, planId as makePlanId, savePlan, updatePlan, type StoredPlan } from "./plan.js";
+import { denomBalance, denomSymbol, dropDecimals, usdValue } from "./pricing.js";
+import { executePush, pushStatus, MAX_PUSH_RECIPIENTS, type PushRun } from "./push.js";
+import { loadCheckpoint } from "./checkpoint.js";
 import { loadSource, normalizeVoteOption, type Source } from "./sources.js";
 import { buildLeavesFromRows, fromBaseUnits, isValidAmount, toBaseUnits } from "./units.js";
 
@@ -58,15 +60,26 @@ export interface PreviewArgs {
     voteOptions?: string[];
   };
   allocation: { mode?: DistMode; total?: string; asset: string };
-  delivery?: { title?: string; description?: string; expiryDays?: number; perpetual?: boolean };
+  delivery?: {
+    rail?: Rail;
+    title?: string;
+    description?: string;
+    expiryDays?: number;
+    perpetual?: boolean;
+  };
 }
+
+export type Rail = "claim_drop" | "push";
 
 const DEFAULT_EXPIRY_DAYS = 30;
 /** More leaves than one preview will build. Beyond this, split the campaign. */
 const MAX_RECIPIENTS = 50_000;
 
 export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<string, unknown>> {
-  const contract = requireContract(rt);
+  const rail: Rail = args.delivery?.rail ?? "claim_drop";
+  // The claim rail needs its contract; the push rail is a bank message and
+  // works on any network, so it must not be gated on a contract deployment.
+  const contract = rail === "claim_drop" ? requireContract(rt) : null;
   const asset = args.allocation.asset;
   if (!asset) throw new ToolError("bad_input", "allocation.asset is required (the denom to drop)");
 
@@ -165,11 +178,14 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
   if (built.leaves.length === 0) {
     throw new ToolError("no_recipients", "no valid recipients left after validation");
   }
-  if (built.leaves.length > MAX_RECIPIENTS) {
+  const railCap = rail === "push" ? MAX_PUSH_RECIPIENTS : MAX_RECIPIENTS;
+  if (built.leaves.length > railCap) {
     throw new ToolError(
       "too_many_recipients",
-      `${built.leaves.length} recipients exceeds the ${MAX_RECIPIENTS} cap for one campaign`,
-      "narrow with filters.topN or filters.minWeight",
+      `${built.leaves.length} recipients exceeds the ${railCap} cap for one ${rail} drop`,
+      rail === "push"
+        ? `the push rail sends every recipient in ONE transaction so the per-campaign policy cap means what it says — narrow with filters.topN, or use the claim_drop rail, which handles ${MAX_RECIPIENTS} in a single tx`
+        : "narrow with filters.topN or filters.minWeight",
     );
   }
   if (built.invalidRows > 0) {
@@ -217,8 +233,11 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
     "indicative: execute re-prices the drop at broadcast time and enforces against that, so a price move inside the plan's 1h life can still change the verdict";
 
   // ---- funding check ------------------------------------------------------
-  const cfg = await queryContractConfig(rt.net.lcdUrl, contract).catch(() => null);
-  if (cfg === null) {
+  // A push drop attaches no platform fee and executes no contract, so it needs
+  // exactly the total and neither of the contract reads below.
+  const cfg =
+    contract === null ? null : await queryContractConfig(rt.net.lcdUrl, contract).catch(() => null);
+  if (contract !== null && cfg === null) {
     warnings.push(
       "the claim-drops contract config could not be read, so the platform fee is assumed to be 0 — if the instance charges one, this preview understates what the drop needs",
     );
@@ -235,14 +254,27 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
   if (cfg?.paused) warnings.push("the claim-drops contract is paused — execute will fail until it is unpaused");
 
   // ---- expiry -------------------------------------------------------------
+  // A push drop has no expiry to have: the tokens land in wallets, so there is
+  // nothing left unclaimed and nothing to claw back.
   const perpetual = args.delivery?.perpetual === true;
   const expiryDays = args.delivery?.expiryDays ?? DEFAULT_EXPIRY_DAYS;
-  const expiryNanos = perpetual
-    ? null
-    : secondsToNanos(Math.floor(Date.now() / 1000) + expiryDays * 86_400);
-  if (perpetual) {
+  const expiryNanos =
+    rail === "push" || perpetual
+      ? null
+      : secondsToNanos(Math.floor(Date.now() / 1000) + expiryDays * 86_400);
+  if (rail === "push" && (perpetual || args.delivery?.expiryDays !== undefined)) {
+    warnings.push(
+      "delivery.expiryDays / perpetual do not apply to the push rail — the tokens are sent directly, so there is nothing to expire",
+    );
+  }
+  if (rail !== "push" && perpetual) {
     warnings.push(
       "perpetual: this campaign never expires, which means unclaimed funds can NEVER be clawed back — they stay in the contract forever",
+    );
+  }
+  if (rail === "push") {
+    warnings.push(
+      "the push rail sends to every recipient IRREVERSIBLY and with no claim step — a wrong address here is not an unclaimed leaf, it is somebody else's money. Read topRecipients before executing.",
     );
   }
 
@@ -253,6 +285,7 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
     planId: id,
     createdAt: new Date().toISOString(),
     network: rt.net.name,
+    rail,
     sender: rt.injAddress,
     denom: asset,
     symbol,
@@ -280,10 +313,13 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
 
   return {
     planId: id,
+    rail,
     recipientCount: tree.leaves.length,
     total: `${totalWhole} ${symbol ?? asset}`,
     totalBase: tree.total,
     totalUsd,
+    // For a push drop the root is published nowhere — it is just a stable
+    // fingerprint of the exact list, which is also what planId is derived from.
     root: tree.rootHex,
     mode,
     criteria,
@@ -311,7 +347,13 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
     funded,
     walletBalance: balance === null ? null : fromBaseUnits(balance.toString(), decimals),
     contractFeeBps: feeBps,
-    expiry: expiryNanos ? nanosToIso(expiryNanos) : "never (perpetual — not clawback-able)",
+    expiry:
+      rail === "push"
+        ? "n/a — a push drop lands in wallets and has nothing to expire"
+        : expiryNanos
+          ? nanosToIso(expiryNanos)
+          : "never (perpetual — not clawback-able)",
+    transactions: rail === "push" ? Math.ceil(tree.leaves.length / MAX_PUSH_RECIPIENTS) : 1,
     policyCheck,
     warnings,
     next: `nothing has been published or broadcast yet. Review the recipients, then call airdrop_execute with planId "${id}" and confirm:true. The plan expires in 1 hour.`,
@@ -322,20 +364,39 @@ export async function execute(
   rt: Runtime,
   args: { planId: string; confirm?: boolean },
 ): Promise<Record<string, unknown>> {
-  const contract = requireContract(rt);
   if (args.confirm !== true) {
     throw new ToolError(
       "not_confirmed",
-      "airdrop_execute requires confirm:true — this funds a campaign and the funds leave the wallet",
+      "airdrop_execute requires confirm:true — this moves funds out of the wallet",
     );
   }
+
+  // A push plan is RESUMABLE, and its resume is reached through this same call,
+  // so it must survive both guards a claim plan is held to: the single-use mark
+  // (whose whole purpose is to stop a second claim campaign being funded — a
+  // push resume is the opposite, it is how the run finishes) and the snapshot
+  // TTL, but only once there is progress to resume. A push plan with nothing
+  // paid yet is just an un-executed plan, and an hour-old snapshot is as stale
+  // for it as for any other.
+  const peek = loadPlan(rt.home, args.planId, { allowStale: true });
+  if (peek.rail === "push") {
+    const cp = loadCheckpoint(rt.home, args.planId);
+    const started = (cp?.paid.length ?? 0) > 0 || (cp?.failed.length ?? 0) > 0;
+    const plan = started ? peek : loadPlan(rt.home, args.planId);
+    requireOwnPlan(rt, plan);
+    const decimals = await dropDecimals(rt, plan.denom);
+    const symbol = plan.symbol ?? plan.denom;
+    if (!plan.attemptedAt) {
+      updatePlan(rt.home, plan.planId, { attemptedAt: new Date().toISOString() });
+    }
+    const run = await executePush(rt, plan, { decimals, symbol });
+    await logPushDrop(rt, plan, run);
+    return run.result;
+  }
+
+  const contract = requireContract(rt);
   const plan = loadPlan(rt.home, args.planId);
-  if (plan.sender !== rt.injAddress) {
-    throw new ToolError("wrong_wallet", "this plan was previewed by a different wallet");
-  }
-  if (plan.network !== rt.net.name) {
-    throw new ToolError("wrong_network", `this plan was previewed on ${plan.network}`);
-  }
+  requireOwnPlan(rt, plan);
   if (plan.attemptedAt) {
     throw new ToolError(
       "already_attempted",
@@ -521,6 +582,13 @@ export async function status(
   rt: Runtime,
   args: { campaignId?: number; planId?: string },
 ): Promise<Record<string, unknown>> {
+  // A push plan has no campaign at all — its state is the checkpoint — so it is
+  // answered before the claim-drop contract is even required.
+  if (args.campaignId === undefined && args.planId) {
+    const peek = loadPlan(rt.home, args.planId, { allowStale: true });
+    if (peek.rail === "push") return pushStatus(rt, peek, loadCheckpoint(rt.home, args.planId));
+  }
+
   const contract = requireContract(rt);
 
   let campaignId = args.campaignId ?? null;
@@ -588,6 +656,58 @@ export async function status(
 
 // ---------------------------------------------------------------------------
 
+function requireOwnPlan(rt: Runtime, plan: StoredPlan): void {
+  if (plan.sender !== rt.injAddress) {
+    throw new ToolError("wrong_wallet", "this plan was previewed by a different wallet");
+  }
+  if (plan.network !== rt.net.name) {
+    throw new ToolError("wrong_network", `this plan was previewed on ${plan.network}`);
+  }
+}
+
+/**
+ * Mirror a finished push drop into the site's airdrop history.
+ *
+ * Best-effort and deliberately last: the transactions have already landed, so a
+ * Hasura failure is a missing history row, never a failed drop. Only recipients
+ * a landed transaction actually paid are logged, so a partial run reads as what
+ * it was.
+ */
+async function logPushDrop(rt: Runtime, plan: StoredPlan, run: PushRun): Promise<void> {
+  const result = run.result;
+  const txHashes = (result.txHashes as string[] | undefined) ?? [];
+  if (result.status !== "broadcast" || txHashes.length === 0) return;
+  // Only what THIS run paid: a drop finished across two calls should produce
+  // two history rows that partition the recipients, not two that overlap.
+  const paid = new Set(run.paidThisRun);
+  const recipients = plan.leaves.filter((l) => paid.has(l.address));
+  if (recipients.length === 0) return;
+
+  const totalBase = recipients.reduce((s, l) => s + BigInt(l.amount), 0n);
+  const unsendable = (result.unsendable as { address: string }[] | undefined)?.length ?? 0;
+  try {
+    await recordAirdropLog(rt.net.claimDrops.hasuraUrl, {
+      denom: plan.denom,
+      sender: plan.sender,
+      amountDropped: Number(fromBaseUnits(totalBase.toString(), plan.decimals)),
+      recipients: recipients.map((l) => l.address),
+      criteria: plan.criteria,
+      description:
+        `${(plan.meta.description as string | undefined) ?? ""} [created by ${plan.meta.createdBy ?? "trippy-mcp"}]` +
+        (unsendable > 0
+          ? ` [partial: ${unsendable} unsendable address(es) skipped]`
+          : ""),
+      txHashes,
+    });
+  } catch (e) {
+    const notes = (result.notes as string[] | undefined) ?? [];
+    notes.push(
+      `the drop landed but writing it to the site's airdrop history failed (${e instanceof Error ? e.message : String(e)}) — the transactions are on chain regardless`,
+    );
+    result.notes = notes;
+  }
+}
+
 function requireContract(rt: Runtime): string {
   const contract = rt.net.claimDrops.contract;
   if (!contract) {
@@ -597,19 +717,6 @@ function requireContract(rt: Runtime): string {
     );
   }
   return contract;
-}
-
-/**
- * Decimals of the asset being dropped.
- *
- * The vendored registry wins over LCD metadata for the quote assets, because
- * `denomDecimals` falls back to 18 when metadata is missing and USDC is 6 — a
- * wrong exponent here does not fail, it silently builds leaves off by a factor
- * of a trillion and funds them.
- */
-async function dropDecimals(rt: Runtime, denom: string): Promise<number> {
-  const known = Object.values(rt.net.quoteAssets).find((q) => q.bankDenom === denom);
-  return known ? known.decimals : denomDecimals(rt.net.lcdUrl, denom);
 }
 
 function ceil(total: string, feeBps: number): string {
@@ -623,49 +730,5 @@ function safeMeta(raw: string): Record<string, unknown> {
     return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
-  }
-}
-
-async function denomBalance(rt: Runtime, denom: string): Promise<bigint | null> {
-  try {
-    const { bankBalances, balanceOf } = await import("../api/lcd.js");
-    return balanceOf(await bankBalances(rt.net.lcdUrl, rt.injAddress), denom);
-  } catch {
-    return null;
-  }
-}
-
-async function denomSymbol(rt: Runtime, denom: string): Promise<string | null> {
-  const known = Object.values(rt.net.quoteAssets).find((q) => q.bankDenom === denom);
-  if (known) return known.symbol;
-  try {
-    const payload = await rt.choiceApi.token(denom);
-    const s = (payload as { symbol?: unknown }).symbol;
-    return typeof s === "string" && s.length > 0 && s.length < 32 ? s : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * USD value of the whole drop. This is the number the policy cap is applied
- * to, so it is never allowed to be optimistic: an asset we cannot price
- * returns null, and null is refused rather than waved through.
- */
-async function usdValue(rt: Runtime, denom: string, amountWhole: string): Promise<number | null> {
-  const amount = Number(amountWhole);
-  if (!Number.isFinite(amount)) return null;
-
-  const known = Object.values(rt.net.quoteAssets).find((q) => q.bankDenom === denom);
-  if (known) {
-    const unit = await rt.shroom.usdValue(known.slot, 10n ** BigInt(known.decimals));
-    return unit === null ? null : unit * amount;
-  }
-  try {
-    const { extractUsdPrice } = await import("../venues/choice/swap.js");
-    const price = extractUsdPrice(await rt.choiceApi.token(denom));
-    return price === null ? null : price * amount;
-  } catch {
-    return null;
   }
 }
