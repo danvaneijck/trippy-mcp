@@ -696,8 +696,15 @@ function requireOwnPlan(rt: Runtime, plan: StoredPlan): void {
  */
 async function logPushDrop(rt: Runtime, plan: StoredPlan, run: PushRun): Promise<void> {
   const result = run.result;
-  const txHashes = (result.txHashes as string[] | undefined) ?? [];
-  if (result.status !== "broadcast" || txHashes.length === 0) return;
+  // `already-complete` is logged too, and that is the whole point of it being
+  // here. A run that dies between the broadcast and the checkpoint never
+  // reaches this function, so the invocation that later settles its attempt is
+  // the FIRST one able to report those recipients — if it stayed silent
+  // because it did not personally broadcast, a resumed drop would move real
+  // money and appear in the history nowhere. `paidThisRun` is what keeps that
+  // honest: it is empty on a re-run with nothing to settle, so an idle call
+  // still writes nothing.
+  if (result.status !== "broadcast" && result.status !== "already-complete") return;
   if (rt.net.name !== "mainnet") {
     const notes = (result.notes as string[] | undefined) ?? [];
     notes.push(
@@ -714,6 +721,10 @@ async function logPushDrop(rt: Runtime, plan: StoredPlan, run: PushRun): Promise
 
   const totalBase = recipients.reduce((s, l) => s + BigInt(l.amount), 0n);
   const unsendable = (result.unsendable as { address: string }[] | undefined)?.length ?? 0;
+  // This run's hashes only. `result.txHashes` carries the checkpoint's whole
+  // history, so using it would stamp a resumed run's row with the transactions
+  // an earlier row already claimed, and the two rows would stop partitioning.
+  const txHashes = run.txHashesThisRun;
   try {
     await recordAirdropLog(rt.net.claimDrops.hasuraUrl, {
       denom: plan.denom,
@@ -725,6 +736,11 @@ async function logPushDrop(rt: Runtime, plan: StoredPlan, run: PushRun): Promise
         `${(plan.meta.description as string | undefined) ?? ""} [created by ${plan.meta.createdBy ?? "trippy-mcp"}]` +
         (unsendable > 0
           ? ` [partial: ${unsendable} unsendable address(es) skipped]`
+          : "") +
+        // A row with no transaction to point at needs to say why, or it reads
+        // as a drop that never happened rather than one whose hash was lost.
+        (txHashes.length === 0
+          ? " [tx hash unrecoverable — these recipients were confirmed paid by re-reading their balances on chain]"
           : ""),
       txHashes,
     });

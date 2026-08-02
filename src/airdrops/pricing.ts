@@ -97,6 +97,67 @@ export async function accountSequence(rt: Runtime): Promise<number | null> {
   }
 }
 
+/**
+ * Find the hash of a send this wallet made at a known account sequence.
+ *
+ * The push rail can confirm that a lost broadcast LANDED — the probe recipient
+ * was paid — while never having been told the hash, because the client died or
+ * gave up before the broadcaster returned one. That leaves recipients who are
+ * genuinely paid and a history row with nothing to point at.
+ *
+ * The sequence is what makes the lookup exact rather than a guess: a
+ * transaction is valid at exactly one sequence, so at most one SUCCESSFUL
+ * transaction from this signer can carry it. The probe check on top is
+ * belt-and-braces for the case the caller is wrong about the verdict — if that
+ * sequence was actually consumed by some other transaction, this returns null
+ * rather than attributing a stranger's hash to the drop.
+ *
+ * Best-effort by contract: a missing hash costs a link in the audit row, and is
+ * never a reason to resend anything.
+ */
+export async function findTxHashAtSequence(
+  rt: Runtime,
+  sequence: number | null,
+  paidTo: string,
+): Promise<string | null> {
+  if (sequence === null) return null;
+  try {
+    const base = rt.net.lcdUrl.replace(/\/$/, "");
+    const query = encodeURIComponent(`message.sender='${rt.injAddress}'`);
+    const res = await fetch(
+      `${base}/cosmos/tx/v1beta1/txs?query=${query}&order_by=ORDER_BY_DESC&pagination.limit=20`,
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      tx_responses?: {
+        txhash?: string;
+        code?: number;
+        tx?: {
+          auth_info?: { signer_infos?: { sequence?: string }[] };
+          body?: { messages?: { "@type"?: string; outputs?: { address?: string }[] }[] };
+        };
+      }[];
+    };
+    for (const r of body.tx_responses ?? []) {
+      if (r.code !== 0) continue;
+      const signed = (r.tx?.auth_info?.signer_infos ?? []).some(
+        (s) => Number(s.sequence) === sequence,
+      );
+      if (!signed) continue;
+      const paysProbe = (r.tx?.body?.messages ?? []).some(
+        (m) =>
+          typeof m["@type"] === "string" &&
+          m["@type"].endsWith("MsgMultiSend") &&
+          (m.outputs ?? []).some((o) => o.address === paidTo),
+      );
+      if (paysProbe && typeof r.txhash === "string") return r.txhash;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 /** Bank balance of `denom` held by an arbitrary address. */
 export async function balanceOfAddress(
   rt: Runtime,

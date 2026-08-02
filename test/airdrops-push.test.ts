@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   chunk,
@@ -21,6 +21,7 @@ import {
   verdictFrom,
   type PendingAttempt,
 } from "../src/airdrops/push.js";
+import { findTxHashAtSequence } from "../src/airdrops/pricing.js";
 import { BANK_MULTISEND_TARGET } from "../src/chain/cosmos.js";
 
 const home = (): string => mkdtempSync(join(tmpdir(), "push-"));
@@ -179,5 +180,67 @@ describe("push policy", () => {
     expect(() => engine({ allowUnpricedSpend: true }).enforce(intent(null))).toThrow(
       /cannot price/,
     );
+  });
+});
+
+describe("recovering the hash of a send confirmed by re-reading the chain", () => {
+  // A landed-but-unreported send leaves recipients genuinely paid and nothing
+  // to point the history row at. The sequence is the exact key: a transaction
+  // is valid at exactly one, so at most one successful tx from this signer can
+  // carry it.
+  const PROBE = "inj1probe";
+  const rt = {
+    net: { lcdUrl: "https://lcd.test" },
+    injAddress: "inj1sender",
+  } as unknown as Parameters<typeof findTxHashAtSequence>[0];
+
+  const txResponse = (
+    over: Record<string, unknown> = {},
+    outputs: { address: string }[] = [{ address: PROBE }],
+    sequence = "7",
+  ) => ({
+    txhash: "HASH_AT_7",
+    code: 0,
+    tx: {
+      auth_info: { signer_infos: [{ sequence }] },
+      body: { messages: [{ "@type": "/cosmos.bank.v1beta1.MsgMultiSend", outputs }] },
+    },
+    ...over,
+  });
+
+  const stub = (tx_responses: unknown[]): void => {
+    vi.stubGlobal("fetch", async () => ({
+      ok: true,
+      json: async () => ({ tx_responses }),
+    }));
+  };
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("matches the tx signed at that exact sequence", async () => {
+    stub([txResponse({ txhash: "WRONG" }, [{ address: PROBE }], "8"), txResponse()]);
+    expect(await findTxHashAtSequence(rt, 7, PROBE)).toBe("HASH_AT_7");
+  });
+
+  it("ignores a tx at that sequence that did not pay the probe", async () => {
+    // If the sequence was consumed by something else, the verdict was wrong —
+    // better to report no hash than to attribute a stranger's tx to the drop.
+    stub([txResponse({}, [{ address: "inj1somebodyelse" }])]);
+    expect(await findTxHashAtSequence(rt, 7, PROBE)).toBeNull();
+  });
+
+  it("ignores a failed tx, which paid nobody", async () => {
+    stub([txResponse({ code: 5 })]);
+    expect(await findTxHashAtSequence(rt, 7, PROBE)).toBeNull();
+  });
+
+  it("is best-effort: an unknown sequence or a dead LCD yields null, never a throw", async () => {
+    stub([txResponse()]);
+    expect(await findTxHashAtSequence(rt, 999, PROBE)).toBeNull();
+    expect(await findTxHashAtSequence(rt, null, PROBE)).toBeNull();
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("connection refused");
+    });
+    await expect(findTxHashAtSequence(rt, 7, PROBE)).resolves.toBeNull();
   });
 });

@@ -273,13 +273,27 @@ of total weight. What keeps a default `non-stake` drop from sending half of
 itself to a keyless contract is `NON_WALLET_HOLDERS`, not the argument.
 Docstring corrected.
 
+### Fixed after the sweep
+
+**A crashed-then-resumed push drop now writes its history row.** It did not:
+the resume returned `already-complete` with a hardcoded empty `paidThisRun`,
+`logPushDrop` skipped anything that was not `broadcast`, and the landed tx's
+hash had been thrown away (`markPaid(…, null)`) — so a drop that moved real
+money appeared in the site's history nowhere, and there was nothing to point a
+row at anyway. Three changes: the resume reports what it settled, `logPushDrop`
+accepts `already-complete` (guarded by `paidThisRun`, so an idle re-run still
+writes nothing), and a landed send's hash is recovered by searching this
+signer's transactions for the one signed at the attempt's sequence — exact,
+because a transaction is valid at exactly one sequence, and cross-checked
+against the probe recipient so a sequence consumed by something else yields
+null rather than a stranger's hash. Rows now carry `txHashesThisRun` rather
+than the checkpoint's whole history, so two rows still partition. Verified on
+testnet by reproducing the crash state against a send that really landed: the
+resume recovered `042BA0F5…`, reported 2 recipients, and re-signed nothing
+(sequence advanced by one, recipients paid once).
+
 ### Open, not fixed
 
-- **A crashed-then-resumed push drop writes no history row on mainnet.** The
-  resume returns `already-complete`, which `logPushDrop` skips, and the landed
-  tx's hash was never captured (`markPaid(…, null)`), so even reaching the
-  insert there is nothing to log. Money is correct; the audit row is missing.
-  Recovering it means finding the tx by sender+sequence.
 - **`claimUrl` is network-ambiguous.** `/claim/<id>` resolves against whatever
   network the visitor's site store is set to, and campaign ids are per-contract,
   so testnet #5 and a future mainnet #5 share a URL.

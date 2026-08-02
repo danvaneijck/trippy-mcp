@@ -57,7 +57,13 @@ import {
 } from "./checkpoint.js";
 import type { LeafInput } from "./merkle.js";
 import type { StoredPlan } from "./plan.js";
-import { accountSequence, balanceOfAddress, denomBalance, usdValue } from "./pricing.js";
+import {
+  accountSequence,
+  balanceOfAddress,
+  denomBalance,
+  findTxHashAtSequence,
+  usdValue,
+} from "./pricing.js";
 import { fromBaseUnits } from "./units.js";
 
 /**
@@ -202,7 +208,13 @@ interface RunState {
   paidThisRun: Set<string>;
   failed: Map<string, string>;
   txHashes: string[];
-  /** Sends confirmed by re-reading the chain rather than by a returned hash. */
+  /** Hashes THIS invocation landed, for the same reason `paidThisRun` exists. */
+  txHashesThisRun: string[];
+  /**
+   * Sends confirmed by re-reading the chain whose hash could not be recovered
+   * afterwards either. A send confirmed by re-read but matched back to its hash
+   * does NOT count here — it is indistinguishable from an ordinary one.
+   */
   confirmedWithoutHash: number;
   /** Set when the signer reported dryRun — the run stops after the first group. */
   dryRun: boolean;
@@ -220,7 +232,10 @@ function markPaid(
     st.paid.add(a);
     st.paidThisRun.add(a);
   }
-  if (txHash) st.txHashes.push(txHash);
+  if (txHash) {
+    st.txHashes.push(txHash);
+    st.txHashesThisRun.push(txHash);
+  }
 }
 
 type GroupOutcome =
@@ -311,9 +326,13 @@ async function trySend(
 
       const verdict = await resolveAttempt(rt, st.denom, pending, { poll: true });
       if (verdict === "landed") {
-        markPaid(rt, st, pending.addresses, null);
+        // It landed, so it has a hash somewhere — the client just never got
+        // told. Match it back by the sequence it was signed at, so the history
+        // row and the checkpoint point at the real transaction.
+        const recovered = await findTxHashAtSequence(rt, pending.sequenceBefore, pending.probe);
+        markPaid(rt, st, pending.addresses, recovered);
         clearPending(rt.home, st.base);
-        st.confirmedWithoutHash += 1;
+        if (recovered === null) st.confirmedWithoutHash += 1;
         return { kind: "paid" };
       }
       if (verdict === "unresolved") return { kind: "unresolved", reason: lastReason };
@@ -414,6 +433,8 @@ export interface PushRun {
    * result is a tool response an agent pays context for.
    */
   paidThisRun: string[];
+  /** Hashes landed by THIS invocation, paired with `paidThisRun`. */
+  txHashesThisRun: string[];
 }
 
 /**
@@ -443,6 +464,7 @@ export async function executePush(
     symbol: opts.symbol,
     paid: new Set(prior?.paid ?? []),
     paidThisRun: new Set(),
+    txHashesThisRun: [],
     failed: new Map((prior?.failed ?? []).map((f) => [f.address, f.reason])),
     txHashes: [...(prior?.txHashes ?? [])],
     confirmedWithoutHash: 0,
@@ -456,9 +478,12 @@ export async function executePush(
   if (inFlight) {
     const verdict = await resolveAttempt(rt, plan.denom, inFlight, { poll: false });
     if (verdict === "landed") {
-      markPaid(rt, st, inFlight.addresses, null);
+      const recovered = await findTxHashAtSequence(rt, inFlight.sequenceBefore, inFlight.probe);
+      markPaid(rt, st, inFlight.addresses, recovered);
+      if (recovered === null) st.confirmedWithoutHash += 1;
       notes.push(
-        `an unconfirmed send from a previous run DID land — ${inFlight.addresses.length} recipients were already paid and have been skipped`,
+        `an unconfirmed send from a previous run DID land — ${inFlight.addresses.length} recipients were already paid and have been skipped` +
+          (recovered ? ` (recovered its tx ${recovered})` : ""),
       );
       clearPending(rt.home, base);
     } else if (verdict === "did_not_land") {
@@ -480,7 +505,16 @@ export async function executePush(
     (l) => !st.paid.has(l.address) && !st.failed.has(l.address),
   );
   if (remaining.length === 0) {
-    return { result: summarize(rt, plan, st, notes, "already-complete"), paidThisRun: [] };
+    // NOT an empty paidThisRun. Reaching here after settling an in-flight
+    // attempt means this invocation is the one that established those
+    // recipients were paid — and the run that actually sent to them died
+    // before it could log anything, so if this call reports nothing, that
+    // drop never appears in the history at all.
+    return {
+      result: summarize(rt, plan, st, notes, "already-complete"),
+      paidThisRun: [...st.paidThisRun],
+      txHashesThisRun: [...st.txHashesThisRun],
+    };
   }
 
   const remainingBase = remaining.reduce((s, l) => s + BigInt(l.amount), 0n);
@@ -507,6 +541,7 @@ export async function executePush(
   if (st.dryRun) {
     return {
       paidThisRun: [],
+      txHashesThisRun: [],
       result: {
       status: "dry-run",
       planId: plan.planId,
@@ -519,7 +554,11 @@ export async function executePush(
     };
   }
 
-  return { result: summarize(rt, plan, st, notes, "broadcast"), paidThisRun: [...st.paidThisRun] };
+  return {
+    result: summarize(rt, plan, st, notes, "broadcast"),
+    paidThisRun: [...st.paidThisRun],
+    txHashesThisRun: [...st.txHashesThisRun],
+  };
 }
 
 function summarize(
