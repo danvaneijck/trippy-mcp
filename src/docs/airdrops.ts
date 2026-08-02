@@ -10,9 +10,9 @@
 import type { LiveParams } from "./params.js";
 
 export const id = "airdrops";
-export const title = "Airdrops: the claim-drop rail";
+export const title = "Airdrops: the claim-drop and push rails";
 export const summary =
-  "How to snapshot holders and fund a merkle claim drop in one transaction — the two-step commit, the caps, and what is irreversible.";
+  "How to snapshot holders and pay them — merkle claim drop or direct push — the two-step commit, the caps, and what is irreversible.";
 
 export const sources = [
   "choice-claim-drops contract Config (live read) — fee_bps and paused state",
@@ -73,8 +73,9 @@ change to the allocation produces a different plan and a different merkle root.
 - \`gov_voters\` — everyone who voted on a governance proposal. Filter with
   \`filters.voteOptions: ["yes"]\` etc.
 - \`mito_vault\` — LP holders of a Mito vault, weighted by LP held or (with
-  \`holderType: "stake"\`) by LP staked. Staked LP resolves back to the wallet
-  that staked it rather than to the staking contract.
+  \`holderType: "stake"\`) by LP staked. Staked LP is credited back to the wallet
+  that staked it; the staking contract itself is also returned as a "holder" of
+  that same LP and is excluded, so it is never paid twice.
 - \`buyback_round\` — everyone who committed INJ in a Community BuyBack round,
   weighted by how much (mainnet only). Whitelisted-but-never-bid wallets hold a
   zero-deposit row in the same map and are not participants; they are excluded.
@@ -111,8 +112,9 @@ the total across whoever survives), \`exclude\`, \`voteOptions\` (gov only).
 
 ## What gets dropped from your list, and why
 
-- **module accounts and burn addresses** — they hold balances and no keys, so
-  an allocation to one is funds locked in the contract forever
+- **module accounts and burn addresses** — they hold balances and no keys. On a
+  claim drop that allocation sits in the contract unclaimable forever; on a push
+  it is sent, accepted and gone
 - **a launch's own sink** — it holds the entire unsold curve supply, and it is
   the largest "holder" of any un-graduated launch. Not excluding it would send
   most of the drop back to the protocol
@@ -164,11 +166,15 @@ before you run one:
   land; the first recipient's balance says which way it went). If it cannot be
   settled, the run STOPS with the attempt saved rather than resending, because
   resending something that lands pays those wallets twice.
-- **Some addresses cannot receive.** The bank module refuses its own module
-  accounts, and the refusal fires during gas simulation, so one bad recipient
-  reverts the whole transaction and strands everyone in it. The known ones are
-  filtered out at preview; an unknown one causes the group to be halved and
-  retried down to single addresses, so it only ever strands itself.
+- **Some addresses cannot receive, and some can but should not.** The bank
+  module refuses about half of its own module accounts, and that refusal fires
+  during gas simulation, so one such recipient reverts the whole transaction and
+  strands everyone in it. An unknown one causes the group to be halved and
+  retried down to single addresses, so it only ever strands itself. The other
+  half ACCEPT a transfer and simply keep it — no error, no way to detect it
+  afterwards, and no key anywhere that can move it again. Both kinds are
+  filtered out at preview, and that filter, not the retry logic, is what stops a
+  drop burning tokens on an address nobody controls.
 
 **A push execute is resumable, and that is what makes it safe.** If it stops
 partway — an unresolved send, an interrupted process, an empty wallet — call
@@ -178,8 +184,11 @@ That is the only correct response to a partial push run: do not preview again,
 which would build a fresh plan that knows nothing about who has been paid.
 
 \`airdrop_status\` on a push planId reports paid/total, the landed tx hashes,
-any unsendable addresses and whether a send is still in the air. Completed push
-drops are written to the site's airdrop history with the plan's criteria string.
+any unsendable addresses and whether a send is still in the air. Push drops on
+MAINNET are written to the site's airdrop history with the plan's criteria
+string, including the recipients a resumed run settled rather than sent; that
+history has no notion of networks, so drops on any other network are left out of
+it deliberately.
 
 ## After it is live: \`airdrop_manage\`
 

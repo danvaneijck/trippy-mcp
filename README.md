@@ -56,7 +56,8 @@ Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit lo
 | `wallet_status` / `sweep` | balances + policy budget; send funds home |
 | `portfolio` | every holding valued in USD (quote-rate feed / last curve trade / Choice stats) |
 | `agent_info` | identity + how to claim the agent to your Terminal profile |
-| `airdrop_preview` / `airdrop_execute` / `airdrop_status` | merkle claim drops to token or launch holders — one tx for any list size. Two-step commit: preview publishes and broadcasts nothing, execute funds only a previewed plan. Capped by `policy.airdropCapUsd`; set it to `0` and these tools are not registered at all |
+| `airdrop_preview` / `airdrop_execute` / `airdrop_status` | airdrop to a snapshot — CSV, token/launch holders, NFT (CW721 + CW404), governance voters, Mito vault LPs, or BuyBack participants. Two rails: a **merkle claim drop** (one tx for any list size, unclaimed funds recoverable after expiry) or a **push** straight to every wallet (≤1000 recipients, nobody has to claim, irreversible). Two-step commit: preview publishes and broadcasts nothing, execute funds only a previewed plan. A push run is resumable — re-run the same planId and nobody is paid twice |
+| `airdrop_manage` | claw back an expired campaign's remainder, extend its expiry, freeze the list, pause/resume claims. Call with just a campaignId to see which of those the contract will accept right now and why not — the check is local and costs nothing |
 
 `buy`/`sell`/`quote`/`portfolio`/`sweep` state their scope in their descriptions, so a model with the Injective MCP also connected picks the right server (and the right wallet) — see [below](#alongside-the-injective-ai-sdk).
 
@@ -118,7 +119,9 @@ trippy-mcp export-key --yes-i-understand
     "maxSlippageBps": 300,
     "tradingEnabled": true,
     "allowUnpricedSpend": false,
-    "airdropCapUsd": 1000            // max USD per airdrop campaign; 0 = airdrop tools not registered
+    "airdropCapUsd": 1000            // max USD per airdrop campaign; 0 = airdrop tools not
+                                     // registered at all — including `airdrop_manage`, so wind
+                                     // down any live campaign before switching them off
   },
   "dryRun": false
   // optional: rpcUrls, lcdUrl, pumpApiBase, choiceApiBase, gasBufferPct, gasPriceWei, referrer
@@ -139,5 +142,13 @@ npm ci && npm run typecheck && npm test && npm run build
 node scripts/sync-abi.mjs --check     # ABI-drift guard against the vendored artifact
 SHROOM_REPO=../shroom_launchpad node scripts/sync-abi.mjs --refresh
 ```
+
+Releases publish from CI on a `v*` tag (npm trusted publishing via OIDC, so
+there is no token and provenance is automatic) — bump the version, tag, push.
+
+Design and testing notes:
+
+- [`docs/DESIGN-protocol-docs-and-airdrops.md`](docs/DESIGN-protocol-docs-and-airdrops.md) — why `explain` and the airdrop rails are shaped the way they are, the decisions taken while building them, and the full-rail sweep that first ran them against a chain (including five things the code believed that the chain contradicted).
+- [`docs/TESTING-airdrops.md`](docs/TESTING-airdrops.md) — how to exercise the rails on testnet without touching a live install, and what is still untested.
 
 MIT
