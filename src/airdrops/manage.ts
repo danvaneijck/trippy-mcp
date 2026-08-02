@@ -3,13 +3,21 @@
  *
  * Two halves.
  *
- * `manageActions` is a pure restatement of the contract's own rules about which
- * action is legal when. Duplicating them is deliberate and is the whole point of
- * the module: without it the agent's only way to discover that a clawback is
- * three weeks early is to sign a transaction and read the revert. Several of
- * these actions are irreversible, so "spend gas to find out" is the wrong
- * discovery mechanism — the rules are checked locally first, and the reason an
- * action is unavailable is returned in words.
+ * `manageActions` restates the contract's own rules about which action is legal
+ * when. Duplicating them is deliberate and is the whole point of the module:
+ * without it the agent's only way to discover that a clawback is three weeks
+ * early is to sign a transaction and read the revert. Several of these actions
+ * are irreversible, so "spend gas to find out" is the wrong discovery
+ * mechanism — the rules are checked locally first, and the reason an action is
+ * unavailable is returned in words.
+ *
+ * It is a restatement plus TWO deliberate extras, verified against the deployed
+ * contract by simulation (2026-08-02): re-freezing an already-frozen campaign
+ * and pausing a swept one are both accepted on chain, and both are no-ops.
+ * They are reported unavailable here anyway, because offering an agent an
+ * action whose only effect is a gas bill is worse than explaining why it is
+ * pointless. Those two reasons say "this would do nothing"; every other reason
+ * in the table mirrors an error the contract really does return.
  *
  * The other half builds and signs the messages. Policy runs inside the signer as
  * always; what is decided HERE is which intent kind each action carries:
@@ -95,6 +103,8 @@ export function manageActions(
   const notCreator = isCreator
     ? undefined
     : "only the campaign's creator can manage it, and this agent's wallet is not it";
+  // The contract rejects clawback and set_expiry on a swept campaign
+  // (ContractError::Swept). It does NOT reject pause — that one is ours.
   const swept = campaign.swept
     ? "this campaign was already clawed back — it is closed for good"
     : undefined;
@@ -104,7 +114,11 @@ export function manageActions(
 
   const freezeReason =
     notCreator ??
-    (campaign.frozen ? "already frozen — the recipient list can never change" : undefined) ??
+    // Not a contract rule: `freeze` is idempotent on chain and a second one
+    // succeeds. Withheld because it would spend gas to change nothing.
+    (campaign.frozen
+      ? "already frozen — the recipient list can never change, so this would spend gas and change nothing"
+      : undefined) ??
     (campaign.root === null ? "nothing published yet, so there is no root to freeze" : undefined);
 
   let expiryReason = notCreator ?? swept;
@@ -131,7 +145,14 @@ export function manageActions(
       ? `only after the expiry passes (${campaign.expiry ? nanosToIso(campaign.expiry) : "unknown"})`
       : undefined);
 
-  const pauseReason = notCreator ?? swept;
+  // Also not a contract rule — `set_campaign_paused` checks only the creator,
+  // so pausing a swept campaign is accepted. Withheld for the same reason as a
+  // redundant freeze: a closed campaign has no claims left to pause.
+  const pauseReason =
+    notCreator ??
+    (campaign.swept
+      ? "this campaign was already clawed back — it is closed for good, so there are no claims left to pause"
+      : undefined);
 
   return {
     freeze: { enabled: !freezeReason, ...(freezeReason ? { reason: freezeReason } : {}) },

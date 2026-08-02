@@ -222,6 +222,16 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
   };
   if (totalUsd === null) {
     policyCheck.verdict = "will be REFUSED — an airdrop that cannot be priced cannot be capped";
+    // Say WHY it could not be priced. The quote assets are valued off the pump
+    // API's USD feed, and the testnet NetworkDef ships no pumpApiBase — so on
+    // testnet EVERY airdrop is unpriceable, and the bare verdict above reads
+    // like a policy decision rather than a missing endpoint.
+    const isQuoteAsset = Object.values(rt.net.quoteAssets).some((q) => q.bankDenom === asset);
+    policyCheck.whyUnpriced = !rt.net.pumpApiBase
+      ? `no pumpApiBase is configured for ${rt.net.name}, so the quote-asset USD feed is unreachable and nothing on this network can be priced — set pumpApiBase in config.json`
+      : isQuoteAsset
+        ? "the quote-asset USD feed did not return a rate for this asset"
+        : `no USD price could be resolved for ${asset} from the Choice token API`;
   } else if (totalUsd > cap) {
     policyCheck.verdict = `will be REFUSED — $${totalUsd.toFixed(2)} exceeds the per-campaign cap $${cap}`;
   } else if (totalUsd > rt.policy.remainingDailyUsd()) {
@@ -672,11 +682,30 @@ function requireOwnPlan(rt: Runtime, plan: StoredPlan): void {
  * Hasura failure is a missing history row, never a failed drop. Only recipients
  * a landed transaction actually paid are logged, so a partial run reads as what
  * it was.
+ *
+ * MAINNET ONLY, and not for a policy reason — for a schema one. The claim-drop
+ * tables carry a `network` column, so a testnet campaign is distinguishable
+ * there; these three do not. `airdrop_tracker_airdroplog` has no network
+ * column, and the two tables its foreign keys point at (`token_tracker_token`,
+ * `wallet_tracker_wallet`) are the site's shared token and wallet registries.
+ * Writing a testnet drop would therefore put a testnet denom in the site's
+ * token table and a row with unresolvable tx hashes in the airdrop history real
+ * users read, with nothing to filter it back out by. The Hasura endpoint is the
+ * same production host on both networks, so this is the only place the
+ * distinction can be made.
  */
 async function logPushDrop(rt: Runtime, plan: StoredPlan, run: PushRun): Promise<void> {
   const result = run.result;
   const txHashes = (result.txHashes as string[] | undefined) ?? [];
   if (result.status !== "broadcast" || txHashes.length === 0) return;
+  if (rt.net.name !== "mainnet") {
+    const notes = (result.notes as string[] | undefined) ?? [];
+    notes.push(
+      `this drop was NOT written to the site's airdrop history because it ran on ${rt.net.name} — that history has no network column, and the site would show a ${rt.net.name} drop as if it were live`,
+    );
+    result.notes = notes;
+    return;
+  }
   // Only what THIS run paid: a drop finished across two calls should produce
   // two history rows that partition the recipients, not two that overlap.
   const paid = new Set(run.paidThisRun);

@@ -16,12 +16,19 @@
  *    anything else. Stopping is the correct outcome: there is no third option
  *    that is not either double-paying or stranding.
  *
- * 2. Some addresses cannot receive at all. The bank keeper refuses the x/auth
- *    module accounts, and that refusal fires during gas SIMULATION — so one bad
- *    recipient reverts the whole chunk and strands the other 999 with it. The
- *    known ones are filtered at the leaf builder; the unknown ones (a future
- *    module, an EVM precompile) are why a failed group is BISECTED down to
- *    single addresses, so an unsendable recipient only ever strands itself.
+ * 2. Some addresses cannot receive at all. The bank keeper refuses a subset of
+ *    the x/auth module accounts — 12 of the 20, measured, not all of them as
+ *    this comment once claimed (see address.ts) — and that refusal fires during
+ *    gas SIMULATION, so one bad recipient reverts the whole chunk and strands
+ *    the other 999 with it. The known ones are filtered at the leaf builder;
+ *    the unknown ones (a future module, an EVM precompile) are why a failed
+ *    group is BISECTED down to single addresses, so an unsendable recipient
+ *    only ever strands itself.
+ *
+ *    Note the OTHER 8 module accounts accept the transfer and simply keep it.
+ *    Nothing here can detect that — a send to one succeeds — which is why the
+ *    leaf-builder exclusion, not this bisection, is what actually protects a
+ *    drop from burning tokens on a keyless account.
  *
  * Those two interact, which is why the signer simulates as a separate step. A
  * rejected simulation and a lost broadcast look identical from outside — no

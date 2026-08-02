@@ -273,6 +273,30 @@ describe("units", () => {
     expect(isBlocked(B)).toBe(true);
     expect(isBlocked(A)).toBe(false);
   });
+
+  // Measured on chain 2026-08-02: the bank keeper refuses only 12 of these 20.
+  // The other 8 ACCEPT the transfer and keep it forever, so for those the leaf
+  // builder is the only protection there is — a send to one succeeds and the
+  // tokens are gone. Pinned so nobody prunes the list to "what the chain
+  // blocks anyway", which would silently start burning tokens on eight
+  // addresses. `xwasm` is the one that proved it, with 0.001 testnet INJ.
+  it("blocks module accounts the chain is happy to credit", () => {
+    const isBlocked = exclusionSet();
+    for (const acceptsButBurns of [
+      "inj1z5ewmnfpa3at4j54pq6dh66rthrpkvhnxqadkf", // xwasm
+      "inj10d07y265gmmuvt4z0w9aw880jnsr700jstypyt", // gov
+      "inj1jv65s3grqf6v6jl3dp4t6c9t9rk99cd8dkncm8", // distribution
+      "inj1glht96kr2rseywuvhhay894qw7ekuc4qqdy7m7", // erc20
+      "inj1979qcq0kdz72w0k9rsxcmfmagx2cydrs40q2xg", // peggy
+      "inj19ejy8n9qsectrf4semdp9cpknflld0j6hf2fle", // tokenfactory
+      "inj1vn5fx74ud4cu7tf0pls9u5krxengsdzrg9ap2d", // insurance
+      "inj14vnmw2wee3xtrsqfvpcqg35jg9v7j2vdpzx0kk", // exchange
+    ]) {
+      expect(isBlocked(acceptsButBurns)).toBe(true);
+    }
+    // And the ones it does refuse, which are what the bisection routes around.
+    expect(isBlocked("inj1xds4f0m87ajl3a6az6s2enhxrd0wta4860twp8")).toBe(true); // wasm
+  });
 });
 
 describe("contract arithmetic", () => {

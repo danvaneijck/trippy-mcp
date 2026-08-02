@@ -108,6 +108,25 @@ describe("manage rules — the contract's own preconditions, checked locally", (
     expect(manageActions(campaign(), "750", NOW, true).pause.enabled).toBe(true);
     expect(manageActions(campaign({ paused: true }), "750", NOW, true).pause.enabled).toBe(true);
   });
+
+  // The two places this table is deliberately STRICTER than the contract.
+  // Both were confirmed accepted on chain by simulation (2026-08-02), so the
+  // reasons must not claim the contract is what refuses them — a future reader
+  // checking these against the Rust would otherwise conclude the table is buggy.
+  it("withholds the two no-op actions without blaming the contract", () => {
+    const refrozen = manageActions(campaign({ frozen: true }), "750", NOW, true).freeze;
+    expect(refrozen.enabled).toBe(false);
+    expect(refrozen.reason).toMatch(/change nothing/);
+
+    const sweptPause = manageActions(campaign({ swept: true }), "0", NOW + 1e10, true).pause;
+    expect(sweptPause.enabled).toBe(false);
+    expect(sweptPause.reason).toMatch(/no claims left to pause/);
+
+    // Neither reason may attribute the refusal to the contract rejecting it.
+    for (const reason of [refrozen.reason, sweptPause.reason]) {
+      expect(reason).not.toMatch(/contract (rejects|refuses)/i);
+    }
+  });
 });
 
 describe("manage messages — shapes the contract accepts", () => {

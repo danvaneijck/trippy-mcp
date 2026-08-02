@@ -25,35 +25,51 @@ export function isValidInjAddress(address: string): boolean {
 }
 
 /**
- * Bank-module blocked addresses on Injective mainnet — the x/auth module
- * accounts. The bank keeper refuses to credit any of them, so an allocation to
- * one is value that enters the drop and can never leave it.
+ * The x/auth module accounts. Never allocate to one.
+ *
+ * The reason is NOT uniform across the list, and the difference was measured
+ * rather than assumed (testnet MsgMultiSend simulate against each, 2026-08-02):
+ *
+ *  - 12 of them the bank keeper genuinely refuses — `<addr> is not allowed to
+ *    receive funds: unauthorized`. That refusal fires during gas SIMULATION, so
+ *    one of these in a push chunk reverts the whole chunk. They are marked
+ *    `refused` below.
+ *  - The other 8 accept the transfer. They are marked `accepts`, and they are
+ *    the more dangerous half: a send to one SUCCEEDS and the tokens are then
+ *    held by an account with no key in existence. Verified the hard way during
+ *    the sweep — 0.001 testnet INJ was paid to `xwasm` and is unrecoverable.
+ *
+ * So the list is not "addresses the chain will stop you from paying". It is
+ * "addresses that are never a wallet", and for two thirds of it this module is
+ * the only thing standing between an allocation and a permanent burn. Do not
+ * prune it against the chain's blocked-address set — that set is smaller.
  *
  * Derived deterministically from the module name (authtypes.NewModuleAddress),
- * so they never change. Source: GET /cosmos/auth/v1beta1/module_accounts
- * (mainnet), 2026-07-09.
+ * so the addresses themselves never change. Source: GET
+ * /cosmos/auth/v1beta1/module_accounts — identical on mainnet (2026-07-09) and
+ * testnet (2026-08-02), all 20 present on both.
  */
 export const BLOCKED_RECIPIENTS: ReadonlySet<string> = new Set([
-  "inj1j4yzhgjm00ch3h0p9kel7g8sp6g045qf32pzlj", // auction
-  "inj1fl48vsnmsdzcv85q5d2q4z5ajdha8yu3lj7tt0", // bonded_tokens_pool
-  "inj1jv65s3grqf6v6jl3dp4t6c9t9rk99cd8dkncm8", // distribution
-  "inj1glht96kr2rseywuvhhay894qw7ekuc4qqdy7m7", // erc20
-  "inj1vqu8rska6swzdmnhf90zuv0xmelej4lq8mjsxs", // evm
-  "inj14vnmw2wee3xtrsqfvpcqg35jg9v7j2vdpzx0kk", // exchange
-  "inj17xpfvakm2amg962yls6f84z3kell8c5l6s5ye9", // fee_collector
-  "inj176rcyfn5k9d0wcxel3kmwvxh0hy3xcwen9585u", // feeibc
-  "inj10d07y265gmmuvt4z0w9aw880jnsr700jstypyt", // gov
-  "inj1vn5fx74ud4cu7tf0pls9u5krxengsdzrg9ap2d", // insurance
-  "inj1vlthgax23ca9syk7xgaz347xmf4nunefdppn7g", // interchainaccounts
-  "inj1m3h30wlvsf8llruxtpukdvsy0km2kum8zcsu4c", // mint
-  "inj1tygms3xhhs3yv487phx3dw4a95jn7t7ltjz6am", // not_bonded_tokens_pool
-  "inj1979qcq0kdz72w0k9rsxcmfmagx2cydrs40q2xg", // peggy
-  "inj1fl3um4qyagpfpwked5lpenvjj7wn8trr93jdku", // permissions
-  "inj19ejy8n9qsectrf4semdp9cpknflld0j6hf2fle", // tokenfactory
-  "inj1yl6hdjhmkf37639730gffanpzndzdpmhykpd9m", // transfer
-  "inj1h3j5kq3efj96ga8gre6pxmp2qmfvs994clv2su", // txfees
-  "inj1xds4f0m87ajl3a6az6s2enhxrd0wta4860twp8", // wasm
-  "inj1z5ewmnfpa3at4j54pq6dh66rthrpkvhnxqadkf", // xwasm
+  "inj1j4yzhgjm00ch3h0p9kel7g8sp6g045qf32pzlj", // auction                — refused
+  "inj1fl48vsnmsdzcv85q5d2q4z5ajdha8yu3lj7tt0", // bonded_tokens_pool     — refused
+  "inj1jv65s3grqf6v6jl3dp4t6c9t9rk99cd8dkncm8", // distribution           — ACCEPTS (burns)
+  "inj1glht96kr2rseywuvhhay894qw7ekuc4qqdy7m7", // erc20                  — ACCEPTS (burns)
+  "inj1vqu8rska6swzdmnhf90zuv0xmelej4lq8mjsxs", // evm                    — refused
+  "inj14vnmw2wee3xtrsqfvpcqg35jg9v7j2vdpzx0kk", // exchange               — ACCEPTS (burns)
+  "inj17xpfvakm2amg962yls6f84z3kell8c5l6s5ye9", // fee_collector          — refused
+  "inj176rcyfn5k9d0wcxel3kmwvxh0hy3xcwen9585u", // feeibc                 — refused
+  "inj10d07y265gmmuvt4z0w9aw880jnsr700jstypyt", // gov                    — ACCEPTS (burns)
+  "inj1vn5fx74ud4cu7tf0pls9u5krxengsdzrg9ap2d", // insurance              — ACCEPTS (burns)
+  "inj1vlthgax23ca9syk7xgaz347xmf4nunefdppn7g", // interchainaccounts     — refused
+  "inj1m3h30wlvsf8llruxtpukdvsy0km2kum8zcsu4c", // mint                   — refused
+  "inj1tygms3xhhs3yv487phx3dw4a95jn7t7ltjz6am", // not_bonded_tokens_pool — refused
+  "inj1979qcq0kdz72w0k9rsxcmfmagx2cydrs40q2xg", // peggy                  — ACCEPTS (burns)
+  "inj1fl3um4qyagpfpwked5lpenvjj7wn8trr93jdku", // permissions            — refused
+  "inj19ejy8n9qsectrf4semdp9cpknflld0j6hf2fle", // tokenfactory           — ACCEPTS (burns)
+  "inj1yl6hdjhmkf37639730gffanpzndzdpmhykpd9m", // transfer               — refused
+  "inj1h3j5kq3efj96ga8gre6pxmp2qmfvs994clv2su", // txfees                 — refused
+  "inj1xds4f0m87ajl3a6az6s2enhxrd0wta4860twp8", // wasm                   — refused
+  "inj1z5ewmnfpa3at4j54pq6dh66rthrpkvhnxqadkf", // xwasm                  — ACCEPTS (burns)
 ]);
 
 /**

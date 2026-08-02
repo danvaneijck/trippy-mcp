@@ -716,10 +716,21 @@ interface MitoHolder {
  * Mito vault LP holders.
  *
  * The one source that does not come from a chain endpoint: LP holdings are
- * indexed by Mito's own service, and passing it the staking contract is what
- * makes staked LP resolve back to the wallet that staked it rather than to the
- * contract holding it. Without that, a vault's largest "holder" is the staking
- * contract and the drop goes to a contract with no keys.
+ * indexed by Mito's own service. Passing it the staking contract is what
+ * populates each holder's `stakedAmount` and credits staked LP back into the
+ * wallet's own `amount`.
+ *
+ * What it does NOT do — checked against mainnet vaults, 2026-08-02 — is remove
+ * the staking contract from the response. It comes back as a holder in its own
+ * right, carrying an `amount` equal to the sum of everyone's `stakedAmount`:
+ * the same LP, counted twice. On BLACK-INJ-v1 that row was 47% of the total
+ * weight. So the thing that keeps a `non-stake` drop from sending half of
+ * itself to a keyless contract is the exclusion list (MITO_STAKING_CONTRACT is
+ * in NON_WALLET_HOLDERS), not this argument. Remove it from there and the
+ * argument alone will not save the drop.
+ *
+ * `non-stake` weights by `amount`, which already includes staked LP, so it
+ * means "total LP held" as documented. `stake` weights by `stakedAmount` alone.
  */
 async function mitoVaultHolders(
   rt: Runtime,

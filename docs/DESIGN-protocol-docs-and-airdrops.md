@@ -1,6 +1,6 @@
 # Design: protocol knowledge + airdrop tools for trippy-mcp
 
-Status: **ALL FOUR PRs BUILT** (2026-08-02, branch `feat/explain-and-airdrops`, unpushed). Nothing has been broadcast on any network — the whole rail is unit-tested only. Decisions taken during the build are recorded in "Decisions" at the bottom, which supersedes the original "Open questions" list.
+Status: **ALL FOUR PRs BUILT AND SWEPT** (2026-08-02, branch `feat/explain-and-airdrops`, unpushed). Every rail has now been broadcast on testnet — claim drop, `airdrop_manage` including a real clawback, push with bisection, and crash-resume — plus read-only mainnet previews of every source. Results, five things the chain contradicted, and what is still open are in "Full-rail sweep" at the bottom; the "Decisions" sections above it supersede the original "Open questions" list.
 Scope: (1) endpoints that teach agents how Shroom Pad and Choice work (quote choice, fees, discounts, mechanics); (2) airdrop endpoints replicating the trippytools criteria types; (3) hooks for future work (liquidity positions, streaming rewards).
 
 ---
@@ -200,4 +200,92 @@ Each PR follows the house pattern: impl in `tools.ts` (pure pieces exported for 
 
 ### Still not built
 
-Nothing from the rollout table. **No mainnet or testnet broadcast has been run** — every rail is unit-tested only, and the push rail's uncertainty handling in particular has never met a real mempool.
+Nothing from the rollout table.
+
+## Full-rail sweep (2026-08-02) — first broadcasts
+
+Every rail has now been run against a chain. Testnet: a scratch install
+(`TRIPPY_MCP_HOME`, agent `sweep-tester`, wallet
+`inj120sh4mtk5u6gfea8r74e46fcq5vc6jmth6k237`) against claim-drops instance
+`inj1f2ht…`. Mainnet: read-only previews only, which broadcast nothing.
+
+### What passed
+
+| # | Test | Result |
+|---|---|---|
+| 1 | Claim drop end to end (testnet) | **campaign #5**. Leaves published + squat-verified, create+fund+auto-freeze in ONE tx, campaign id read straight from the tx events (fallback path not needed), row indexed with `network: testnet`, `leaves_uri` serves the document, on-chain state frozen/funded/unclaimed. |
+| 2 | `airdrop_manage` | Availability table correct. `set_expiry` extend broadcast; shortening refused locally. `pause`/`unpause` broadcast; second pause → `no_change`. **Real clawback** on expired campaign #7 recovered 0.002 INJ and left `swept: true`. Every refusal reason cross-checked against the contract by simulation — see below. |
+| 3 | Push with a bank-refused recipient | `simulate_rejected` matched Injective's real error shape (`… is not allowed to receive funds: unauthorized`) — the classification the whole bisection depends on. Group of 5 bisected into 2 landed txs paying 4; the blocked address stranded alone with the chain's own reason. No recipient appeared in both txs. |
+| 4 | Kill mid-broadcast, resume | Both branches. **Landed-but-uncheckpointed**: resume read the probe balance, reported "an unconfirmed send DID land", skipped — account sequence advanced by exactly 1, so nothing was re-signed. **Never-landed**: resume refused to resend (`send_still_unresolved`), then after `PENDING_STALE_MS` resolved `did_not_land` and resent. All recipients paid exactly once in both. |
+| 5 | `nft_holders` CW404 | Diffed against a full contract-state scan. PANDA: **exact match**, 143/143. SUSHI: 2986 leaves + 220 dropped-to-zero + 1 excluded = **3207**, equal to the full scan. A back-to-back A/B of both algorithms differed by zero. The derived `0x00 <len> "balance"` prefix is correct and needs no per-contract start-key table. |
+| 6 | `gov_voters` | Proposal #678 at height 176542274 — the seeded finder converged and the public LCD served it (no archive node needed at ~2 days old). 593 voters, exactly the chain's own `pagination.total` at that height. |
+| 7 | `mito_vault` | Both modes work; staked LP does resolve to wallets. But see finding E. |
+
+### What the chain said that the code did not
+
+**A. Testnet airdrops were unpriceable, so every one of them was refused.**
+§1.2 and this doc's own gotcha list say INJ is priced via the LaunchpadCore.
+It is not: `ShroomVenue.usdValue` reads the **pump API** `/quote-prices`, and
+the testnet `NetworkDef` ships an empty `pumpApiBase`. So `usdValue` returned
+null, and an unpriceable airdrop is refused outright with no
+`allowUnpricedSpend` escape — the entire testnet rail was unreachable until
+`pumpApiBase` was set in the scratch config. Preview now reports **why** it
+could not price (`policyCheck.whyUnpriced`) instead of a bare refusal. Whether
+testnet should carry a default `pumpApiBase` is left open.
+
+**B. The push history insert had no network guard.** The claim-drop tables
+carry a `network` column; `airdrop_tracker_airdroplog` does not, and its
+foreign keys point at the site's *shared* `token_tracker_token` and
+`wallet_tracker_wallet` registries. A testnet push would have put a testnet
+denom in the site's token table and a row with unresolvable tx hashes in the
+live airdrop history, unfilterable. `logPushDrop` is now mainnet-only and says
+so in the result notes.
+
+**C. `BLOCKED_RECIPIENTS` was wrong about why it exists.** Its docstring — and
+the push module header that justifies the bisection with it — claimed the bank
+keeper refuses all 20 x/auth module accounts. Simulated against each: **only 12
+are refused. The other 8 accept the transfer and keep it.** Proven the
+expensive way: the first run of test 3 picked `xwasm` as its "blocked" probe,
+the send succeeded, and 0.001 testnet INJ is now in a module account with no
+key. So the list is not "addresses the chain stops you paying" — it is
+"addresses that are never a wallet", and for 8 of them the leaf-builder
+exclusion is the *only* thing between an allocation and a permanent burn.
+Docstrings corrected, per-entry refused/accepts annotation added, and a test
+pins the 8 so nobody prunes the list to match the chain's smaller blocked set.
+
+**D. `manageActions` is stricter than the contract in two places.** It bills
+itself as "a pure restatement of the contract's own rules", and for clawback
+timing, expiry extend-only, the 7-day perpetual wind-down, the frozen-perpetual
+lock and `Swept` it matches exactly — the frozen-perpetual reason is almost
+word for word the contract's `a frozen perpetual campaign cannot be given an
+expiry`. But **`freeze` on an already-frozen campaign and `pause` on a swept one
+are both accepted on chain** (`freeze` is idempotent; `set_campaign_paused`
+checks only the creator). Withholding them is still right — they are no-ops that
+cost gas — so the behaviour stands and the *reasons* were reworded to stop
+attributing the refusal to the contract. Tested.
+
+**E. The Mito staking argument does not do what the comment says.** Passing
+`stakingContractAddress` populates `stakedAmount` and folds staked LP into each
+wallet's `amount` — but it does **not** remove the staking contract from the
+response. It comes back as a holder carrying an `amount` equal to the sum of
+everyone's `stakedAmount`: the same LP, twice. On BLACK-INJ-v1 that row was 47%
+of total weight. What keeps a default `non-stake` drop from sending half of
+itself to a keyless contract is `NON_WALLET_HOLDERS`, not the argument.
+Docstring corrected.
+
+### Open, not fixed
+
+- **A crashed-then-resumed push drop writes no history row on mainnet.** The
+  resume returns `already-complete`, which `logPushDrop` skips, and the landed
+  tx's hash was never captured (`markPaid(…, null)`), so even reaching the
+  insert there is nothing to log. Money is correct; the audit row is missing.
+  Recovering it means finding the tx by sender+sequence.
+- **`claimUrl` is network-ambiguous.** `/claim/<id>` resolves against whatever
+  network the visitor's site store is set to, and campaign ids are per-contract,
+  so testnet #5 and a future mainnet #5 share a URL.
+- **The clawback success path needs a sub-day expiry to test.** The MCP schema
+  floors `expiryDays` at 1; the sweep reached it by calling `preview` under the
+  schema with `0.0012`. Normal use has to wait a day.
+- A throwaway agent `sweep-reader` was registered on the **production** agent
+  registry as a side effect of running `init --network mainnet` for the
+  read-only previews. Unfunded, but it is a real row.
