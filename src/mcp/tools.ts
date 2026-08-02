@@ -11,6 +11,12 @@
 
 import { formatUnits } from "viem";
 
+import {
+  execute as executeAirdrop,
+  preview,
+  status as airdropCampaignStatus,
+  type PreviewArgs,
+} from "../airdrops/campaign.js";
 import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
 import { quoteAssetBySlot } from "../chain/networks.js";
 import { explain as explainTopic } from "../docs/index.js";
@@ -193,6 +199,28 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 export function explain(rt: Runtime, args: { topic?: string }): Promise<Record<string, unknown>> {
   return explainTopic(rt, args.topic);
+}
+
+// ---------------------------------------------------------------------------
+// airdrops
+// ---------------------------------------------------------------------------
+
+export function airdropPreview(rt: Runtime, args: PreviewArgs): Promise<unknown> {
+  return preview(rt, args);
+}
+
+export function airdropExecute(
+  rt: Runtime,
+  args: { planId: string; confirm?: boolean },
+): Promise<unknown> {
+  return executeAirdrop(rt, args);
+}
+
+export function airdropStatus(
+  rt: Runtime,
+  args: { campaignId?: number; planId?: string },
+): Promise<unknown> {
+  return airdropCampaignStatus(rt, args);
 }
 
 export async function trending(

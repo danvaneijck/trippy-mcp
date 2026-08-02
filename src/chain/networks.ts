@@ -26,6 +26,24 @@ export interface QuoteAssetInfo {
   isNative: boolean;
 }
 
+export interface ClaimDropsConfig {
+  /** Instance address; empty disables the airdrop rail on this network. */
+  contract: string;
+  /**
+   * Public base serving a drop's leaves JSON, content-addressed by merkle root
+   * (`${leavesBase}/${root}.json`). This exact string is written ON-CHAIN as
+   * the campaign's `leaves_uri`, and a one-shot drop freezes on its first
+   * publish — a wrong host here mints an immutable drop pointing at a document
+   * nobody can read, which is a permanently unclaimable campaign. It is not
+   * overridable per-install for that reason.
+   */
+  leavesBase: string;
+  /** Hasura GraphQL endpoint (anon role, insert+select on the drop tables). */
+  hasuraUrl: string;
+  /** Claim page an agent hands to recipients. */
+  claimBase: string;
+}
+
 export interface NetworkDef {
   name: NetworkName;
   evmChainId: number;
@@ -44,6 +62,8 @@ export interface NetworkDef {
   };
   /** Choice aggregation router (CosmWasm) — the only contract swaps may execute. */
   choiceAggregator: string;
+  /** `choice-claim-drops` rail: the only contract airdrops may execute. */
+  claimDrops: ClaimDropsConfig;
   /**
    * Default `referrer` for curve buys: the platform fee treasury. Diverts the
    * referral share (10% of the creator's fee cut — not an extra cost to the
@@ -76,6 +96,14 @@ const MAINNET: NetworkDef = {
     feeTreasury: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
   },
   choiceAggregator: "inj1520rsss9aykhkfmuf89nh5hp2jww770z4u3eu0",
+  claimDrops: {
+    // code id 2066 (InstantiatePermission: Everybody), fee_bps 0, wasm admin is
+    // the Choice Admin Timelock (48h queued migrations). Deployed 2026-07-27.
+    contract: "inj1nwqzch964chy8k0ptnajm3pa6907s5yhflw82n",
+    leavesBase: "https://api.trippyinj.xyz/claim-drops/leaves",
+    hasuraUrl: "https://api.trippyinj.xyz/v1/graphql",
+    claimBase: "https://trippyinj.xyz/claim",
+  },
   defaultReferrer: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
   quoteAssets: {
     INJ: {
@@ -123,6 +151,13 @@ const TESTNET: NetworkDef = {
     feeTreasury: "0xBf08c09Fe227ada4A86d279e98E695344848d33D",
   },
   choiceAggregator: "",
+  claimDrops: {
+    // code id 39733, fee_bps 0. Deployed 2026-07-26 for the end-to-end QA run.
+    contract: "inj1f2htctksx6jfcrt5gr3yf4vnmgs70a9zxurp53",
+    leavesBase: "https://api.trippyinj.xyz/claim-drops/leaves",
+    hasuraUrl: "https://api.trippyinj.xyz/v1/graphql",
+    claimBase: "https://trippyinj.xyz/claim",
+  },
   defaultReferrer: "0xBf08c09Fe227ada4A86d279e98E695344848d33D",
   quoteAssets: {
     INJ: {

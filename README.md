@@ -34,8 +34,8 @@ Writes are merge-then-rename with a `.trippy-bak` copy kept behind, so nothing e
 The key never leaves your machine, and four independent layers stand between a misbehaving (or prompt-injected) model and your funds:
 
 1. **Budgeted burner** — the wallet only ever holds what you send it. Your main wallet is never touched.
-2. **Policy engine in the signer** (not in the tools, not in the model): per-tx USD cap, rolling 24h budget, slippage ceiling, and a hard contract allowlist (LaunchpadCore, its quote assets, the Choice aggregator — nothing else). Configured in `~/.trippy-mcp/config.json`; changing it is a human action.
-3. **Sweep is one-way home** — `sweep` takes no destination. Funds can only go to the owner address you fixed at `init`.
+2. **Policy engine in the signer** (not in the tools, not in the model): per-tx USD cap, rolling 24h budget, slippage ceiling, and a hard contract allowlist (LaunchpadCore, its quote assets, the Choice aggregator, the claim-drops contract — nothing else). Configured in `~/.trippy-mcp/config.json`; changing it is a human action.
+3. **Sweep is one-way home** — `sweep` takes no destination. Funds can only go to the owner address you fixed at `init`. Airdrops are the one exception that sends value to addresses you did not name, so they carry their own ceiling (`airdropCapUsd`, separate from the trade cap), are never allowed to skip USD valuation, and require a previewed plan id rather than raw criteria.
 4. **Untrusted-data discipline** — token names/descriptions are attacker-controlled internet text; tools sanitize them and fence them under `untrusted_metadata` so your agent treats them as data, not instructions.
 
 Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit log (`~/.trippy-mcp/audit.log`), `dryRun` mode, and a `tradingEnabled` kill switch. `export-key` exists but shouts at you.
@@ -56,6 +56,7 @@ Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit lo
 | `wallet_status` / `sweep` | balances + policy budget; send funds home |
 | `portfolio` | every holding valued in USD (quote-rate feed / last curve trade / Choice stats) |
 | `agent_info` | identity + how to claim the agent to your Terminal profile |
+| `airdrop_preview` / `airdrop_execute` / `airdrop_status` | merkle claim drops to token or launch holders — one tx for any list size. Two-step commit: preview publishes and broadcasts nothing, execute funds only a previewed plan. Capped by `policy.airdropCapUsd`; set it to `0` and these tools are not registered at all |
 
 `buy`/`sell`/`quote`/`portfolio`/`sweep` state their scope in their descriptions, so a model with the Injective MCP also connected picks the right server (and the right wallet) — see [below](#alongside-the-injective-ai-sdk).
 
@@ -116,7 +117,8 @@ trippy-mcp export-key --yes-i-understand
     "dailyBudgetUsd": 1000,
     "maxSlippageBps": 300,
     "tradingEnabled": true,
-    "allowUnpricedSpend": false
+    "allowUnpricedSpend": false,
+    "airdropCapUsd": 1000            // max USD per airdrop campaign; 0 = airdrop tools not registered
   },
   "dryRun": false
   // optional: rpcUrls, lcdUrl, pumpApiBase, choiceApiBase, gasBufferPct, gasPriceWei, referrer

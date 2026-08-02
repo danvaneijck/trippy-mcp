@@ -36,6 +36,21 @@ export const PolicySchema = z.object({
    * USD caps). Default false: unpriceable spend is refused.
    */
   allowUnpricedSpend: z.boolean().default(false),
+  /**
+   * Max USD value of a single airdrop campaign.
+   *
+   * An airdrop is the one action here that sends value to arbitrary addresses,
+   * which is exactly what the fixed sweep destination exists to prevent
+   * everywhere else — so it gets its own ceiling on top of the shared budget
+   * rather than riding on perTxCapUsd. Set to 0 to switch the airdrop tools off
+   * entirely (they are not registered at all, so an injected prompt cannot even
+   * see them).
+   *
+   * It does NOT get its own budget: a campaign also consumes `dailyBudgetUsd`
+   * through the same ledger as every trade, so the 24h ceiling is the real
+   * bound on how much an agent can push out in a day.
+   */
+  airdropCapUsd: z.number().min(0).default(1000),
 });
 
 export const ConfigSchema = z.object({

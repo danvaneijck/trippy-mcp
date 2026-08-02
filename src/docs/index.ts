@@ -16,6 +16,7 @@
 import { ToolError } from "../errors.js";
 import type { Runtime } from "../runtime.js";
 import * as agentWallet from "./agent_wallet.js";
+import * as airdrops from "./airdrops.js";
 import * as choice from "./choice.js";
 import { loadLiveParams, type LiveParams } from "./params.js";
 import * as shroomPad from "./shroom_pad.js";
@@ -36,6 +37,7 @@ export const TOPICS: readonly DocTopic[] = [
   shroomPadFees,
   choice,
   agentWallet,
+  airdrops,
 ];
 
 export const TOPIC_IDS = TOPICS.map((t) => t.id) as [string, ...string[]];

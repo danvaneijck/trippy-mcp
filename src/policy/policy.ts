@@ -16,7 +16,7 @@ import type { PolicyConfig } from "../config.js";
 import { PolicyError } from "../errors.js";
 import type { SpendLedger } from "./spend.js";
 
-export type IntentKind = "trade" | "swap" | "launch" | "claim" | "sweep" | "approve";
+export type IntentKind = "trade" | "swap" | "launch" | "claim" | "sweep" | "approve" | "airdrop";
 
 export interface WriteIntent {
   kind: IntentKind;
@@ -70,7 +70,7 @@ export class PolicyEngine {
 
     if (intent.kind === "claim" || intent.kind === "approve") return;
 
-    // trade / swap / launch — spend-bearing actions
+    // trade / swap / launch / airdrop — spend-bearing actions
     if (!this.cfg.tradingEnabled) {
       throw new PolicyError(
         "trading is disabled by policy",
@@ -78,20 +78,45 @@ export class PolicyEngine {
       );
     }
 
+    const airdrop = intent.kind === "airdrop";
+
+    // Airdrops are the only action that sends value to addresses the operator
+    // never named, which is exactly what the fixed sweep destination prevents
+    // everywhere else. So they get their OWN per-action ceiling in place of
+    // perTxCapUsd — an airdrop is not a trade and sizing it like one would mean
+    // whichever of the two knobs is smaller silently governs both.
+    const perActionCap = airdrop ? this.cfg.airdropCapUsd : this.cfg.perTxCapUsd;
+    if (airdrop && perActionCap <= 0) {
+      throw new PolicyError(
+        "airdrops are disabled by policy",
+        "set policy.airdropCapUsd to a positive USD amount in config.json to enable them",
+      );
+    }
+
     const spend = intent.spendUsd;
     if (spend === null || spend === undefined) {
-      if (this.cfg.allowUnpricedSpend) return;
+      // `allowUnpricedSpend` is a trading convenience — it exists so an
+      // illiquid token with no price feed is still tradable. It is NOT an
+      // escape hatch for outbound value transfer, so it does not apply here.
+      if (this.cfg.allowUnpricedSpend && !airdrop) return;
       throw new PolicyError(
         `cannot price this ${intent.kind} in USD — refusing under policy`,
-        "set policy.allowUnpricedSpend=true to permit spends without a USD valuation",
+        airdrop
+          ? "an airdrop of unpriceable assets cannot be capped, so it is always refused"
+          : "set policy.allowUnpricedSpend=true to permit spends without a USD valuation",
       );
     }
-    if (spend > this.cfg.perTxCapUsd) {
+    if (spend > perActionCap) {
       throw new PolicyError(
-        `spend ~$${spend.toFixed(2)} exceeds the per-tx cap $${this.cfg.perTxCapUsd}`,
-        "raise policy.perTxCapUsd in config.json (a human action) or trade smaller",
+        `${airdrop ? "airdrop" : "spend"} ~$${spend.toFixed(2)} exceeds the ` +
+          `${airdrop ? `per-campaign cap $${perActionCap}` : `per-tx cap $${perActionCap}`}`,
+        airdrop
+          ? "raise policy.airdropCapUsd in config.json (a human action) or drop less"
+          : "raise policy.perTxCapUsd in config.json (a human action) or trade smaller",
       );
     }
+    // The 24h budget is shared with every trade and swap — it, not the
+    // per-campaign cap, is the real bound on what an agent can push out in a day.
     const spent = this.ledger.spent();
     if (spent + spend > this.cfg.dailyBudgetUsd) {
       throw new PolicyError(
@@ -100,6 +125,15 @@ export class PolicyEngine {
         "wait for the window to roll or raise policy.dailyBudgetUsd in config.json",
       );
     }
+  }
+
+  /** Whether the airdrop tools should be registered at all. */
+  airdropsEnabled(): boolean {
+    return this.cfg.airdropCapUsd > 0;
+  }
+
+  airdropCapUsd(): number {
+    return this.cfg.airdropCapUsd;
   }
 
   /** Record a broadcast spend against the 24h budget. */
@@ -126,6 +160,8 @@ export class PolicyEngine {
       dailyBudgetUsd: this.cfg.dailyBudgetUsd,
       remainingDailyUsd: this.remainingDailyUsd(),
       maxSlippageBps: this.cfg.maxSlippageBps,
+      airdropCapUsd: this.cfg.airdropCapUsd,
+      airdropsEnabled: this.airdropsEnabled(),
     };
   }
 }

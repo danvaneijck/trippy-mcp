@@ -6,6 +6,7 @@
 import { AuditLog } from "./audit.js";
 import { ChoiceApi } from "./api/choice.js";
 import { PumpApi } from "./api/pump.js";
+import { CosmosSigner } from "./chain/cosmos.js";
 import { EvmSigner } from "./chain/evm.js";
 import { getNetwork, makeChain, type NetworkDef } from "./chain/networks.js";
 import { makeTransport } from "./chain/transport.js";
@@ -25,6 +26,7 @@ export interface Runtime {
   pump: PumpApi;
   choiceApi: ChoiceApi;
   signer: EvmSigner;
+  cosmos: CosmosSigner;
   injAddress: string;
   shroom: ShroomVenue;
   choice: ChoiceVenue;
@@ -61,6 +63,9 @@ export function buildRuntime(passphrase?: string): Runtime {
       net.addresses.winj9,
       ...Object.values(net.quoteAssets).map((q) => q.pairAsset),
       net.choiceAggregator,
+      // The claim-drops instance. Listed unconditionally: reaching it still
+      // requires an `airdrop` intent, which airdropCapUsd governs separately.
+      net.claimDrops.contract,
     ]
       .filter((a) => a && a.length > 0)
       .map((a) => a.toLowerCase()),
@@ -104,5 +109,20 @@ export function buildRuntime(passphrase?: string): Runtime {
     cfg.dryRun,
   );
 
-  return { cfg, net, home, audit, policy, pump, choiceApi, signer, injAddress, shroom, choice };
+  const cosmos = new CosmosSigner(net, policy, audit, () => privateKey, injAddress, cfg.dryRun);
+
+  return {
+    cfg,
+    net,
+    home,
+    audit,
+    policy,
+    pump,
+    choiceApi,
+    signer,
+    cosmos,
+    injAddress,
+    shroom,
+    choice,
+  };
 }
