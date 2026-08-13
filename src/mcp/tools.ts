@@ -27,6 +27,7 @@ import { decodeMetadataUri, resolveImage, type LaunchMetadata } from "../metadat
 import { CURVE_STATES, resolveToken, type ResolvedTarget } from "../router.js";
 import type { Runtime } from "../runtime.js";
 import { deepSanitize, sanitizeText, untrustedMeta } from "../untrusted.js";
+import { checkForUpdate, PKG_VERSION } from "../version.js";
 import { extractUsdPrice } from "../venues/choice/swap.js";
 import { LAUNCH_STATE_LABEL, LaunchState } from "../venues/shroom/abi.js";
 import type { LaunchView } from "../venues/shroom/launchpad.js";
@@ -752,6 +753,10 @@ export async function agentInfo(rt: Runtime): Promise<unknown> {
     // registry unreachable
   }
   const other = detectAinj({ injAddress: rt.injAddress });
+  // Identity is what an agent reads at the start of a session, so it is the one place a
+  // stale install is guaranteed to be told it is stale. Cached + fail-soft: null when the
+  // registry is unreachable, and the field is simply absent.
+  const version = await checkForUpdate();
   return {
     agentName: rt.cfg.agentName,
     evmAddress: rt.signer.address,
@@ -761,6 +766,7 @@ export async function agentInfo(rt: Runtime): Promise<unknown> {
     ownerAddress: agent?.ownerAddress ?? null,
     howToClaim:
       "the human operator runs `trippy-mcp claim-code` on this machine, then enters the code in Trippy Terminal → Settings → Agents (or opens the printed link) and signs with their main wallet — that links the agent to their profile",
+    ...(version ? { version } : { version: { running: PKG_VERSION } }),
     ...(other ? { otherAgentWallets: { ainj: other } } : {}),
   };
 }

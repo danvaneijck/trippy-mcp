@@ -11,6 +11,7 @@
 
 import type { ApiLaunch } from "./api/pump.js";
 import { ToolError } from "./errors.js";
+import { decodeMetadataUri } from "./metadata.js";
 import type { Runtime } from "./runtime.js";
 import { LaunchState } from "./venues/shroom/abi.js";
 
@@ -50,20 +51,17 @@ export async function resolveToken(rt: Runtime, query: string): Promise<Resolved
   }
 
   // Symbol/name — search the launchpad, then Choice.
+  //
+  // A launchpad hit is a SUBSTRING match over name/description, so "SHROOM" matches the
+  // unrelated "ANSHROOM" launch. buy/sell/quote all resolve through here, so a fuzzy
+  // launch must never outrank a token whose symbol IS the query — that spends funds on a
+  // different asset than the caller named. Exact symbol wins on either venue; a merely
+  // fuzzy launch is taken only when Choice knows nothing better.
+  const wanted = q.toLowerCase();
   const pad = await rt.pump.listLaunches({ q, limit: 5 }).catch(() => ({ items: [] as ApiLaunch[] }));
-  if (pad.items.length === 1) return routeLaunch(pad.items[0]!);
-  if (pad.items.length > 1) {
-    // Prefer an exact symbol match in the metadata; otherwise surface choices.
-    return {
-      venue: "ambiguous",
-      candidates: pad.items.map((l) => ({
-        launchId: l.id,
-        token: l.token,
-        state: l.state,
-        metadataURI: l.metadataURI.slice(0, 120),
-      })),
-    };
-  }
+  const padExact = pad.items.filter((l) => launchSymbol(l)?.toLowerCase() === wanted);
+  if (padExact.length === 1) return routeLaunch(padExact[0]!);
+  if (padExact.length > 1) return { venue: "ambiguous", candidates: padExact.map(launchCandidate) };
 
   // Choice resolve payload: {q, matches: [{type, address, symbol, name, price_usd}], ambiguous}
   const choiceHit = (await rt.choiceApi.resolve(q, "token").catch(() => null)) as {
@@ -71,16 +69,16 @@ export async function resolveToken(rt: Runtime, query: string): Promise<Resolved
     ambiguous?: boolean;
   } | null;
   const matches = choiceHit?.matches ?? [];
-  if (choiceHit?.ambiguous && matches.length > 1) {
-    return {
-      venue: "ambiguous",
-      candidates: matches.slice(0, 5).map((m) => ({
-        tokenId: m.address ?? m.denom,
-        symbol: m.symbol,
-        name: m.name,
-      })),
-    };
+  const choiceExact = matches.filter((m) => m.symbol?.trim().toLowerCase() === wanted);
+  if (choiceExact.length === 1) {
+    const hit = choiceExact[0]!.address ?? choiceExact[0]!.denom;
+    if (hit) return { venue: "choice", tokenId: String(hit) };
   }
+
+  // Nothing matched the symbol outright. Surface every near-miss rather than picking one.
+  const nearMisses = [...pad.items.map(launchCandidate), ...matches.slice(0, 5).map(choiceCandidate)];
+  if (nearMisses.length > 1) return { venue: "ambiguous", candidates: nearMisses };
+  if (pad.items.length === 1) return routeLaunch(pad.items[0]!);
   const id = matches[0]?.address ?? matches[0]?.denom;
   if (id) return { venue: "choice", tokenId: String(id) };
 
@@ -89,6 +87,28 @@ export async function resolveToken(rt: Runtime, query: string): Promise<Resolved
     `could not resolve "${query}" to a SHROOM launch or Choice token`,
     "try a launch id, token address or bank denom",
   );
+}
+
+/** A launch's declared symbol. The metadata is inline base64 — no network call. */
+function launchSymbol(launch: ApiLaunch): string | undefined {
+  return decodeMetadataUri(launch.metadataURI)?.symbol?.trim();
+}
+
+/** Launch shown in an `ambiguous` list — symbol/name, not a truncated data: URI. */
+function launchCandidate(launch: ApiLaunch): Record<string, unknown> {
+  const meta = decodeMetadataUri(launch.metadataURI);
+  return {
+    venue: "curve",
+    launchId: launch.id,
+    token: launch.token,
+    state: launch.state,
+    symbol: meta?.symbol,
+    name: meta?.name,
+  };
+}
+
+function choiceCandidate(m: { address?: string; denom?: string; symbol?: string; name?: string }): Record<string, unknown> {
+  return { venue: "choice", tokenId: m.address ?? m.denom, symbol: m.symbol, name: m.name };
 }
 
 function routeLaunch(launch: ApiLaunch): ResolvedTarget {

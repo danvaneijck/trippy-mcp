@@ -9,6 +9,7 @@ import { loadConfig, homeDir } from "../config.js";
 import { loadKeystore, unlockKeystore } from "../keystore.js";
 import { resolveAvatar } from "../metadata.js";
 import { buildRuntime } from "../runtime.js";
+import { checkForUpdate, PKG_VERSION } from "../version.js";
 import { walletStatus, sweep } from "../wallet.js";
 import { connectCommand } from "./connect.js";
 import { initCommand } from "./init.js";
@@ -30,6 +31,8 @@ Usage:
   trippy-mcp claim-code            mint a code to link this agent to your Terminal profile
   trippy-mcp sweep <asset> <amt>   send funds to the owner wallet (asset: INJ|USDC|SAI|0x…, amt or "all")
   trippy-mcp export-key --yes-i-understand   print the raw private key (DANGER)
+  trippy-mcp version [--check]     running version, and whether a newer one is published
+                                   (--check skips the 24h cache; TRIPPY_MCP_NO_UPDATE_CHECK=1 disables it)
 
 Docs & source: https://github.com/danvaneijck/trippy-mcp
 `;
@@ -76,6 +79,23 @@ export async function runCli(argv: string[]): Promise<void> {
       const rt = await withPassphrase((p) => buildRuntime(p));
       const s = await walletStatus(rt);
       out(JSON.stringify(s, null, 2));
+      const update = await checkForUpdate();
+      if (update?.updateAvailable) {
+        out(`\nupdate available: ${update.running} → ${update.latest}   (${update.howToUpdate})`);
+      }
+      return;
+    }
+
+    case "version":
+    case "--version":
+    case "-v": {
+      const update = await checkForUpdate({ force: rest.includes("--check") });
+      if (!update) {
+        out(PKG_VERSION);
+        return;
+      }
+      out(update.updateAvailable ? `${update.running}   (latest: ${update.latest})` : `${update.running}   (latest)`);
+      if (update.updateAvailable) out(update.howToUpdate ?? "");
       return;
     }
 

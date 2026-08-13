@@ -14,6 +14,7 @@ import { z, type ZodRawShape } from "zod";
 import { TOPICS, TOPIC_IDS, explain as explainTopic } from "../docs/index.js";
 import { toErrorPayload } from "../errors.js";
 import { buildRuntime, type Runtime } from "../runtime.js";
+import { PKG_VERSION } from "../version.js";
 import { toolPrefix } from "./naming.js";
 import * as t from "./tools.js";
 
@@ -226,7 +227,9 @@ function registerAirdropTools(server: McpServer): void {
 }
 
 export async function serve(): Promise<void> {
-  const server = new McpServer({ name: "trippy", version: "0.1.0" });
+  // Read from the manifest, not a literal: this said "0.1.0" for four releases, so every
+  // client's serverInfo reported a version the package had long left behind.
+  const server = new McpServer({ name: "trippy", version: PKG_VERSION });
 
   const query = z
     .string()
