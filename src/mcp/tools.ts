@@ -23,6 +23,8 @@ import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
 import { quoteAssetBySlot, type QuoteAssetInfo } from "../chain/networks.js";
 import { explain as explainTopic } from "../docs/index.js";
 import { ToolError } from "../errors.js";
+import { IdentityRegistry } from "../identity/registry.js";
+import { loadIdentityState } from "../identity/state.js";
 import { detectAinj } from "../interop.js";
 import { decodeMetadataUri, resolveImage, type LaunchMetadata } from "../metadata.js";
 import { CURVE_STATES, resolveToken, type ResolvedTarget } from "../router.js";
@@ -1365,6 +1367,7 @@ export async function agentInfo(rt: Runtime): Promise<unknown> {
     // registry unreachable
   }
   const other = detectAinj({ injAddress: rt.injAddress });
+  const erc8004 = await erc8004Info(rt, agent?.erc8004AgentId ?? null);
   // Identity is what an agent reads at the start of a session, so it is the one place a
   // stale install is guaranteed to be told it is stale. Cached + fail-soft: null when the
   // registry is unreachable, and the field is simply absent.
@@ -1378,9 +1381,51 @@ export async function agentInfo(rt: Runtime): Promise<unknown> {
     ownerAddress: agent?.ownerAddress ?? null,
     howToClaim:
       "the human operator runs `trippy-mcp claim-code` on this machine, then enters the code in Trippy Terminal → Settings → Agents (or opens the printed link) and signs with their main wallet — that links the agent to their profile",
+    erc8004,
     ...(version ? { version } : { version: { running: PKG_VERSION } }),
     ...(other ? { otherAgentWallets: { ainj: other } } : {}),
   };
+}
+
+/**
+ * The agent's ERC-8004 identity — Injective's ecosystem-wide on-chain agent
+ * registry, which is a different thing from the SHROOM Pad `registered` flag
+ * above (that one is the badge; this one is the portable, cross-chain passport).
+ *
+ * FAILS SOFT, deliberately: the registry is an upgradeable proxy behind a public
+ * RPC, and `agent_info` is what a session reads first. A registry read that
+ * flakes must degrade to `null` rather than break identity for the whole
+ * session — so every failure path here returns the unregistered shape.
+ */
+async function erc8004Info(rt: Runtime, backendAgentId: string | null): Promise<unknown> {
+  const nudge =
+    "not registered in Injective's on-chain agent registry (ERC-8004). The human operator can mint one with `trippy-mcp identity register` — one transaction, about $0.0006 of gas.";
+  try {
+    const registry = new IdentityRegistry(rt.net, rt.signer);
+    if (!registry.available) return null;
+    const local = loadIdentityState(rt.home);
+    const id = local?.agentId ?? backendAgentId;
+    if (!id) return { registered: false, howToRegister: nudge };
+    const view = await registry.view(BigInt(id));
+    return {
+      registered: true,
+      agentId: view.agentId,
+      owner: view.owner,
+      agentWallet: view.agentWallet,
+      custody: view.custody,
+      cardUri: view.cardUri,
+      identityTuple: view.identityTuple,
+      scanUrl: view.scanUrl,
+      ...(view.custody === "unlinked"
+        ? {
+            warning:
+              "agentWallet is 0x0 — the identity was transferred and not re-linked, so trades from this wallet are not attributable to it. The operator runs `trippy-mcp identity link` and completes it in Trippy Terminal → Settings → Agents.",
+          }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseHuman(amount: string, decimals: number): bigint {

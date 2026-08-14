@@ -44,6 +44,30 @@ export interface ClaimDropsConfig {
   claimBase: string;
 }
 
+/**
+ * ERC-8004 — Injective's ecosystem-wide on-chain agent registry (identity NFTs
+ * + reputation). Not ours: these are the canonical `0x8004…` deployments, the
+ * same contract (`AgentIdentity` v2.0.0) other chains carry at the same
+ * addresses, which is what makes the identity portable.
+ *
+ * Empty strings mean "no deployment here" — every caller must treat the
+ * registry as optional rather than assume it exists.
+ */
+export interface Erc8004Config {
+  identityRegistry: Address | "";
+  reputationRegistry: Address | "";
+  /**
+   * First block of the deployment — the floor for any `Registered` log scan.
+   *
+   * Optional because it cannot be re-derived on demand: the public sentries
+   * prune historical state ("no commit info found" below ~110M blocks), so
+   * `eth_getCode` at an old height cannot bisect for it. Present only where a
+   * deployment record supplies it; absent means "scan from a bounded recent
+   * window, never from a made-up floor".
+   */
+  deployBlock?: number;
+}
+
 export interface NetworkDef {
   name: NetworkName;
   evmChainId: number;
@@ -106,6 +130,7 @@ export interface NetworkDef {
   quoteAssets: Record<string, QuoteAssetInfo>;
   /** Default gas price (wei) — Injective EVM uses a fixed floor, not an auction. */
   gasPriceWei: bigint;
+  erc8004: Erc8004Config;
 }
 
 const MAINNET: NetworkDef = {
@@ -190,6 +215,11 @@ const MAINNET: NetworkDef = {
     },
   },
   gasPriceWei: 500_000_000n,
+  erc8004: {
+    identityRegistry: "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
+    reputationRegistry: "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63",
+    deployBlock: 162_000_000,
+  },
 };
 
 const TESTNET: NetworkDef = {
@@ -248,6 +278,14 @@ const TESTNET: NetworkDef = {
     },
   },
   gasPriceWei: 300_000_000n,
+  // Canonical `0x8004…` testnet pair (chain 1439), confirmed live: the identity
+  // registry answers name/symbol/getVersion = AgentIdentity/AGENT/2.0.0.
+  // No deployBlock — nothing on this machine records one and the chain cannot
+  // be bisected for it.
+  erc8004: {
+    identityRegistry: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+    reputationRegistry: "0x8004B663056A597Dffe9eCcC1965A193B7388713",
+  },
 };
 
 export const NETWORKS: Record<NetworkName, NetworkDef> = {

@@ -443,7 +443,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "agent_info",
-    "This agent's identity: name, addresses, registry status, how the human operator claims it in Trippy Terminal, and (when detected) any co-installed Injective SDK wallets that are NOT this agent.",
+    "This agent's identity: name, addresses, SHROOM Pad registry status, its ERC-8004 on-chain identity (Injective's ecosystem-wide agent registry) and who holds custody of it, how the human operator claims it in Trippy Terminal, and (when detected) any co-installed Injective SDK wallets that are NOT this agent.",
     {},
     (rt2) => t.agentInfo(rt2),
   );

@@ -48,19 +48,16 @@ export function effectiveNetwork(cfg: Config): NetworkDef {
   };
 }
 
-export function buildRuntime(passphrase?: string): Runtime {
-  const home = defaultHomeDir();
-  const cfg = loadConfig(home);
-  const net = effectiveNetwork(cfg);
-
-  const keystore = loadKeystore(home);
-  const privateKey = unlockKeystore(keystore, passphrase);
-  const injAddress = evmToInj(keystore.address);
-
-  const audit = new AuditLog(home);
-  const ledger = new SpendLedger(home);
-
-  const allowedTargets = new Set(
+/**
+ * Every contract a write may target, lowercased.
+ *
+ * Exported because it IS the policy surface: a contract missing from here is
+ * refused inside the signer with "target … is not on the contract allowlist",
+ * no matter how correct the calling code is. That failure mode is invisible
+ * until someone tries the write on a live network, so it gets its own test.
+ */
+export function allowedTargetsFor(net: NetworkDef): Set<string> {
+  return new Set(
     [
       net.addresses.launchpadCore,
       net.addresses.winj9,
@@ -73,10 +70,31 @@ export function buildRuntime(passphrase?: string): Runtime {
       // executes no contract — but the allowlist check is not skipped for it,
       // so it declares a named target instead. See chain/cosmos.ts.
       BANK_MULTISEND_TARGET,
+      // The ecosystem's ERC-8004 identity registry. Empty on a network with no
+      // deployment, and filtered out below — an empty allowlist entry would
+      // match nothing anyway, but it would also let a mis-set address through
+      // as "". Identity writes spend gas only (kind: "identity" is not
+      // spend-bearing), and the transfer's recipient is pinned separately.
+      net.erc8004.identityRegistry,
     ]
       .filter((a) => a && a.length > 0)
       .map((a) => a.toLowerCase()),
   );
+}
+
+export function buildRuntime(passphrase?: string): Runtime {
+  const home = defaultHomeDir();
+  const cfg = loadConfig(home);
+  const net = effectiveNetwork(cfg);
+
+  const keystore = loadKeystore(home);
+  const privateKey = unlockKeystore(keystore, passphrase);
+  const injAddress = evmToInj(keystore.address);
+
+  const audit = new AuditLog(home);
+  const ledger = new SpendLedger(home);
+
+  const allowedTargets = allowedTargetsFor(net);
   const policy = new PolicyEngine(
     cfg.policy,
     allowedTargets,

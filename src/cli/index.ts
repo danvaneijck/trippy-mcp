@@ -12,6 +12,7 @@ import { buildRuntime } from "../runtime.js";
 import { checkForUpdate, PKG_VERSION } from "../version.js";
 import { walletStatus, sweep } from "../wallet.js";
 import { connectCommand } from "./connect.js";
+import { identityCommand } from "./identity.js";
 import { initCommand } from "./init.js";
 
 const HELP = `trippy-mcp — Injective trading MCP (SHROOM Pad + Choice)
@@ -29,6 +30,8 @@ Usage:
                                    (re)register the agent name / set its profile image
                                    (local files upload to IPFS; omitting --avatar keeps the current one)
   trippy-mcp claim-code            mint a code to link this agent to your Terminal profile
+  trippy-mcp identity <action>     the agent's ERC-8004 on-chain identity (Injective's
+                                   ecosystem registry) — register | show | link | transfer
   trippy-mcp sweep <asset> <amt>   send funds to the owner wallet (asset: INJ|USDC|SAI|0x…, amt or "all")
   trippy-mcp export-key --yes-i-understand   print the raw private key (DANGER)
   trippy-mcp version [--check]     running version, and whether a newer one is published
@@ -128,6 +131,12 @@ export async function runCli(argv: string[]): Promise<void> {
       } else {
         out("Enter it in Trippy Terminal → Settings → Agents with your main wallet.");
       }
+      return;
+    }
+
+    case "identity": {
+      const rt = await withPassphrase((p) => buildRuntime(p));
+      await identityCommand(rt, rest);
       return;
     }
 

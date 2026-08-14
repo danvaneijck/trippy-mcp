@@ -16,7 +16,26 @@ import type { PolicyConfig } from "../config.js";
 import { PolicyError } from "../errors.js";
 import type { SpendLedger } from "./spend.js";
 
-export type IntentKind = "trade" | "swap" | "launch" | "claim" | "sweep" | "approve" | "airdrop";
+export type IntentKind =
+  | "trade"
+  | "swap"
+  | "launch"
+  | "claim"
+  | "sweep"
+  | "approve"
+  | "airdrop"
+  /**
+   * ERC-8004 registry writes (register / setAgentWallet / transfer the identity
+   * NFT). Allowlist-gated like everything else, but NOT spend-bearing: they move
+   * no value, only gas — the same treatment `approve` and `claim` get.
+   *
+   * The one that *looks* like it moves value is the identity transfer, and it
+   * does move an asset. It is safe to leave uncapped for the same reason `sweep`
+   * is: the destination is not free. `identity transfer` sends only to
+   * `ownerSweepAddress`, the address fixed at init, so a hijacked model can hand
+   * the identity to the operator and nowhere else.
+   */
+  | "identity";
 
 /** Intents that move value out and are therefore capped and budgeted. */
 const SPEND_BEARING: ReadonlySet<IntentKind> = new Set<IntentKind>([
@@ -38,6 +57,14 @@ export interface WriteIntent {
   target: string;
   /** Human-readable, for the audit log. */
   detail: string;
+  /**
+   * Where an asset ends up, when the call sends one somewhere the `target`
+   * does not describe. Set by the ERC-8004 identity transfer, whose target is
+   * the registry contract while the NFT itself lands with a third party — the
+   * one write in the package where those differ. Pinned to the owner address,
+   * exactly like `sweep`.
+   */
+  destination?: string;
   /**
    * USD value leaving the wallet. `undefined` = no spend (claims, approvals);
    * `null` = spend of unknown USD value (refused unless allowUnpricedSpend).
@@ -74,6 +101,19 @@ export class PolicyEngine {
         `target ${intent.target} is not on the contract allowlist`,
         "writes are restricted to the LaunchpadCore, its quote assets and the Choice aggregator",
       );
+    }
+
+    if (intent.kind === "identity") {
+      // The registry is allowlisted, but `safeTransferFrom` carries its own
+      // recipient — so the identity NFT gets the sweep treatment rather than
+      // riding on the target check that never looks at an argument.
+      if (intent.destination && intent.destination.toLowerCase() !== this.sweepDestination) {
+        throw new PolicyError(
+          `identity destination ${intent.destination} is not the owner address`,
+          "the agent identity can only be transferred to ownerSweepAddress fixed at init",
+        );
+      }
+      return;
     }
 
     if (intent.kind === "claim" || intent.kind === "approve") return;
