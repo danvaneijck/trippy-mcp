@@ -117,4 +117,81 @@ describe("checkForUpdate", () => {
     const { checkForUpdate } = await import("../src/version.js");
     await expect(checkForUpdate()).resolves.toBeNull();
   });
+
+  it("flips as soon as a release lands, rather than riding out a day-old cache", async () => {
+    // The shape that used to fail: a cache taken minutes before the release,
+    // saying the running version IS latest. Under a 24h TTL this kept answering
+    // "up to date" for the rest of the day.
+    writeFileSync(
+      join(home, "update-check.json"),
+      JSON.stringify({ checkedAt: Date.now() - 20 * 60 * 1000, latest: PKG_VERSION }),
+    );
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ latest: "99.0.0" }), { status: 200 })) as unknown as typeof fetch;
+    const { checkForUpdate } = await import("../src/version.js");
+
+    const info = await checkForUpdate();
+    expect(info?.updateAvailable).toBe(true);
+    expect(info?.latest).toBe("99.0.0");
+  });
+
+  it("serves a cache younger than the freshness window without asking again", async () => {
+    writeFileSync(
+      join(home, "update-check.json"),
+      JSON.stringify({ checkedAt: Date.now() - 60_000, latest: PKG_VERSION }),
+    );
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const { checkForUpdate } = await import("../src/version.js");
+
+    const info = await checkForUpdate();
+    expect(info?.updateAvailable).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("stops polling once an update is already known", async () => {
+    writeFileSync(join(home, "update-check.json"), JSON.stringify({ checkedAt: 0, latest: "99.0.0" }));
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const { checkForUpdate } = await import("../src/version.js");
+
+    const info = await checkForUpdate();
+    expect(info?.updateAvailable).toBe(true);
+    // Nothing left to learn — the answer cannot change until this install moves.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers from cache when the registry hangs, and takes the late answer next call", async () => {
+    writeFileSync(join(home, "update-check.json"), JSON.stringify({ checkedAt: 0, latest: PKG_VERSION }));
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    globalThis.fetch = (async () => {
+      await held;
+      return new Response(JSON.stringify({ latest: "99.0.0" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const { checkForUpdate } = await import("../src/version.js");
+
+    // The caller must not wait on a hung registry: it falls back to the cache.
+    const started = Date.now();
+    const info = await checkForUpdate();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(info?.latest).toBe(PKG_VERSION);
+
+    // The request was never cancelled, so its answer still lands in the cache.
+    release?.();
+    await vi.waitFor(() =>
+      expect(JSON.parse(readFileSync(join(home, "update-check.json"), "utf-8")).latest).toBe("99.0.0"),
+    );
+    expect((await checkForUpdate())?.updateAvailable).toBe(true);
+  });
+
+  it("dates the answer, so a cached one says how old it is", async () => {
+    const checkedAt = Date.now() - 5 * 60 * 1000;
+    writeFileSync(join(home, "update-check.json"), JSON.stringify({ checkedAt, latest: PKG_VERSION }));
+    globalThis.fetch = vi.fn() as unknown as typeof fetch;
+    const { checkForUpdate } = await import("../src/version.js");
+    expect((await checkForUpdate())?.checkedAt).toBe(new Date(checkedAt).toISOString());
+  });
 });
