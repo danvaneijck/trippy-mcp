@@ -476,7 +476,39 @@ export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> 
     };
   }
 
-  const picked = await choiceCandleMarket(rt, target.tokenId);
+  const shape = (payload: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
+    const rows = shapeChoiceCandles(payload.candles);
+    return {
+      venue: "choice",
+      tokenId: target.tokenId,
+      pair: sanitizeText(payload.pair),
+      kind: payload.kind,
+      interval: payload.interval ?? interval,
+      pricedIn: "USD",
+      columns: CHOICE_CANDLE_COLUMNS,
+      count: rows.length,
+      candles: rows,
+      ...extra,
+      note: "each candle is one CSV row of `columns`, oldest first. o/h/l/c/v are USD when the backend has USD marks for the bucket, else raw quote prices.",
+    };
+  };
+
+  // Ask about the token itself, and check what came back is actually its series.
+  // A backend that orients its own candles says so in `priced`; one that does not
+  // charts whichever market has the most volume, from that market's BASE leg —
+  // and a SHROOM Pad graduation lists against SAI, which sorts as the base. Both
+  // reads are done together because the token overview is needed either way.
+  const [picked, direct] = await Promise.all([
+    choiceCandleMarket(rt, target.tokenId),
+    rt.choiceApi.marketCandles(target.tokenId, interval, limit).catch(() => null),
+  ]);
+  if (direct && (picked.symbol === null || seriesPrices(direct, picked.symbol))) {
+    return shape(direct);
+  }
+
+  // It charted something else. Name a market this token is the BASE of — the
+  // workaround for a backend that has not been fixed yet. Some tokens are only
+  // ever the quote side, and for those there is nothing to name.
   if (picked.chartsSomethingElse) {
     // Returning the series anyway, labelled, was the other option. It carries
     // no information about the token that was asked for, so it is not returned.
@@ -491,43 +523,40 @@ export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> 
       candles: [],
       priceUsd: picked.priceUsd,
       warnings: [
-        `no price series is available for ${picked.symbol}: Choice lists it only as the QUOTE side (${picked.markets.join(", ")}), and the candles endpoint charts a market's BASE asset — so the only series it can return is the counter asset's, not this token's. \`priceUsd\` above is ${picked.symbol}'s current price.`,
+        `no price series is available for ${picked.symbol}: Choice lists it only as the QUOTE side (${picked.markets.join(", ")}), and this deployment's candles endpoint charts a market's BASE asset — so the only series it can return is the counter asset's, not this token's. \`priceUsd\` above is ${picked.symbol}'s current price.`,
       ],
       note: "candles is empty on purpose — see warnings. Use token_info for current price and liquidity.",
     };
   }
 
   const payload = await rt.choiceApi.marketCandles(picked.market ?? target.tokenId, interval, limit);
-  const rows = shapeChoiceCandles(payload.candles);
-  const pair = sanitizeText(payload.pair);
-  // Last line of defence: whatever we asked for, the series belongs to the pair
-  // the backend answered with, and only its BASE leg is the token being charted.
-  const base = String(pair ?? "").split("/")[0]?.trim() ?? "";
   const warnings: string[] = [];
-  if (picked.symbol && base && base.toUpperCase() !== picked.symbol.toUpperCase()) {
+  // Last line of defence: whatever was asked for, the series belongs to whatever
+  // the backend answered with.
+  if (picked.symbol && !seriesPrices(payload, picked.symbol)) {
     warnings.push(
-      `these candles are ${base}'s price series, not ${picked.symbol}'s — the pair is ${String(pair)} and this endpoint charts the BASE asset`,
+      `these candles are ${String(sanitizeText(payload.pair) ?? "").split("/")[0]}'s price series, not ${picked.symbol}'s — this endpoint charts the pair's BASE asset`,
     );
   } else if (picked.thin) {
     warnings.push(
-      `${String(pair)} is the only market ${picked.symbol} is the base of, and it traded $0 in the last 24h — the series is stale or sparse`,
+      `${String(sanitizeText(payload.pair))} is the only market ${picked.symbol} is the base of, and it traded $0 in the last 24h — the series is stale or sparse, and a stale close can sit multiples away from the real price`,
     );
   }
-  return {
-    venue: "choice",
-    tokenId: target.tokenId,
-    pair,
-    kind: payload.kind,
-    interval: payload.interval ?? interval,
-    pricedIn: "USD",
-    columns: CHOICE_CANDLE_COLUMNS,
-    count: rows.length,
-    candles: rows,
-    // A correct anchor for exactly the cases where the series is not one:
-    // a stale market's last close can sit multiples away from the real price.
-    ...(warnings.length > 0 ? { warnings, priceUsd: picked.priceUsd ?? null } : {}),
-    note: "each candle is one CSV row of `columns`, oldest first. o/h/l/c/v are USD when the backend has USD marks for the bucket, else raw quote prices.",
-  };
+  // A correct anchor for exactly the cases where the series is not one.
+  return shape(payload, warnings.length > 0 ? { warnings, priceUsd: picked.priceUsd ?? null } : {});
+}
+
+/**
+ * Whether a candles payload is the price series of `symbol`.
+ *
+ * `priced` is the backend naming the token it charted — authoritative when
+ * present. Without it the only signal is the pair, whose BASE leg is what a
+ * market's candles are expressed in.
+ */
+export function seriesPrices(payload: Record<string, unknown>, symbol: string): boolean {
+  const priced = typeof payload.priced === "string" ? payload.priced : null;
+  const subject = priced ?? String(payload.pair ?? "").split("/")[0] ?? "";
+  return subject.trim().toUpperCase() === symbol.trim().toUpperCase();
 }
 
 interface ChoiceMarketRef {

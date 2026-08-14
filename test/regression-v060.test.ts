@@ -20,7 +20,7 @@ import type { ApiLaunch } from "../src/api/pump.js";
 import { PolicySchema } from "../src/config.js";
 import { PolicyError, ToolError } from "../src/errors.js";
 import { encodeMetadataUri } from "../src/metadata.js";
-import { choiceCandleMarket, policyWarnings } from "../src/mcp/tools.js";
+import { candles, choiceCandleMarket, policyWarnings, seriesPrices } from "../src/mcp/tools.js";
 import { PolicyEngine } from "../src/policy/policy.js";
 import { SpendLedger } from "../src/policy/spend.js";
 import { resolveToken } from "../src/router.js";
@@ -31,6 +31,7 @@ const CORE = "0xebf62508f322137ee0986935ee3b4a60a3f0d227";
 const OWNER = "0x1111111111111111111111111111111111111111";
 const ISSUER = "inj13j2rpnlwl30c02d4pzukykwfeyyhelvry9cqte";
 const SKIBI_DENOM = `factory/${ISSUER}/shroom_13_f9ac767ba1df1fec`;
+const MOON_DENOM = `factory/${ISSUER}/shroom_1_391dfd403560de90`;
 
 function realEngine(overrides: Partial<ReturnType<typeof PolicySchema.parse>> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "trippy-mcp-test-"));
@@ -226,6 +227,72 @@ describe("candles chart the token that was asked for", () => {
     const picked = await choiceCandleMarket(marketRt(null, []), "denom");
     expect(picked.chartsSomethingElse).toBe(false);
     expect(picked.market).toBeUndefined();
+  });
+});
+
+describe("reading which token a candle series belongs to", () => {
+  it("trusts `priced` when the backend names the token it charted", () => {
+    // choice-exchange#346: the API orients its own candles now and says so.
+    expect(seriesPrices({ priced: "SKIBI", pair: "SAI/SKIBI" }, "SKIBI")).toBe(true);
+    expect(seriesPrices({ priced: "SAI", pair: "SAI/SKIBI" }, "SKIBI")).toBe(false);
+  });
+
+  it("falls back to the pair's BASE leg on a deployment without it", () => {
+    // The old shape: no `priced`, and the series is the pair's base asset.
+    expect(seriesPrices({ pair: "SAI/SKIBI" }, "SKIBI")).toBe(false);
+    expect(seriesPrices({ pair: "SKIBI/INJ" }, "SKIBI")).toBe(true);
+    expect(seriesPrices({ pair: "SHROOM/INJ" }, "SHROOM")).toBe(true);
+  });
+
+  it("is case- and whitespace-insensitive, and safe on a junk payload", () => {
+    expect(seriesPrices({ priced: " skibi " }, "SKIBI")).toBe(true);
+    expect(seriesPrices({}, "SKIBI")).toBe(false);
+    expect(seriesPrices({ pair: null }, "SKIBI")).toBe(false);
+  });
+});
+
+describe("candles against a backend that orients its own series", () => {
+  /** A denom query resolves straight to Choice, so only choiceApi needs stubbing. */
+  const candlesRt = (marketCandles: (q: string) => Record<string, unknown>) => {
+    const asked: string[] = [];
+    const rt = {
+      choiceApi: {
+        token: async () => ({
+          symbol: "MOON",
+          price_usd: 3.8e-7,
+          top_markets: [{ pair: "SAI/MOON", vol24h_usd: 0 }],
+        }),
+        marketCandles: async (q: string) => {
+          asked.push(q);
+          return marketCandles(q);
+        },
+      },
+    } as unknown as Runtime;
+    return { rt, asked };
+  };
+
+  const SERIES = { candles: [[1786633200, 3.4e-7, 3.5e-7, 3.3e-7, 3.4e-7, 12]] };
+
+  it("takes the direct answer when `priced` names the token asked for", async () => {
+    // choice-exchange#346 deployed: MOON is only ever the quote side of SAI/MOON,
+    // and the API now inverts that pool rather than charting SAI. No workaround
+    // is needed, and none is attempted.
+    const { rt, asked } = candlesRt(() => ({ pair: "SAI/MOON", priced: "MOON", ...SERIES }));
+    const out = (await candles(rt, { query: MOON_DENOM, interval: "1h" })) as Record<string, unknown>;
+
+    expect(out.count).toBe(1);
+    expect(out.warnings).toBeUndefined();
+    expect(asked).toEqual([MOON_DENOM]); // asked once, by token id
+  });
+
+  it("still refuses on a deployment that has not been fixed", async () => {
+    // Same pool, same token, no `priced` — the series is SAI's.
+    const { rt } = candlesRt(() => ({ pair: "SAI/MOON", ...SERIES }));
+    const out = (await candles(rt, { query: MOON_DENOM, interval: "1h" })) as Record<string, unknown>;
+
+    expect(out.count).toBe(0);
+    expect(String((out.warnings as string[])[0])).toContain("no price series is available for MOON");
+    expect(out.priceUsd).toBe(3.8e-7);
   });
 });
 
