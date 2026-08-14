@@ -75,7 +75,8 @@ function renderView(v: IdentityView, out: (s: string) => void): void {
   out(`  builderCode   ${v.builderCode || "(unset)"}`);
   out(`  agentType     ${v.agentType || "(unset)"}`);
   out(`  card          ${v.cardUri}`);
-  out(`  8004scan      ${v.scanUrl}`);
+  // Only mainnet has an explorer page; a blank label is worse than none.
+  if (v.scanUrl) out(`  8004scan      ${v.scanUrl}`);
 }
 
 function custodyNote(custody: IdentityView["custody"]): string {

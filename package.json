@@ -1,6 +1,6 @@
 {
   "name": "trippy-mcp",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Trippy MCP \u2014 let AI agents (Claude Code, Codex, Cursor) launch and trade tokens on Injective: SHROOM Pad bonding curves + any-token swaps through the Choice aggregator. Non-custodial: the key is generated and stays on your machine.",
   "license": "MIT",
   "repository": {

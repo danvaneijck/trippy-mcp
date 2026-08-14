@@ -1415,7 +1415,9 @@ async function erc8004Info(rt: Runtime, backendAgentId: string | null): Promise<
       custody: view.custody,
       cardUri: view.cardUri,
       identityTuple: view.identityTuple,
-      scanUrl: view.scanUrl,
+      // Omitted when the network has no explorer page: an empty string reads as
+      // a link to the model, and it would offer it to the user.
+      ...(view.scanUrl ? { scanUrl: view.scanUrl } : {}),
       ...(view.custody === "unlinked"
         ? {
             warning:

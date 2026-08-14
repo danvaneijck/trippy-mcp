@@ -80,6 +80,16 @@ export interface WalletLink {
 
 const STRING_PARAM = parseAbiParameters("string");
 
+/**
+ * 8004scan's own path segment per chain, by EVM chain id. Its URLs are keyed on
+ * a human slug, not a chain id, so this cannot be derived — it is read off the
+ * explorer. Absent means "no page to link to", and callers omit the link rather
+ * than inventing one.
+ */
+const SCAN_SLUGS: Record<number, string> = {
+  1776: "injective",
+};
+
 export class IdentityRegistry {
   constructor(
     private readonly net: NetworkDef,
@@ -107,8 +117,20 @@ export class IdentityRegistry {
     return `eip155:${this.net.evmChainId}:${this.address}:${agentId}`;
   }
 
+  /**
+   * The explorer page for this identity.
+   *
+   * `/agents/<chain-slug>/<id>`, VERIFIED by fetching it: the page for agent
+   * 931 contains the agent's name and wallet, while the CAIP-10 form Injective's
+   * own SDK builds (`/agent/eip155:1776:0x8004…:931`) 404s. The tuple is still
+   * the right identifier to REPORT — it is what other tooling consumes — but it
+   * is not a URL, and shipping it as one gave every registered agent a dead
+   * link.
+   */
   scanUrl(agentId: bigint | string): string {
-    return `https://8004scan.io/agent/${this.identityTuple(agentId)}`;
+    const slug = SCAN_SLUGS[this.net.evmChainId];
+    if (!slug) return "";
+    return `https://8004scan.io/agents/${slug}/${agentId}`;
   }
 
   // ---- reads ---------------------------------------------------------------

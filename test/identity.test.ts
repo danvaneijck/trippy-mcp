@@ -490,7 +490,12 @@ describe("agent_info", () => {
     expect(info.erc8004.registered).toBe(true);
     expect(info.erc8004.agentId).toBe("64");
     expect(info.erc8004.custody).toBe("owner");
-    expect(info.erc8004.scanUrl).toBe(`https://8004scan.io/agent/eip155:1776:${REGISTRY}:64`);
+    // The URL 8004scan actually serves. Confirmed by fetching the real page for
+    // mainnet agent 931 and finding the agent's name in it; the CAIP-10 form the
+    // SDK builds 404s, which is how this shipped broken in 0.9.0.
+    expect(info.erc8004.scanUrl).toBe("https://8004scan.io/agents/injective/64");
+    // The tuple stays the tuple: it is an identifier, not a link.
+    expect(info.erc8004.identityTuple).toBe(`eip155:1776:${REGISTRY}:64`);
   });
 
   /**
