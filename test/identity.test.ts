@@ -162,6 +162,67 @@ describe("agent card", () => {
     ).toThrow(/metadata/);
   });
 
+  /**
+   * The card is served by the BACKEND, not by this package, so the only thing
+   * that can go wrong quietly is the two drifting apart. This payload was
+   * CAPTURED from a running shroom_launchpad API (branch feat/agent-erc8004,
+   * 2026-08-14, `GET /agents/:address/agent-card.json` against a real
+   * Postgres), not written here — a card shape invented in a test is exactly
+   * how a fix has shipped inert past a green suite in this package before.
+   *
+   * It also parses through Injective's own `fetchAgentCard`, which is the
+   * parser that decides whether the ecosystem can read us at all.
+   */
+  const SERVED_CARD = {
+    type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+    name: "gate-test-agent",
+    description:
+      "Trading agent on Injective. Trades SHROOM Pad bonding curves and Choice-routed swaps, driven through the trippy-mcp Model Context Protocol server.",
+    services: [
+      {
+        name: "web",
+        endpoint: "https://test-trade.trippyinj.xyz/portfolio/0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+        description: "Trippy Terminal profile: this agent's trades, holdings and launches.",
+      },
+    ],
+    image: "https://example.test/avatar.png",
+    x402Support: false,
+    active: true,
+    registrations: [
+      { agentId: "64", agentRegistry: "eip155:1439:0x8004A818BFB912233c491871b3d84c89A494BD9e" },
+    ],
+    updatedAt: 1_786_695_727,
+    metadata: {
+      chain: "injective",
+      chainId: "1439",
+      agentType: "trading",
+      builderCode: "shroom",
+      operatorAddress: "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
+    },
+  };
+
+  it("accepts the card the backend actually serves", () => {
+    expect(() => assertValidCard(SERVED_CARD, "served")).not.toThrow();
+  });
+
+  it("agrees with the backend on every field that is not free text", () => {
+    const mine = buildAgentCard({
+      name: SERVED_CARD.name,
+      agentAddress: SERVED_CARD.metadata.operatorAddress,
+      operatorAddress: SERVED_CARD.metadata.operatorAddress,
+      avatarUrl: SERVED_CARD.image,
+      profileUrl: SERVED_CARD.services[0]!.endpoint,
+      chainId: 1439,
+      registryAddress: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+      agentId: "64",
+    });
+    expect(mine.type).toBe(SERVED_CARD.type);
+    expect(mine.metadata).toEqual(SERVED_CARD.metadata);
+    expect(mine.x402Support).toBe(SERVED_CARD.x402Support);
+    expect(mine.services.map((s) => s.name)).toEqual(SERVED_CARD.services.map((s) => s.name));
+    expect(mine.registrations).toEqual(SERVED_CARD.registrations);
+  });
+
   it("points tokenURI at a stable backend URL, lowercased", () => {
     expect(cardUrl("https://pump-api.trippyinj.xyz/", "0xAbCdEf0000000000000000000000000000000001")).toBe(
       "https://pump-api.trippyinj.xyz/agents/0xabcdef0000000000000000000000000000000001/agent-card.json",
