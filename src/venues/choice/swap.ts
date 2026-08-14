@@ -31,18 +31,24 @@ import type { PolicyEngine } from "../../policy/policy.js";
  * `1e3` while the SOR happily read it as 1000: the same input was valid on one
  * venue and not the other. Checking the shape here makes them agree, gives the
  * payload check below an exact expected base amount, and turns `buy … "all"`
- * (which only `sell` can resolve) into a local error instead of a 422 that
+ * (which only a sell can resolve) into a local error instead of a 422 that
  * surfaced as `no_route` — i.e. "no liquidity" for what was really a bad amount.
+ *
+ * By design this layer never sees `"all"` on a sell: `quote` and `sell` both
+ * size the sentinel against the live position before calling in, so a sentinel
+ * arriving here means it came off a BUY. The hint says so — it used to claim
+ * `"all" is only supported on sell` while rejecting exactly that on a sell,
+ * because this parser cannot see which side called it.
  */
 const PLAIN_DECIMAL = /^\d+(\.\d+)?$/;
 
 function assertPlainAmount(amountHuman: string): void {
   if (!PLAIN_DECIMAL.test(amountHuman)) {
-    throw new ToolError(
-      "bad_amount",
-      `cannot parse amount ${JSON.stringify(amountHuman)}`,
-      'use a plain decimal like "0.5" — exponent notation is not accepted, and "all" is only supported on sell',
-    );
+    const hint =
+      amountHuman.trim().toLowerCase() === "all"
+        ? 'a buy has no position to size, so "all" is a sell-only amount — pass the quote-asset amount to spend'
+        : 'use a plain decimal like "0.5" — exponent notation is not accepted';
+    throw new ToolError("bad_amount", `cannot parse amount ${JSON.stringify(amountHuman)}`, hint);
   }
   if (Number(amountHuman) <= 0) {
     throw new ToolError("bad_amount", "amount must be positive");

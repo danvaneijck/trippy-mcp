@@ -23,6 +23,8 @@ import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
 import { quoteAssetBySlot, type QuoteAssetInfo } from "../chain/networks.js";
 import { explain as explainTopic } from "../docs/index.js";
 import { ToolError } from "../errors.js";
+import { IdentityRegistry } from "../identity/registry.js";
+import { loadIdentityState } from "../identity/state.js";
 import { detectAinj } from "../interop.js";
 import { decodeMetadataUri, resolveImage, type LaunchMetadata } from "../metadata.js";
 import { CURVE_STATES, resolveToken, type ResolvedTarget } from "../router.js";
@@ -720,15 +722,63 @@ export function shortfallWarning(
   return `wallet holds ${formatUnits(held, decimals)} ${label} but this quote spends ${formatUnits(needed, decimals)} — buy/sell would refuse this`;
 }
 
+/**
+ * Size `sell … "all"` against the live position, in human units.
+ *
+ * Bank denoms and CW20 contracts both answer for a position, just not in the
+ * same module — `inputPosition` asks the right one. Choice quotes take HUMAN
+ * units, so this exponent decides how much of the position actually goes:
+ * guessing is not an option, because 18-for-6 offers a trillionth of the
+ * balance, which either fails as "rounds to zero" or — above ~1e6 tokens —
+ * sells that trillionth and reports success.
+ *
+ * Shared by `quote` and `sell` on purpose. They used to disagree: `sell` took
+ * `"all"` and sized it here, while `quote` rejected the sentinel at the SOR
+ * amount parser, so liquidating a position was the one trade that could not be
+ * previewed — you had to read the quantity out of `portfolio` and retype it,
+ * which is exactly the manual decimals step that produced the trillionth-of-a-
+ * position bug. A preview that cannot express the trade is not a preview.
+ */
+async function sizeChoiceSellAll(rt: Runtime, tokenId: string): Promise<string> {
+  const { held, decimals, label } = await inputPosition(rt, tokenId);
+  if (held === null) {
+    throw new ToolError(
+      "balance_unavailable",
+      `could not read a balance of ${tokenId}`,
+      'pass an explicit amount instead of "all"',
+    );
+  }
+  if (held <= 0n) {
+    throw new ToolError("no_balance", `this wallet holds no ${label}`);
+  }
+  if (decimals === null) {
+    throw new ToolError(
+      "unknown_decimals",
+      `nothing publishes decimals for ${label}, so "all" cannot be sized`,
+      "pass an explicit amount in whole tokens instead",
+    );
+  }
+  return formatUnits(held, decimals);
+}
+
 export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
   const slippageBps = rt.policy.clampSlippageBps(args.slippageBps);
   const target = await routed(rt, args.query);
+  // `"all"` on a buy is left alone: there is no position to size it against, and
+  // the venues reject it with a clearer error than anything here could invent.
+  const sellAll = args.side === "sell" && args.amount === "all";
+  // The Choice leg resolves ONCE, up front, so every leg below — the SOR call,
+  // the USD legs, the shortfall warning and the reported `amountIn` — describes
+  // the same concrete size the executor would send. The curve leg resolves
+  // inside its own branch, where it already reads the position anyway.
+  const amount =
+    sellAll && target.venue === "choice" ? await sizeChoiceSellAll(rt, target.tokenId) : args.amount;
 
   if (target.venue === "curve") {
     const { launch, warnings } = await rt.shroom.precheckTrade(target.launchId, args.side);
     const q = rt.shroom.quoteInfo(launch.quoteAsset);
     if (args.side === "buy") {
-      const pairIn = parseHuman(args.amount, q.decimals);
+      const pairIn = parseHuman(amount, q.decimals);
       const res = await rt.shroom.quoteBuy(target.launchId, pairIn, rt.signer.address);
       // Both legs priced off the same rate read, so they cannot disagree.
       const [amountInUsd, feeUsd, refundUsd, held] = await Promise.all([
@@ -756,7 +806,7 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
         launchId: target.launch.id,
         side: "buy",
         quoteAsset: q.symbol,
-        amountIn: `${args.amount} ${q.symbol}`,
+        amountIn: `${amount} ${q.symbol}`,
         amountInUsd,
         tokenOut: formatUnits(res.tokenOut, 18),
         fee: `${formatUnits(res.fee, q.decimals)} ${q.symbol}`,
@@ -771,12 +821,29 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
         warnings,
       };
     }
-    const tokenIn = parseHuman(args.amount, 18);
+    // Read the position BEFORE sizing: a launch token is always an 18-dec ERC20,
+    // so this one read both resolves `"all"` and backs the shortfall warning.
+    // `launch.token` is typed `Address` here, which `target.launch.token` (plain
+    // API text) is not — the reason this arm sizes itself rather than up front.
+    const held = await rt.shroom.erc20Balance(launch.token, rt.signer.address).catch(() => null);
+    if (sellAll && held === null) {
+      throw new ToolError(
+        "balance_unavailable",
+        `could not read a balance of launch #${target.launch.id}`,
+        'pass an explicit amount instead of "all"',
+      );
+    }
+    if (sellAll && held !== null && held <= 0n) {
+      throw new ToolError(
+        "no_balance",
+        `the agent wallet holds no tokens of launch #${target.launch.id}`,
+      );
+    }
+    const tokenIn = sellAll && held !== null ? held : parseHuman(amount, 18);
     const res = await rt.shroom.quoteSell(target.launchId, tokenIn, rt.signer.address);
-    const [pairOutUsd, feeUsd, held] = await Promise.all([
+    const [pairOutUsd, feeUsd] = await Promise.all([
       rt.shroom.usdValue(launch.quoteAsset, res.pairOut),
       rt.shroom.usdValue(launch.quoteAsset, res.fee),
-      rt.shroom.erc20Balance(launch.token, rt.signer.address).catch(() => null),
     ]);
     // A curve sell converts back to the quote asset, so it spends no USD budget
     // — 0, not null: the launchpad enforces spendUsd: 0 here, and null would
@@ -788,7 +855,9 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
       launchId: target.launch.id,
       side: "sell",
       quoteAsset: q.symbol,
-      amountIn: `${args.amount} tokens`,
+      // Report what was sized, never the sentinel — the whole point is that the
+      // preview states the concrete quantity the sell would send.
+      amountIn: `${formatUnits(tokenIn, 18)} tokens`,
       pairOut: `${formatUnits(res.pairOut, q.decimals)} ${q.symbol} (net of fee)`,
       pairOutUsd,
       fee: `${formatUnits(res.fee, q.decimals)} ${q.symbol}`,
@@ -801,12 +870,12 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   const [tokenIn, tokenOut] =
     args.side === "buy" ? [counter, target.tokenId] : [target.tokenId, counter];
-  const q = await rt.choice.quote(tokenIn, tokenOut, args.amount, slippageBps / 100);
+  const q = await rt.choice.quote(tokenIn, tokenOut, amount, slippageBps / 100);
   const expectedOutput = String(q.summary.expected_output);
   // Priced from the token overviews, so an unpriceable token reports null
   // rather than failing a quote that is otherwise fine.
   const [amountInUsd, expectedOutputUsd, position] = await Promise.all([
-    rt.choice.usdValueIn(tokenIn, args.amount),
+    rt.choice.usdValueIn(tokenIn, amount),
     rt.choice.usdValueIn(tokenOut, expectedOutput),
     inputPosition(rt, tokenIn),
   ]);
@@ -820,7 +889,7 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
     );
   } else if (held !== null) {
     try {
-      const shortfall = shortfallWarning(held, parseHuman(args.amount, inDecimals), inDecimals, label);
+      const shortfall = shortfallWarning(held, parseHuman(amount, inDecimals), inDecimals, label);
       if (shortfall) warnings.push(shortfall);
     } catch {
       // The SOR accepted this amount string; if our own parse disagrees, that
@@ -832,7 +901,7 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
     side: args.side,
     tokenIn,
     tokenOut,
-    amountIn: args.amount,
+    amountIn: amount,
     amountInUsd,
     expectedOutput,
     expectedOutputUsd,
@@ -860,34 +929,8 @@ export async function sell(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<
     return rt.shroom.sell(target.launchId, args.amount === "all" ? "all" : args.amount, slippageBps);
   }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
-  let amount = args.amount;
-  if (amount === "all") {
-    // Bank denoms and CW20 contracts both answer for a position, just not in
-    // the same module — `inputPosition` asks the right one. Choice quotes take
-    // HUMAN units, so this exponent decides how much of the position actually
-    // goes: guessing is not an option, because 18-for-6 offers a trillionth of
-    // the balance, which either fails as "rounds to zero" or — above ~1e6
-    // tokens — sells that trillionth and reports success.
-    const { held, decimals, label } = await inputPosition(rt, target.tokenId);
-    if (held === null) {
-      throw new ToolError(
-        "balance_unavailable",
-        `could not read a balance of ${target.tokenId}`,
-        'pass an explicit amount instead of "all"',
-      );
-    }
-    if (held <= 0n) {
-      throw new ToolError("no_balance", `this wallet holds no ${label}`);
-    }
-    if (decimals === null) {
-      throw new ToolError(
-        "unknown_decimals",
-        `nothing publishes decimals for ${label}, so "all" cannot be sized`,
-        "pass an explicit amount in whole tokens instead",
-      );
-    }
-    amount = formatUnits(held, decimals);
-  }
+  // Same sizing `quote` reports, so the preview and the broadcast agree.
+  const amount = args.amount === "all" ? await sizeChoiceSellAll(rt, target.tokenId) : args.amount;
   return rt.choice.swap(target.tokenId, counter, amount, slippageBps / 100);
 }
 
@@ -1324,6 +1367,7 @@ export async function agentInfo(rt: Runtime): Promise<unknown> {
     // registry unreachable
   }
   const other = detectAinj({ injAddress: rt.injAddress });
+  const erc8004 = await erc8004Info(rt, agent?.erc8004AgentId ?? null);
   // Identity is what an agent reads at the start of a session, so it is the one place a
   // stale install is guaranteed to be told it is stale. Cached + fail-soft: null when the
   // registry is unreachable, and the field is simply absent.
@@ -1337,9 +1381,51 @@ export async function agentInfo(rt: Runtime): Promise<unknown> {
     ownerAddress: agent?.ownerAddress ?? null,
     howToClaim:
       "the human operator runs `trippy-mcp claim-code` on this machine, then enters the code in Trippy Terminal → Settings → Agents (or opens the printed link) and signs with their main wallet — that links the agent to their profile",
+    erc8004,
     ...(version ? { version } : { version: { running: PKG_VERSION } }),
     ...(other ? { otherAgentWallets: { ainj: other } } : {}),
   };
+}
+
+/**
+ * The agent's ERC-8004 identity — Injective's ecosystem-wide on-chain agent
+ * registry, which is a different thing from the SHROOM Pad `registered` flag
+ * above (that one is the badge; this one is the portable, cross-chain passport).
+ *
+ * FAILS SOFT, deliberately: the registry is an upgradeable proxy behind a public
+ * RPC, and `agent_info` is what a session reads first. A registry read that
+ * flakes must degrade to `null` rather than break identity for the whole
+ * session — so every failure path here returns the unregistered shape.
+ */
+async function erc8004Info(rt: Runtime, backendAgentId: string | null): Promise<unknown> {
+  const nudge =
+    "not registered in Injective's on-chain agent registry (ERC-8004). The human operator can mint one with `trippy-mcp identity register` — one transaction, about $0.0006 of gas.";
+  try {
+    const registry = new IdentityRegistry(rt.net, rt.signer);
+    if (!registry.available) return null;
+    const local = loadIdentityState(rt.home);
+    const id = local?.agentId ?? backendAgentId;
+    if (!id) return { registered: false, howToRegister: nudge };
+    const view = await registry.view(BigInt(id));
+    return {
+      registered: true,
+      agentId: view.agentId,
+      owner: view.owner,
+      agentWallet: view.agentWallet,
+      custody: view.custody,
+      cardUri: view.cardUri,
+      identityTuple: view.identityTuple,
+      scanUrl: view.scanUrl,
+      ...(view.custody === "unlinked"
+        ? {
+            warning:
+              "agentWallet is 0x0 — the identity was transferred and not re-linked, so trades from this wallet are not attributable to it. The operator runs `trippy-mcp identity link` and completes it in Trippy Terminal → Settings → Agents.",
+          }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function parseHuman(amount: string, decimals: number): bigint {

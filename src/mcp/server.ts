@@ -365,12 +365,14 @@ export async function serve(): Promise<void> {
   register(
     server,
     "quote",
-    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; graduated/DEX tokens quote through the Choice aggregator (counterToken defaults to INJ). Buy amounts are in the counter/quote asset; sell amounts in the token. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
+    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; graduated/DEX tokens quote through the Choice aggregator (counterToken defaults to INJ). Buy amounts are in the counter/quote asset; sell amounts in the token, and a sell takes `all` — sized against the live position exactly as `sell` would, so the whole-position trade can be previewed rather than retyped from `portfolio`. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
       SPOT_ONLY_NOTE,
     {
       query,
       side: z.enum(["buy", "sell"]),
-      amount: z.string().describe("human units (e.g. \"0.5\")"),
+      amount: z
+        .string()
+        .describe('human units (e.g. "0.5"); "all" on a sell = the whole position'),
       slippageBps,
       counterToken: z.string().optional().describe("Choice-venue counter asset denom (default inj)"),
     },
@@ -441,7 +443,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "agent_info",
-    "This agent's identity: name, addresses, registry status, how the human operator claims it in Trippy Terminal, and (when detected) any co-installed Injective SDK wallets that are NOT this agent.",
+    "This agent's identity: name, addresses, SHROOM Pad registry status, its ERC-8004 on-chain identity (Injective's ecosystem-wide agent registry) and who holds custody of it, how the human operator claims it in Trippy Terminal, and (when detected) any co-installed Injective SDK wallets that are NOT this agent.",
     {},
     (rt2) => t.agentInfo(rt2),
   );

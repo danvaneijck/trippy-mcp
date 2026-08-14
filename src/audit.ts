@@ -19,6 +19,9 @@ export type AuditEvent =
   | "swap:broadcast"
   | "swap:failed"
   | "agent:registered"
+  | "agent:erc8004-registered"
+  | "agent:erc8004-linked"
+  | "agent:erc8004-transferred"
   | "sweep:sent";
 
 export class AuditLog {

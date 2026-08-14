@@ -75,6 +75,25 @@ export interface AgentIdentity {
   client: string | null;
   createdAt: string;
   revoked: boolean;
+  /** ERC-8004 identity NFT id, once minted. Absent on older backends. */
+  erc8004AgentId?: string | null;
+  erc8004ChainId?: number | null;
+  /**
+   * The pending wallet link the operator has to submit. Short-lived by
+   * construction — the registry rejects a deadline more than 300s out — so a
+   * consumer must check `deadline` against the clock, not just its presence.
+   */
+  walletLink?: {
+    owner: string;
+    deadline: number;
+    signature: string;
+  } | null;
+}
+
+export interface WalletLinkPayload {
+  owner: string;
+  deadline: number;
+  signature: string;
 }
 
 export class PumpApi {
@@ -219,5 +238,53 @@ export class PumpApi {
 
   claimCode(address: string, body: { nonce: string; signature: string }): Promise<{ code: string; expiresAt: string }> {
     return this.post(`/agents/${address}/claim-code`, body);
+  }
+
+  // ---- ERC-8004 ------------------------------------------------------------
+
+  /**
+   * The message embeds the payload being written (agentId/chainId and the
+   * link's owner+deadline), so a captured signature cannot be replayed to
+   * record different data — same discipline as `/agents/register`.
+   */
+  erc8004Nonce(
+    address: string,
+    body: {
+      agentId?: string;
+      chainId?: number;
+      walletLink?: { owner: string; deadline: number };
+    },
+  ): Promise<{ nonce: string; message: string }> {
+    return this.post(`/agents/${address}/erc8004/nonce`, body);
+  }
+
+  /**
+   * Record the on-chain identity and/or refresh the pending wallet link.
+   * Agent-key signed, same single-use-nonce discipline as `register`.
+   */
+  recordErc8004(
+    address: string,
+    body: {
+      agentId?: string;
+      chainId?: number;
+      walletLink?: WalletLinkPayload;
+      nonce: string;
+      signature: string;
+    },
+  ): Promise<{ agent: AgentIdentity }> {
+    return this.post(`/agents/${address}/erc8004`, body);
+  }
+
+  /** The URL `tokenURI` points at — fetched raw so the card can be validated. */
+  async agentCard(address: string): Promise<unknown> {
+    const res = await fetch(this.url(`/agents/${address.toLowerCase()}/agent-card.json`));
+    if (!res.ok) {
+      throw new ToolError(
+        "api_error",
+        `agent card is not being served (HTTP ${res.status})`,
+        "run `trippy-mcp register` first — the card is built from the backend's agent row",
+      );
+    }
+    return res.json();
   }
 }
