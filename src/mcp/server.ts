@@ -365,12 +365,14 @@ export async function serve(): Promise<void> {
   register(
     server,
     "quote",
-    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; graduated/DEX tokens quote through the Choice aggregator (counterToken defaults to INJ). Buy amounts are in the counter/quote asset; sell amounts in the token. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
+    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; graduated/DEX tokens quote through the Choice aggregator (counterToken defaults to INJ). Buy amounts are in the counter/quote asset; sell amounts in the token, and a sell takes `all` — sized against the live position exactly as `sell` would, so the whole-position trade can be previewed rather than retyped from `portfolio`. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
       SPOT_ONLY_NOTE,
     {
       query,
       side: z.enum(["buy", "sell"]),
-      amount: z.string().describe("human units (e.g. \"0.5\")"),
+      amount: z
+        .string()
+        .describe('human units (e.g. "0.5"); "all" on a sell = the whole position'),
       slippageBps,
       counterToken: z.string().optional().describe("Choice-venue counter asset denom (default inj)"),
     },
