@@ -1242,17 +1242,20 @@ async function choiceHoldingRow(
  * number you do not trust out of the total.
  */
 function isDeadMarket(overview: Record<string, unknown>): boolean {
+  // Alive if anything is pooled in it OR anyone traded it today. Note Choice
+  // OMITS `liquidity_usd` entirely for a token with no pools rather than
+  // sending 0 — treating a missing field as "unknown, assume alive" made this
+  // check inert against the very token that motivated it, while every real
+  // asset sampled (INJ, USDT, QUNT, SHROOM, the launch denoms) carries it.
   const liq = Number(overview["liquidity_usd"]);
-  // A real quote asset (INJ/USDC) carries no `liquidity_usd` of its own, so a
-  // missing field cannot be treated as dead — only an explicit zero is.
-  const noLiquidity = Number.isFinite(liq) && liq <= 0;
+  if (Number.isFinite(liq) && liq > 0) return false;
   const markets = overview["top_markets"];
-  if (!Array.isArray(markets) || markets.length === 0) return noLiquidity;
+  if (!Array.isArray(markets)) return true;
   const vol = markets.reduce((a: number, m: unknown) => {
     const v = Number((m as Record<string, unknown> | null)?.["vol24h_usd"]);
     return a + (Number.isFinite(v) ? v : 0);
   }, 0);
-  return vol <= 0 && noLiquidity;
+  return vol <= 0;
 }
 
 /**

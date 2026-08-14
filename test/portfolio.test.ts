@@ -200,7 +200,16 @@ function cw20Rt(cw20Tokens: string[], priceUsd: number | null = 0.0000329315): R
     },
     injAddress: AGENT_INJ,
     signer: { address: "0xf8E8099A670676F0C13FB9Dd9f61b92671c5e662" },
-    choiceApi: { token: async () => ({ price_usd: priceUsd, name: "shroomin" }) },
+    // Shaped like a live overview: a real token carries `liquidity_usd`, and
+    // one that does not is treated as a mark nobody traded against.
+    choiceApi: {
+      token: async () => ({
+        price_usd: priceUsd,
+        name: "shroomin",
+        liquidity_usd: 7773.21,
+        top_markets: [{ pair: "SHROOM/INJ", vol24h_usd: 206.79 }],
+      }),
+    },
     pump: { getLaunch: async () => { throw new Error("not found"); } },
   } as unknown as Runtime;
 }
@@ -363,13 +372,21 @@ describe("prices nobody traded against stay out of totalUsd", () => {
 
   const held = { [SHROOM_CW20]: { balance: "10000000000000000000000", decimals: 18, symbol: "X" } };
 
-  it("drops a mark on a token with no liquidity and no 24h volume", async () => {
+  it("drops a mark on a dead token, in the exact shape Choice really returns", async () => {
     // 10,000 of a dead factory denom marked at $541 contributed $5.4M of a
     // $5.4M total on a wallet that really held dust. Decimals and amount were
     // both right — only the mark was junk, so no exponent guard caught it.
+    //
+    // This overview is copied from the live response for RealTrumPepe: Choice
+    // OMITS `liquidity_usd` for a token with no pools rather than sending 0.
+    // The first cut of this test asserted `liquidity_usd: 0` — an assumption,
+    // not the payload — so it passed while the gate was inert in production.
     stubChain({ bank: [], cw20: held });
     const res = (await portfolio(
-      rtWithOverview({ price_usd: 541.323, liquidity_usd: 0, top_markets: [{ vol24h_usd: 0 }] }),
+      rtWithOverview({
+        price_usd: 541.323,
+        top_markets: [{ kind: "orderbook", pair: "RealTrumPepe/INJ", vol24h_usd: 0.0 }],
+      }),
     )) as { holdings: PortfolioRow[]; totalUsd: number };
     const row = res.holdings[0]!;
     expect(row.staleMark).toBe(true);
@@ -397,11 +414,22 @@ describe("prices nobody traded against stay out of totalUsd", () => {
     expect(res.totalUsd).toBe(20000);
   });
 
-  it("does not treat a missing liquidity field as dead", async () => {
-    // A real quote asset carries no `liquidity_usd` of its own; only an
-    // explicit zero means nothing backs the price.
+  it("treats an absent liquidity field with no volume as dead", async () => {
+    // The inverse of what shipped in 0.8.0. Every live asset sampled — INJ,
+    // USDT, QUNT, SHROOM, the launch denoms — carries `liquidity_usd`; only
+    // the dead one omitted it.
     stubChain({ bank: [], cw20: held });
     const res = (await portfolio(rtWithOverview({ price_usd: 2 }))) as {
+      holdings: PortfolioRow[];
+      totalUsd: number;
+    };
+    expect(res.holdings[0]!.staleMark).toBe(true);
+    expect(res.totalUsd).toBe(0);
+  });
+
+  it("keeps a mark on a token with liquidity but no markets array", async () => {
+    stubChain({ bank: [], cw20: held });
+    const res = (await portfolio(rtWithOverview({ price_usd: 2, liquidity_usd: 500 }))) as {
       holdings: PortfolioRow[];
       totalUsd: number;
     };
