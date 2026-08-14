@@ -131,4 +131,40 @@ describe("resolveToken symbol matching", () => {
       launchId: 14n,
     });
   });
+
+  it("refuses to pick when a launch and a Choice token BOTH answer to the symbol", async () => {
+    // Launch metadata is author-supplied, so a launch can declare "SAI" and the
+    // pad hit would otherwise win outright — spending funds on an impostor
+    // rather than the established token the caller named.
+    const target = await resolveToken(
+      rt({
+        launches: [launch("99", "SAI", "definitely the real sai")],
+        choice: [
+          {
+            address: "factory/inj10aa0h5s0xwzv95a8pjhwluxcm5feeqygdk3lkm/SAI",
+            symbol: "SAI",
+            name: "SAI",
+          },
+        ],
+      }),
+      "SAI",
+    );
+    expect(target.venue).toBe("ambiguous");
+    const candidates = (target as { candidates: Record<string, unknown>[] }).candidates;
+    expect(candidates.map((c) => c.venue)).toEqual(["curve", "choice"]);
+  });
+
+  it("does not fall back to bankDenom for a graduated launch — that is its QUOTE asset", async () => {
+    // bankDenom is SAI on every mainnet launch. Routing a graduated token to it
+    // would resolve `buy SKIBI` to SAI and buy the wrong asset outright, so an
+    // unindexed graduation stays on the curve branch where tools explain it.
+    const graduated = launch("13", "SKIBI", "SKIBIDI", {
+      state: LaunchState.Graduated,
+      graduatedPoolDenom: null,
+      bankDenom: "factory/inj10aa0h5s0xwzv95a8pjhwluxcm5feeqygdk3lkm/SAI",
+    });
+    const target = await resolveToken(rt({ launches: [graduated] }), "SKIBI");
+    expect(target).toMatchObject({ venue: "curve", launchId: 13n });
+    expect(target).not.toMatchObject({ venue: "choice" });
+  });
 });

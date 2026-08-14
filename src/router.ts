@@ -60,7 +60,6 @@ export async function resolveToken(rt: Runtime, query: string): Promise<Resolved
   const wanted = q.toLowerCase();
   const pad = await rt.pump.listLaunches({ q, limit: 5 }).catch(() => ({ items: [] as ApiLaunch[] }));
   const padExact = pad.items.filter((l) => launchSymbol(l)?.toLowerCase() === wanted);
-  if (padExact.length === 1) return routeLaunch(padExact[0]!);
   if (padExact.length > 1) return { venue: "ambiguous", candidates: padExact.map(launchCandidate) };
 
   // Choice resolve payload: {q, matches: [{type, address, symbol, name, price_usd}], ambiguous}
@@ -70,6 +69,19 @@ export async function resolveToken(rt: Runtime, query: string): Promise<Resolved
   } | null;
   const matches = choiceHit?.matches ?? [];
   const choiceExact = matches.filter((m) => m.symbol?.trim().toLowerCase() === wanted);
+
+  // Exact on BOTH venues. Launch metadata is author-supplied, so a launch can
+  // declare any symbol it likes — including one an established Choice token
+  // already answers to. Resolving that silently would send a `buy USDC` to
+  // whichever venue this function happened to check first, so it is a question
+  // for the caller instead.
+  if (padExact.length === 1 && choiceExact.length > 0) {
+    return {
+      venue: "ambiguous",
+      candidates: [launchCandidate(padExact[0]!), ...choiceExact.map(choiceCandidate)],
+    };
+  }
+  if (padExact.length === 1) return routeLaunch(padExact[0]!);
   if (choiceExact.length === 1) {
     const hit = choiceExact[0]!.address ?? choiceExact[0]!.denom;
     if (hit) return { venue: "choice", tokenId: String(hit) };
@@ -115,9 +127,14 @@ function routeLaunch(launch: ApiLaunch): ResolvedTarget {
   if (CURVE_STATES.has(launch.state)) {
     return { venue: "curve", launch, launchId: BigInt(launch.id) };
   }
-  if (launch.state === LaunchState.Graduated) {
-    const denom = launch.graduatedPoolDenom ?? launch.bankDenom;
-    if (denom) return { venue: "choice", tokenId: denom, launch };
+  // `graduatedPoolDenom` and nothing else. `bankDenom` reads like a fallback
+  // but it is the launch's QUOTE asset (SAI on every mainnet launch today), not
+  // its token — so falling back to it would resolve `buy SKIBI` to SAI and buy
+  // the wrong asset outright. A graduated launch whose denom has not been
+  // indexed yet drops through to the curve branch, where the tools explain the
+  // state, which is the safe way to be briefly unable to answer.
+  if (launch.state === LaunchState.Graduated && launch.graduatedPoolDenom) {
+    return { venue: "choice", tokenId: launch.graduatedPoolDenom, launch };
   }
   // Cancelled/refunded/etc — still return curve so tools can explain why.
   return { venue: "curve", launch, launchId: BigInt(launch.id) };

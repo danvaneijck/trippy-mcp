@@ -259,7 +259,7 @@ export async function manage(rt: Runtime, args: ManageArgs): Promise<Record<stri
   switch (action) {
     case "clawback":
       msg = clawbackMsg(args.campaignId);
-      detail = `clawback campaign #${args.campaignId}: ${fromBaseUnits(res.remaining, decimals)} ${res.campaign.denom} back to the creator`;
+      detail = `clawback campaign #${args.campaignId}: ${amountText(res.remaining, decimals, res.campaign.denom)} back to the creator`;
       break;
 
     case "freeze":
@@ -338,7 +338,7 @@ export async function manage(rt: Runtime, args: ManageArgs): Promise<Record<stri
     ...(expiryIso ? { newExpiry: expiryIso } : {}),
     ...(action === "clawback"
       ? {
-          recovered: `${fromBaseUnits(res.remaining, decimals)} ${res.campaign.denom}`,
+          recovered: amountText(res.remaining, decimals, res.campaign.denom),
           note: "the campaign is closed permanently — anyone who had not claimed by the expiry cannot claim now",
         }
       : {}),
@@ -376,10 +376,16 @@ function describe(
   };
 }
 
-async function campaignDecimals(rt: Runtime, c: Campaign): Promise<number> {
-  // Same registry-first resolution the rest of the rail uses: `denomDecimals`
-  // falls back to 18 and USDC is 6, and this number is what a human reads a
-  // recovered amount off.
+/**
+ * Decimals for the amounts this file prints, or null when nothing knows.
+ *
+ * Registry, then the campaign's own meta, then the chain. Null is a real answer
+ * here rather than a refusal, because these amounts are audit-log and response
+ * TEXT — the clawback message carries a campaign id and no amount. Refusing
+ * would block an operator from recovering their own funds over a display
+ * string, so `amountText` prints base units instead and says so.
+ */
+async function campaignDecimals(rt: Runtime, c: Campaign): Promise<number | null> {
   const known = Object.values(rt.net.quoteAssets).find((q) => q.bankDenom === c.denom);
   if (known) return known.decimals;
   const meta = safeMeta(c.meta);
@@ -388,6 +394,13 @@ async function campaignDecimals(rt: Runtime, c: Campaign): Promise<number> {
   }
   const { denomDecimals } = await import("../api/lcd.js");
   return denomDecimals(rt.net.lcdUrl, c.denom);
+}
+
+/** Whole tokens when the exponent is known, else an explicit base-unit figure. */
+function amountText(base: string, decimals: number | null, denom: string): string {
+  return decimals === null
+    ? `${base} base units of ${denom} (the chain publishes no decimals for it)`
+    : `${fromBaseUnits(base, decimals)} ${denom}`;
 }
 
 function safeMeta(raw: string): Record<string, unknown> {

@@ -8,19 +8,30 @@
  */
 
 import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
+import { ToolError } from "../errors.js";
 import type { Runtime } from "../runtime.js";
 
 /**
- * Decimals of the asset being dropped.
+ * Decimals of the asset being dropped, or a refusal.
  *
- * The vendored registry wins over LCD metadata for the quote assets, because
- * `denomDecimals` falls back to 18 when metadata is missing and USDC is 6 — a
- * wrong exponent here does not fail, it silently builds a drop off by a factor
- * of a trillion and funds it.
+ * The vendored registry wins over chain metadata for the quote assets, and an
+ * exponent the chain does not publish is a hard stop rather than a guess. Both
+ * rules exist for the same reason: a wrong exponent here does not fail, it
+ * silently builds a drop off by a factor of a trillion and funds it. Refusing
+ * costs an operator one explicit answer; guessing costs them the campaign.
  */
 export async function dropDecimals(rt: Runtime, denom: string): Promise<number> {
   const known = Object.values(rt.net.quoteAssets).find((q) => q.bankDenom === denom);
-  return known ? known.decimals : denomDecimals(rt.net.lcdUrl, denom);
+  if (known) return known.decimals;
+  const decimals = await denomDecimals(rt.net.lcdUrl, denom);
+  if (decimals === null) {
+    throw new ToolError(
+      "unknown_decimals",
+      `the chain publishes no decimals for ${denom}, so a drop of it cannot be sized`,
+      "drop a denom with bank metadata, or one of the quote assets (INJ/USDC/SAI)",
+    );
+  }
+  return decimals;
 }
 
 export async function denomSymbol(rt: Runtime, denom: string): Promise<string | null> {

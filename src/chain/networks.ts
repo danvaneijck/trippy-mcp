@@ -69,6 +69,16 @@ export interface NetworkDef {
     winj9: Address;
     feeTreasury: Address;
   };
+  /**
+   * The launchpad's tokenfactory issuer — launch tokens live at
+   * `factory/<issuer>/<prefix>_<launchId>_<hash>`.
+   *
+   * Tokenfactory namespaces a denom under its creator's address, so no other
+   * account can mint into this prefix. That makes the launch id embedded in the
+   * subdenom trustworthy on sight, which is what lets a held bank denom be
+   * mapped back to its launch without a lookup per holding.
+   */
+  launchDenomIssuer: string;
   /** Choice aggregation router (CosmWasm) — the only contract swaps may execute. */
   choiceAggregator: string;
   /** `choice-claim-drops` rail: the only contract airdrops may execute. */
@@ -105,6 +115,8 @@ const MAINNET: NetworkDef = {
     winj9: "0x0000000088827d2d103ee2d9A6b781773AE03FfB",
     feeTreasury: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
   },
+  // `cwAddresses.issuer` in shroom_launchpad contracts/deployments/injective_mainnet.json
+  launchDenomIssuer: "inj13j2rpnlwl30c02d4pzukykwfeyyhelvry9cqte",
   choiceAggregator: "inj1520rsss9aykhkfmuf89nh5hp2jww770z4u3eu0",
   claimDrops: {
     // code id 2066 (InstantiatePermission: Everybody), fee_bps 0, wasm admin is
@@ -161,6 +173,8 @@ const TESTNET: NetworkDef = {
     winj9: "0x0000000088827d2d103ee2d9A6b781773AE03FfB",
     feeTreasury: "0xBf08c09Fe227ada4A86d279e98E695344848d33D",
   },
+  // `cwAddresses.issuer` in shroom_launchpad contracts/deployments/injective_testnet.json
+  launchDenomIssuer: "inj1wjshrwrmt03v5eywfpuce6sg08h3gfnrcahqgj",
   choiceAggregator: "",
   claimDrops: {
     // code id 39733, fee_bps 0. Deployed 2026-07-26 for the end-to-end QA run.

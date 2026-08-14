@@ -503,6 +503,51 @@ export interface QuoteArgs {
   counterToken?: string;
 }
 
+/**
+ * What `buy`/`sell` would refuse about this quote, in words.
+ *
+ * `quote` is the step every caller is told to run first, and it already holds
+ * both numbers the trade is refused on — the USD spend and the wallet balance.
+ * Withholding them meant the only way to discover a $2,300 quote against a $200
+ * per-tx cap, or a sell of a token the wallet does not hold, was to attempt the
+ * trade. Nothing here enforces anything: the caps live in `PolicyEngine.enforce`
+ * inside the signers and the balance checks in the venues, exactly as before.
+ * This reports the same limits one step earlier.
+ */
+export function policyWarnings(rt: Runtime, spendUsd: number | null): string[] {
+  const p = rt.policy.snapshot() as {
+    tradingEnabled: boolean;
+    perTxCapUsd: number;
+    remainingDailyUsd: number;
+  };
+  const out: string[] = [];
+  if (!p.tradingEnabled) {
+    out.push("trading is disabled by policy — this quote cannot be executed");
+  }
+  if (spendUsd === null) return out;
+  if (spendUsd > p.perTxCapUsd) {
+    out.push(
+      `spends ~$${spendUsd.toFixed(2)}, over the $${p.perTxCapUsd} per-tx cap — buy/sell would refuse this`,
+    );
+  } else if (spendUsd > p.remainingDailyUsd) {
+    out.push(
+      `spends ~$${spendUsd.toFixed(2)}, over the $${p.remainingDailyUsd.toFixed(2)} left of the 24h budget — buy/sell would refuse this`,
+    );
+  }
+  return out;
+}
+
+/** The other thing the venues refuse on: not holding what the quote spends. */
+export function shortfallWarning(
+  held: bigint,
+  needed: bigint,
+  decimals: number,
+  label: string,
+): string | null {
+  if (held >= needed) return null;
+  return `wallet holds ${formatUnits(held, decimals)} ${label} but this quote spends ${formatUnits(needed, decimals)} — buy/sell would refuse this`;
+}
+
 export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
   const slippageBps = rt.policy.clampSlippageBps(args.slippageBps);
   const target = await routed(rt, args.query);
@@ -514,11 +559,17 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
       const pairIn = parseHuman(args.amount, q.decimals);
       const res = await rt.shroom.quoteBuy(target.launchId, pairIn, rt.signer.address);
       // Both legs priced off the same rate read, so they cannot disagree.
-      const [amountInUsd, feeUsd, refundUsd] = await Promise.all([
+      const [amountInUsd, feeUsd, refundUsd, held] = await Promise.all([
         rt.shroom.usdValue(launch.quoteAsset, pairIn),
         rt.shroom.usdValue(launch.quoteAsset, res.fee),
         res.refund > 0n ? rt.shroom.usdValue(launch.quoteAsset, res.refund) : Promise.resolve(null),
+        bankBalances(rt.net.lcdUrl, rt.injAddress)
+          .then((all) => balanceOf(all, q.bankDenom))
+          .catch(() => null),
       ]);
+      const shortfall =
+        held === null ? null : shortfallWarning(held, pairIn, q.decimals, q.symbol);
+      warnings.push(...policyWarnings(rt, amountInUsd), ...(shortfall ? [shortfall] : []));
       return {
         venue: "curve",
         launchId: target.launch.id,
@@ -541,10 +592,15 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
     }
     const tokenIn = parseHuman(args.amount, 18);
     const res = await rt.shroom.quoteSell(target.launchId, tokenIn, rt.signer.address);
-    const [pairOutUsd, feeUsd] = await Promise.all([
+    const [pairOutUsd, feeUsd, held] = await Promise.all([
       rt.shroom.usdValue(launch.quoteAsset, res.pairOut),
       rt.shroom.usdValue(launch.quoteAsset, res.fee),
+      rt.shroom.erc20Balance(launch.token, rt.signer.address).catch(() => null),
     ]);
+    // A curve sell converts back to the quote asset, so it spends no USD budget
+    // (launchpad passes spendUsd: 0) — balance is the only thing it refuses on.
+    const shortfall = held === null ? null : shortfallWarning(held, tokenIn, 18, "tokens");
+    warnings.push(...policyWarnings(rt, null), ...(shortfall ? [shortfall] : []));
     return {
       venue: "curve",
       launchId: target.launch.id,
@@ -567,10 +623,30 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
   const expectedOutput = String(q.summary.expected_output);
   // Priced from the token overviews, so an unpriceable token reports null
   // rather than failing a quote that is otherwise fine.
-  const [amountInUsd, expectedOutputUsd] = await Promise.all([
+  const [amountInUsd, expectedOutputUsd, held, inDecimals] = await Promise.all([
     rt.choice.usdValueIn(tokenIn, args.amount),
     rt.choice.usdValueIn(tokenOut, expectedOutput),
+    bankBalances(rt.net.lcdUrl, rt.injAddress)
+      .then((all) => balanceOf(all, tokenIn))
+      .catch(() => null),
+    denomDecimals(rt.net.lcdUrl, tokenIn),
   ]);
+  // A swap spends its INPUT whichever side it is called, so both directions are
+  // budgeted — matching what ChoiceVenue.swap passes to the policy engine.
+  const warnings = policyWarnings(rt, amountInUsd);
+  if (inDecimals === null) {
+    warnings.push(
+      `the chain publishes no decimals for ${tokenIn} — sizing it by "all" is refused, and the balance below is not checked`,
+    );
+  } else if (held !== null) {
+    try {
+      const shortfall = shortfallWarning(held, parseHuman(args.amount, inDecimals), inDecimals, tokenIn);
+      if (shortfall) warnings.push(shortfall);
+    } catch {
+      // The SOR accepted this amount string; if our own parse disagrees, that
+      // is a reason to skip the warning, never to fail a good quote.
+    }
+  }
   return {
     venue: "choice",
     side: args.side,
@@ -583,6 +659,7 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
     minimumReceive: String(q.summary.minimum_receive),
     route: q.summary.route_venues,
     slippageBps,
+    warnings,
   };
 }
 
@@ -615,9 +692,19 @@ export async function sell(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<
         'for CW20 tokens pass an explicit amount instead of "all"',
       );
     }
-    // Choice quotes take HUMAN units — per-denom decimals from LCD metadata
-    // (USDT/USDC are 6, not 18; a wrong exponent rounds the amount to zero).
-    amount = formatUnits(bal, await denomDecimals(rt.net.lcdUrl, target.tokenId));
+    // Choice quotes take HUMAN units, so this exponent decides how much of the
+    // position actually goes. Guessing is not an option here: 18-for-6 offers a
+    // trillionth of the balance, which either fails as "rounds to zero" or —
+    // above ~1e6 tokens — sells that trillionth and reports success.
+    const decimals = await denomDecimals(rt.net.lcdUrl, target.tokenId);
+    if (decimals === null) {
+      throw new ToolError(
+        "unknown_decimals",
+        `the chain publishes no decimals for ${target.tokenId}, so "all" cannot be sized`,
+        "pass an explicit amount in whole tokens instead",
+      );
+    }
+    amount = formatUnits(bal, decimals);
   }
   return rt.choice.swap(target.tokenId, counter, amount, slippageBps / 100);
 }
@@ -711,7 +798,32 @@ export interface PortfolioRow {
   valueUsd: number | null;
   pricedVia: "quote-rate" | "curve" | "choice" | "unpriced";
   launchId?: string;
+  /** Set when the chain publishes no exponent: `amount` assumes 18, so it may
+   *  be off by orders of magnitude and the row is deliberately left unpriced. */
+  decimalsUnknown?: true;
+  /** Raw bank amount, so an unknown-exponent row is still exact in base units. */
+  amountBase?: string;
   untrusted_metadata?: Record<string, string>;
+}
+
+/**
+ * Human amount for a bank balance, and whether we had to assume the exponent.
+ *
+ * The quantity is the number a caller is most likely to act on, so an unknown
+ * exponent is surfaced rather than smoothed over — and a row that had to assume
+ * one is never priced, because `price × wrong quantity` is a confident wrong
+ * USD figure that would otherwise land in `totalUsd`.
+ */
+async function humanAmount(
+  rt: Runtime,
+  denom: string,
+  raw: bigint,
+): Promise<{ amount: number; decimalsUnknown?: true; amountBase?: string }> {
+  const decimals = await denomDecimals(rt.net.lcdUrl, denom);
+  if (decimals === null) {
+    return { amount: Number(formatUnits(raw, 18)), decimalsUnknown: true, amountBase: raw.toString() };
+  }
+  return { amount: Number(formatUnits(raw, decimals)) };
 }
 
 export function portfolioTotals(rows: PortfolioRow[]): { totalUsd: number; unpriced: number } {
@@ -754,11 +866,11 @@ export async function portfolio(rt: Runtime): Promise<unknown> {
 
     if (lookups >= MAX_PRICE_LOOKUPS) {
       // Past the lookup cap: still report the holding in human units (the
-      // LCD decimals fetch is cached/cheap), just skip price discovery.
+      // decimals lookup is cached/cheap), just skip price discovery.
       rows.push({
         denom: b.denom,
         symbol: null,
-        amount: Number(formatUnits(raw, await denomDecimals(rt.net.lcdUrl, b.denom))),
+        ...(await humanAmount(rt, b.denom, raw)),
         priceUsd: null,
         valueUsd: null,
         pricedVia: "unpriced",
@@ -768,7 +880,9 @@ export async function portfolio(rt: Runtime): Promise<unknown> {
     lookups += 1;
 
     const erc20 = /^erc20:(0x[0-9a-fA-F]{40})$/.exec(b.denom);
-    const launch = erc20 ? await findLaunchByToken(rt, erc20[1]!) : null;
+    const launch =
+      (await launchFromDenom(rt, b.denom)) ??
+      (erc20 ? await findLaunchByToken(rt, erc20[1]!) : null);
 
     if (launch && CURVE_STATES.has(launch.state)) {
       rows.push(await curveHoldingRow(rt, b.denom, raw, launch));
@@ -787,6 +901,31 @@ export async function portfolio(rt: Runtime): Promise<unknown> {
     ...(unpriced > 0 ? { unpricedHoldings: unpriced } : {}),
     note: "prices are indicative (quote-rate feed / last curve trade / Choice stats) — always `quote` before trading on them; token names under untrusted_metadata are third-party text",
   };
+}
+
+/**
+ * The launch behind a held bank denom, when that denom is a launch token.
+ *
+ * Launch tokens ride `factory/<issuer>/<prefix>_<launchId>_<hash>` — NOT
+ * `erc20:0x…`, whose bank supply for a launch token is 0. That mismatch is why
+ * this exists: matching only the erc20 form meant no holding ever resolved to a
+ * launch, so every curve position fell through to the Choice pricer, which does
+ * not know a token that has not graduated, and came back `unpriced` while
+ * `curveHoldingRow` — written for exactly this case — never ran.
+ *
+ * The issuer prefix is the check. Tokenfactory only lets an address mint under
+ * its own namespace, so a denom under the launchpad's issuer cannot be spoofed
+ * and the launch id it carries can be trusted without a second lookup.
+ */
+export async function launchFromDenom(rt: Runtime, denom: string): Promise<ApiLaunch | null> {
+  const issuer = rt.net.launchDenomIssuer;
+  if (!issuer || !denom.startsWith(`factory/${issuer}/`)) return null;
+  const subdenom = denom.slice(`factory/${issuer}/`.length);
+  // `<prefix>_<launchId>_<hash>` — the prefix is a deploy-time setting
+  // ("shroom" on mainnet, "shroom_t" on testnet), so anchor on the tail.
+  const id = /^[A-Za-z][A-Za-z_]*_(\d+)_[0-9a-fA-F]+$/.exec(subdenom)?.[1];
+  if (!id) return null;
+  return rt.pump.getLaunch(id).catch(() => null);
 }
 
 async function findLaunchByToken(rt: Runtime, token: string): Promise<ApiLaunch | null> {
@@ -843,8 +982,13 @@ async function choiceHoldingRow(
   launch: ApiLaunch | null,
   erc20Token?: string,
 ): Promise<PortfolioRow> {
-  const decimals = launch ? 18 : await denomDecimals(rt.net.lcdUrl, denom);
-  const amount = Number(formatUnits(raw, decimals));
+  // Launch tokens are always 18-decimal; anything else has to be looked up, and
+  // an unknown exponent means the quantity is a guess — so the row stays
+  // unpriced rather than multiplying a real price by a wrong amount.
+  const sized = launch
+    ? { amount: Number(formatUnits(raw, 18)) }
+    : await humanAmount(rt, denom, raw);
+  const { amount } = sized;
   let priceUsd: number | null = null;
   let overview: Record<string, unknown> | null = null;
   for (const query of [denom, ...(erc20Token ? [erc20Token] : [])]) {
@@ -856,10 +1000,11 @@ async function choiceHoldingRow(
       // try the next query form
     }
   }
+  if (sized.decimalsUnknown) priceUsd = null;
   return {
     denom,
     symbol: null,
-    amount,
+    ...sized,
     priceUsd,
     valueUsd: priceUsd !== null ? priceUsd * amount : null,
     pricedVia: priceUsd !== null ? "choice" : "unpriced",

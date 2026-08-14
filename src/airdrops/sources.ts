@@ -14,7 +14,6 @@
 
 import { formatUnits } from "viem";
 
-import { denomDecimals } from "../api/lcd.js";
 import { ToolError } from "../errors.js";
 import { evmToInj } from "../keystore.js";
 import type { Runtime } from "../runtime.js";
@@ -22,6 +21,7 @@ import { LaunchState } from "../venues/shroom/abi.js";
 import { exclusionSet } from "./address.js";
 import type { SourceRow } from "./allocate.js";
 import { findBlockBeforeTime } from "./blocks.js";
+import { dropDecimals } from "./pricing.js";
 import { contractStatePage, lcdGetJson, mapPrefix, smartQuery, startsWith } from "./wasm.js";
 
 export type SourceKind =
@@ -210,7 +210,11 @@ export async function loadSource(rt: Runtime, source: Source): Promise<SourceRes
 
   if (source.kind === "token_holders") {
     const denom = requireField(raw, "denom", "token_holders");
-    const decimals = await denomDecimals(rt.net.lcdUrl, denom);
+    // Registry-first, and a refusal when the chain publishes no exponent — the
+    // same rule the drop itself is sized under. A guess here would not fail
+    // loudly, it would silently move every holder's balance across whatever
+    // `minBalance` threshold the caller set.
+    const decimals = await dropDecimals(rt, denom);
     const all = await denomOwners(rt.net.grpcUrl, denom, decimals);
     return filterHolders(all, [], `holders of ${denom}`, snapshotAt, decimals, "whole tokens held");
   }
