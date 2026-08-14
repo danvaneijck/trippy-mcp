@@ -107,7 +107,7 @@ trippy-mcp identity link            sign the wallet link your wallet submits
 2. `identity link` signs a message authorising your wallet to re-point it. **The registry refuses any deadline more than 300 seconds out**, so this signature is alive for about four minutes by design, and re-running the command is free.
 3. In **Terminal → Settings → Agents**, press *Complete on-chain link*. That is a real transaction from your wallet, so it costs gas. If the countdown lapses, run `identity link` again.
 
-`agent_info` reports the identity and which side holds custody, so the agent can tell you itself.
+`agent_info` reports the identity and which side holds custody, so the agent can tell you itself, along with its page on [8004scan](https://8004scan.io/agents/injective/931).
 
 ## CLI
 
