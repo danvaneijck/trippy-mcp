@@ -66,6 +66,13 @@ export const ConfigSchema = z.object({
   lcdUrl: z.string().url().optional(),
   pumpApiBase: z.string().url().optional(),
   choiceApiBase: z.string().url().optional(),
+  /**
+   * Extra CW20 contracts `portfolio` should probe, on top of the network's
+   * built-ins. CW20 balances cannot be enumerated from the chain, so a holding
+   * is only ever visible if its contract is on this list — add one here when
+   * the agent acquires a CW20 the package does not ship knowledge of.
+   */
+  cw20Tokens: z.array(z.string().regex(/^inj1[02-9ac-hj-np-z]{38}$/)).optional(),
   gasBufferPct: z.number().int().min(0).max(100).default(20),
   gasPriceWei: z.string().regex(/^\d+$/).optional(),
   policy: PolicySchema.default({}),

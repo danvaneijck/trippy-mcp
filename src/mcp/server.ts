@@ -357,7 +357,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "portfolio",
-    "Every token the agent wallet holds, valued in USD: amount, indicative price, USD value per holding and the total. Prices come from the quote-rate feed (INJ/USDC/SAI), the last curve trade (active launches) or Choice token stats — always `quote` before trading on them. Spot bank balances of THIS agent wallet only: perp positions and trading-subaccount balances are not included and belong to a different wallet (Injective SDK `account_positions`/`account_balances`)." + UNTRUSTED_NOTE,
+    "Every token the agent wallet holds, valued in USD: amount, indicative price, USD value per holding and the total. Prices come from the quote-rate feed (INJ/USDC/SAI), the last curve trade (active launches) or Choice token stats — always `quote` before trading on them. Spot holdings of THIS agent wallet only — bank balances plus the CW20 contracts this build knows to probe (SHROOM among them): perp positions and trading-subaccount balances are not included and belong to a different wallet (Injective SDK `account_positions`/`account_balances`). A CW20 balance cannot be enumerated from the chain, so a CW20 the package does not know about is invisible here even though `quote`/`sell` handle it fine — add its contract to `cw20Tokens` in config.json to surface it." + UNTRUSTED_NOTE,
     {},
     (rt2) => t.portfolio(rt2),
   );

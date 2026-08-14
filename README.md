@@ -118,12 +118,20 @@ trippy-mcp export-key --yes-i-understand
     "dailyBudgetUsd": 1000,
     "maxSlippageBps": 300,
     "tradingEnabled": true,
-    "allowUnpricedSpend": false,
+    "allowUnpricedSpend": false,      // permit spends with no USD price; each one is charged
+                                     // perTxCapUsd against the 24h budget, since an unpriced
+                                     // spend that counted as $0 would bypass the budget entirely
     "airdropCapUsd": 1000            // max USD per airdrop campaign; 0 = airdrop tools not
                                      // registered at all — including `airdrop_manage`, so wind
                                      // down any live campaign before switching them off
   },
-  "dryRun": false
+  "dryRun": false,
+  "cw20Tokens": []                   // extra CW20 contracts `portfolio` should probe, on top of
+                                     // the built-ins (SHROOM, dINJ, NONJA, hINJ, DOJO, COKE,
+                                     // Pedro). A CW20 balance is not bank state and cannot be
+                                     // enumerated from the chain, so a holding is only visible
+                                     // if its contract is known up front — `quote`/`sell` handle
+                                     // any CW20 fine, but `portfolio` can only show these
   // optional: rpcUrls, lcdUrl, pumpApiBase, choiceApiBase, gasBufferPct, gasPriceWei, referrer
 }
 ```

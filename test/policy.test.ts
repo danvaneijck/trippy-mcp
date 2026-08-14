@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -95,5 +95,64 @@ describe("PolicyEngine", () => {
   it("records spend and reports remaining budget", () => {
     engine.recordSpend({ kind: "trade", target: CORE, detail: "t", spendUsd: 40 });
     expect(engine.remainingDailyUsd()).toBe(210);
+  });
+});
+
+describe("unpriced spends still consume the 24h budget", () => {
+  // `allowUnpricedSpend` let a spend of unknown USD through AND recorded
+  // nothing, so the budget counted only the trades it could price — an agent
+  // could push out unlimited value in tokens with no feed while policy.ts
+  // called the budget "the real bound".
+  const unpriced = { kind: "swap" as const, target: CORE, detail: "swap x", spendUsd: null };
+
+  it("charges an unpriced spend at the per-tx cap", () => {
+    const { engine, ledger } = makeEngine({ allowUnpricedSpend: true });
+    engine.enforce(unpriced);
+    engine.recordSpend(unpriced);
+    expect(ledger.spent()).toBe(100);
+  });
+
+  it("refuses once unpriced spends have exhausted the budget", () => {
+    const { engine } = makeEngine({ allowUnpricedSpend: true });
+    for (let i = 0; i < 2; i += 1) {
+      engine.enforce(unpriced);
+      engine.recordSpend(unpriced);
+    }
+    // 2 x $100 assumed against a $250 budget leaves $50 < the $100 assumption.
+    expect(() => engine.enforce(unpriced)).toThrow(PolicyError);
+  });
+
+  it("does not charge a claim, which spends nothing at all", () => {
+    // `undefined` is "no spend"; only `null` is "spend of unknown value".
+    const { engine, ledger } = makeEngine({ allowUnpricedSpend: true });
+    engine.recordSpend({ kind: "claim", target: CORE, detail: "claim fees" });
+    expect(ledger.spent()).toBe(0);
+  });
+
+  it("still refuses an unpriced spend when the operator has not opted in", () => {
+    const { engine } = makeEngine();
+    expect(() => engine.enforce(unpriced)).toThrow(PolicyError);
+  });
+});
+
+describe("SpendLedger durability", () => {
+  it("refuses to enforce against an unreadable ledger instead of reading it as $0 spent", () => {
+    // Returning [] on a parse failure silently handed back the full 24h budget
+    // to an agent that had already spent it — fail-open on the one bound that
+    // is supposed to hold.
+    const dir = mkdtempSync(join(tmpdir(), "trippy-mcp-test-"));
+    const ledger = new SpendLedger(dir);
+    ledger.record(200, "earlier spend");
+    writeFileSync(join(dir, "spend.json"), "{ this is not json");
+    expect(() => ledger.spent()).toThrow(PolicyError);
+  });
+
+  it("ignores malformed entries inside an otherwise valid ledger", () => {
+    const dir = mkdtempSync(join(tmpdir(), "trippy-mcp-test-"));
+    writeFileSync(
+      join(dir, "spend.json"),
+      JSON.stringify({ entries: [{ t: Date.now(), usd: 5, detail: "ok" }, null, { usd: 9 }] }),
+    );
+    expect(new SpendLedger(dir).spent()).toBe(5);
   });
 });

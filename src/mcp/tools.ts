@@ -985,6 +985,10 @@ export interface PortfolioRow {
   decimalsUnknown?: true;
   /** Raw bank amount, so an unknown-exponent row is still exact in base units. */
   amountBase?: string;
+  /** Set when Choice quoted a price but the token has no liquidity and no 24h
+   *  volume: the mark is not something anyone traded, so it is left out of
+   *  `valueUsd`/`totalUsd` rather than presented as real money. */
+  staleMark?: true;
   untrusted_metadata?: Record<string, string>;
 }
 
@@ -1026,6 +1030,29 @@ export async function portfolio(rt: Runtime): Promise<unknown> {
   const quoteByDenom = new Map(Object.values(rt.net.quoteAssets).map((q) => [q.bankDenom, q]));
   const rows: PortfolioRow[] = [];
   let lookups = 0;
+
+  // CW20 holdings are probed, not discovered: they are absent from
+  // `bankBalances` and there is no "which CW20s does this address hold" query,
+  // so a position is only ever visible if its contract is known up front.
+  // Balances first — only a non-zero one is worth a price lookup. Every read is
+  // fail-soft: one unreachable contract must not take down the whole portfolio.
+  //
+  // Done BEFORE the bank walk on purpose. This list is short and curated, while
+  // bank balances are an unbounded dust tail, so walking bank first let 26 junk
+  // denoms exhaust MAX_PRICE_LOOKUPS and leave a CW20 worth 88% of the wallet
+  // unpriced — and therefore missing from `totalUsd`.
+  const cw20Balances = await Promise.all(
+    rt.net.cw20Tokens.map(async (contract) => ({
+      contract,
+      raw: await cw20Balance(rt.net.lcdUrl, contract, rt.injAddress).catch(() => 0n),
+    })),
+  );
+  for (const { contract, raw } of cw20Balances) {
+    if (raw <= 0n) continue;
+    const priceLookup = lookups < MAX_PRICE_LOOKUPS;
+    if (priceLookup) lookups += 1;
+    rows.push(await cw20HoldingRow(rt, contract, raw, priceLookup));
+  }
 
   for (const b of all) {
     const raw = BigInt(b.amount);
@@ -1183,6 +1210,8 @@ async function choiceHoldingRow(
     }
   }
   if (sized.decimalsUnknown) priceUsd = null;
+  const stale = priceUsd !== null && overview !== null && isDeadMarket(overview);
+  if (stale) priceUsd = null;
   return {
     denom,
     symbol: null,
@@ -1190,8 +1219,91 @@ async function choiceHoldingRow(
     priceUsd,
     valueUsd: priceUsd !== null ? priceUsd * amount : null,
     pricedVia: priceUsd !== null ? "choice" : "unpriced",
+    ...(stale ? { staleMark: true as const } : {}),
     untrusted_metadata: untrustedMeta({
       symbol: (overview as { symbol?: unknown } | null)?.symbol,
+      name: (overview as { name?: unknown } | null)?.name,
+    }),
+  };
+}
+
+/**
+ * Whether a Choice overview's price is a mark nobody has traded against.
+ *
+ * Choice will serve a stale quote for a token with no liquidity and no volume,
+ * and `portfolio` multiplied it out unconditionally: 10,000 of one dead factory
+ * denom marked at $541 contributed **$5.4M of a $5.4M total** on a wallet that
+ * actually held dust. The decimals were right and the amount was right — only
+ * the mark was junk, which is why no exponent guard catches this.
+ *
+ * That matters because `totalUsd` is what an agent reads to decide how big it
+ * is, and anyone can airdrop such a token into a wallet unsolicited. So the
+ * same rule as an unknown exponent applies: report the quantity, and keep a
+ * number you do not trust out of the total.
+ */
+function isDeadMarket(overview: Record<string, unknown>): boolean {
+  const liq = Number(overview["liquidity_usd"]);
+  // A real quote asset (INJ/USDC) carries no `liquidity_usd` of its own, so a
+  // missing field cannot be treated as dead — only an explicit zero is.
+  const noLiquidity = Number.isFinite(liq) && liq <= 0;
+  const markets = overview["top_markets"];
+  if (!Array.isArray(markets) || markets.length === 0) return noLiquidity;
+  const vol = markets.reduce((a: number, m: unknown) => {
+    const v = Number((m as Record<string, unknown> | null)?.["vol24h_usd"]);
+    return a + (Number.isFinite(v) ? v : 0);
+  }, 0);
+  return vol <= 0 && noLiquidity;
+}
+
+/**
+ * What the wallet holds of a known CW20 contract.
+ *
+ * Mirrors `choiceHoldingRow`, except every number is asked of the token
+ * contract: a CW20 balance is not bank state and its exponent is not denom
+ * metadata. Choice indexes CW20s under their contract address, so the same
+ * price lookup works — `pricedVia` stays "choice".
+ */
+async function cw20HoldingRow(
+  rt: Runtime,
+  contract: string,
+  raw: bigint,
+  priceLookup: boolean,
+): Promise<PortfolioRow> {
+  const info = await cw20TokenInfo(rt.net.lcdUrl, contract).catch(() => null);
+  // No token_info means no exponent from any source — same rule as a bank denom
+  // with no metadata: report the exact base amount, assume 18 for the human
+  // figure, and never price it, because price × guessed quantity is a confident
+  // wrong number landing in `totalUsd`.
+  const decimals = info?.decimals ?? null;
+  const amount = Number(formatUnits(raw, decimals ?? 18));
+
+  let priceUsd: number | null = null;
+  let overview: Record<string, unknown> | null = null;
+  if (priceLookup && decimals !== null) {
+    try {
+      overview = await rt.choiceApi.token(contract);
+      priceUsd = extractUsdPrice(overview);
+    } catch {
+      // leave it unpriced; the holding itself still reports
+    }
+  }
+  // Same rule as a bank denom: a mark on a market nobody trades is not money.
+  const stale = priceUsd !== null && overview !== null && isDeadMarket(overview);
+  if (stale) priceUsd = null;
+
+  return {
+    denom: contract,
+    symbol: null,
+    amount,
+    ...(decimals === null ? { decimalsUnknown: true as const, amountBase: raw.toString() } : {}),
+    priceUsd,
+    valueUsd: priceUsd !== null ? priceUsd * amount : null,
+    pricedVia: priceUsd !== null ? "choice" : "unpriced",
+    ...(stale ? { staleMark: true as const } : {}),
+    // The contract's own ticker is still third-party text, exactly like the
+    // Choice overview's — it goes in the untrusted bucket, not `symbol`.
+    untrusted_metadata: untrustedMeta({
+      symbol: info?.symbol,
       name: (overview as { name?: unknown } | null)?.name,
     }),
   };

@@ -7,6 +7,8 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { PolicyError } from "../errors.js";
+
 interface SpendEntry {
   t: number; // epoch ms
   usd: number;
@@ -24,13 +26,24 @@ export class SpendLedger {
 
   private load(): SpendEntry[] {
     if (!existsSync(this.path)) return [];
+    let raw: { entries?: SpendEntry[] };
     try {
-      const raw = JSON.parse(readFileSync(this.path, "utf-8")) as { entries?: SpendEntry[] };
-      const cutoff = Date.now() - WINDOW_MS;
-      return (raw.entries ?? []).filter((e) => e.t > cutoff);
+      raw = JSON.parse(readFileSync(this.path, "utf-8")) as { entries?: SpendEntry[] };
     } catch {
-      return [];
+      // A file that exists but will not parse is the one case that must NOT
+      // read as "nothing spent yet": that silently returns the full 24h budget
+      // to an agent that has already spent it. Refuse instead — the operator
+      // can delete the file, which is an explicit choice rather than an
+      // accident of corruption.
+      throw new PolicyError(
+        `the spend ledger at ${this.path} is unreadable, so the 24h budget cannot be enforced`,
+        "inspect it and delete it to start a fresh 24h window",
+      );
     }
+    const cutoff = Date.now() - WINDOW_MS;
+    return (raw.entries ?? []).filter(
+      (e) => typeof e?.t === "number" && typeof e?.usd === "number" && e.t > cutoff,
+    );
   }
 
   private save(entries: SpendEntry[]): void {

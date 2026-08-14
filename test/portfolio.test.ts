@@ -1,8 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { ApiLaunch } from "../src/api/pump.js";
-import { launchFromDenom, policyWarnings, shortfallWarning } from "../src/mcp/tools.js";
-import type { Runtime } from "../src/runtime.js";
+import {
+  launchFromDenom,
+  policyWarnings,
+  portfolio,
+  type PortfolioRow,
+  shortfallWarning,
+} from "../src/mcp/tools.js";
+import { effectiveNetwork, type Runtime } from "../src/runtime.js";
+import { NETWORKS } from "../src/chain/networks.js";
+import { isCw20Id } from "../src/api/cw20.js";
 
 const ISSUER = "inj13j2rpnlwl30c02d4pzukykwfeyyhelvry9cqte";
 
@@ -133,5 +141,271 @@ describe("quote warnings", () => {
   it("stays quiet when the balance covers the quote", () => {
     expect(shortfallWarning(10n ** 18n, 10n ** 17n, 18, "INJ")).toBeNull();
     expect(shortfallWarning(10n ** 18n, 10n ** 18n, 18, "INJ")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CW20 holdings
+// ---------------------------------------------------------------------------
+
+const SHROOM_CW20 = "inj1300xcg9naqy00fujsr9r8alwk7dh65uqu87xm8";
+const AGENT_INJ = "inj1lr5qnxn8qem0psflh8we7cdeyecutenzgcxjjg";
+const realFetch = globalThis.fetch;
+
+/**
+ * An LCD + Choice pair holding `bank` in the bank module and `cw20` inside the
+ * token contracts. The split is the whole point: a CW20 balance is invisible to
+ * `bankBalances`, so a portfolio that only reads bank cannot see it.
+ */
+function stubChain(opts: {
+  bank?: { denom: string; amount: string }[];
+  cw20?: Record<string, { balance: string; decimals?: number; symbol?: string } | "erroring">;
+  priceUsd?: number | null;
+}) {
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes("/cosmos/bank/v1beta1/balances/")) {
+      return new Response(JSON.stringify({ balances: opts.bank ?? [] }), { status: 200 });
+    }
+    const smart = /\/contract\/([^/]+)\/smart\/(.+)$/.exec(url);
+    if (smart) {
+      const token = opts.cw20?.[smart[1]!];
+      // 400, not 500: `smartQuery` retries 5xx for ~15s by design, and what is
+      // under test here is the catch, not the retry ladder.
+      if (!token || token === "erroring") return new Response("boom", { status: 400 });
+      const q = JSON.parse(Buffer.from(decodeURIComponent(smart[2]!), "base64").toString());
+      if ("balance" in q) {
+        return new Response(JSON.stringify({ data: { balance: token.balance } }), { status: 200 });
+      }
+      if (token.decimals === undefined) return new Response("boom", { status: 400 });
+      return new Response(
+        JSON.stringify({ data: { decimals: token.decimals, symbol: token.symbol } }),
+        { status: 200 },
+      );
+    }
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+  return { calls };
+}
+
+function cw20Rt(cw20Tokens: string[], priceUsd: number | null = 0.0000329315): Runtime {
+  return {
+    net: {
+      lcdUrl: "https://lcd.test",
+      cw20Tokens,
+      quoteAssets: {},
+      launchDenomIssuer: ISSUER,
+    },
+    injAddress: AGENT_INJ,
+    signer: { address: "0xf8E8099A670676F0C13FB9Dd9f61b92671c5e662" },
+    choiceApi: { token: async () => ({ price_usd: priceUsd, name: "shroomin" }) },
+    pump: { getLaunch: async () => { throw new Error("not found"); } },
+  } as unknown as Runtime;
+}
+
+describe("portfolio CW20 holdings", () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("reports a CW20 position that bank state cannot see", async () => {
+    // The gap: a Choice buy of SHROOM settles into the CW20 contract, not into
+    // the token's bank-adapter denom, so `bankBalances` reports nothing at all.
+    // `sell all` sized this position correctly the whole time — portfolio just
+    // could not show it, so an agent surveying holdings concluded it held none.
+    stubChain({
+      bank: [],
+      cw20: { [SHROOM_CW20]: { balance: "1380569701581075860244", decimals: 18, symbol: "SHROOM" } },
+    });
+    const res = (await portfolio(cw20Rt([SHROOM_CW20]))) as {
+      holdings: PortfolioRow[];
+      totalUsd: number;
+    };
+    expect(res.holdings).toHaveLength(1);
+    const row = res.holdings[0]!;
+    expect(row.denom).toBe(SHROOM_CW20);
+    expect(row.amount).toBeCloseTo(1380.5697015810759, 6);
+    expect(row.pricedVia).toBe("choice");
+    expect(res.totalUsd).toBeCloseTo(1380.5697015810759 * 0.0000329315, 8);
+    // The contract's own ticker is third-party text, so it never occupies the
+    // trusted `symbol` field.
+    expect(row.symbol).toBeNull();
+    expect(row.untrusted_metadata?.symbol).toBe("SHROOM");
+  });
+
+  it("keeps bank and CW20 holdings as separate rows", async () => {
+    // SHROOM exists in both forms; holding each is two real balances, not one
+    // double-counted. They must both appear and both count.
+    stubChain({
+      bank: [{ denom: "inj", amount: "48212267518105470" }],
+      cw20: { [SHROOM_CW20]: { balance: "1000000000000000000", decimals: 18, symbol: "SHROOM" } },
+    });
+    const res = (await portfolio(cw20Rt([SHROOM_CW20]))) as { holdings: PortfolioRow[] };
+    expect(res.holdings.map((h) => h.denom).sort()).toEqual(["inj", SHROOM_CW20].sort());
+  });
+
+  it("omits a zero CW20 balance instead of showing an empty row", async () => {
+    stubChain({ bank: [], cw20: { [SHROOM_CW20]: { balance: "0", decimals: 18 } } });
+    const res = (await portfolio(cw20Rt([SHROOM_CW20]))) as { holdings: PortfolioRow[] };
+    expect(res.holdings).toEqual([]);
+  });
+
+  it("survives a CW20 contract that errors rather than failing the portfolio", async () => {
+    // One bad contract must never take down the whole holdings view.
+    stubChain({
+      bank: [{ denom: "inj", amount: "1000000000000000000" }],
+      cw20: { [SHROOM_CW20]: "erroring" },
+    });
+    const res = (await portfolio(cw20Rt([SHROOM_CW20]))) as { holdings: PortfolioRow[] };
+    expect(res.holdings.map((h) => h.denom)).toEqual(["inj"]);
+  });
+
+  it("reports the exact base amount, unpriced, when token_info has no decimals", async () => {
+    // Same rule as a bank denom with no metadata: never multiply a real price
+    // by a guessed quantity.
+    stubChain({
+      bank: [],
+      cw20: { [SHROOM_CW20]: { balance: "1380569701581075860244" } },
+    });
+    const res = (await portfolio(cw20Rt([SHROOM_CW20]))) as {
+      holdings: PortfolioRow[];
+      totalUsd: number;
+    };
+    const row = res.holdings[0]!;
+    expect(row.decimalsUnknown).toBe(true);
+    expect(row.amountBase).toBe("1380569701581075860244");
+    expect(row.valueUsd).toBeNull();
+    expect(res.totalUsd).toBe(0);
+  });
+
+  it("prices CW20s even when a dust tail would exhaust the lookup budget", async () => {
+    // Regression: bank was walked first, so a wallet with 26 junk denoms spent
+    // MAX_PRICE_LOOKUPS before the CW20 probe ran and the position came back
+    // unpriced — i.e. missing from totalUsd. Seen live on a wallet whose CW20
+    // was 88% of its value. The curated list is short; the dust tail is not, so
+    // the dust is what must degrade.
+    stubChain({
+      bank: Array.from({ length: 30 }, (_, i) => ({
+        denom: `factory/inj1dust${String(i).padStart(34, "0")}/d${i}`,
+        amount: "1000",
+      })),
+      cw20: { [SHROOM_CW20]: { balance: "1000000000000000000", decimals: 18, symbol: "SHROOM" } },
+    });
+    const res = (await portfolio(cw20Rt([SHROOM_CW20]))) as {
+      holdings: PortfolioRow[];
+      totalUsd: number;
+    };
+    const shroom = res.holdings.find((h) => h.denom === SHROOM_CW20)!;
+    expect(shroom.pricedVia).toBe("choice");
+    expect(res.totalUsd).toBeGreaterThan(0);
+  });
+
+  it("probes nothing when the network lists no CW20s", async () => {
+    const { calls } = stubChain({ bank: [] });
+    await portfolio(cw20Rt([]));
+    expect(calls.some((c) => c.includes("/smart/"))).toBe(false);
+  });
+});
+
+describe("cw20Tokens registry", () => {
+  it("lists only ids the CW20 branch will actually recognise", () => {
+    // `isCw20Id` is what routes a token id to the contract rather than to bank.
+    // An entry that fails it would be probed as a CW20 and found by nothing.
+    for (const net of Object.values(NETWORKS)) {
+      for (const id of net.cw20Tokens) {
+        expect(isCw20Id(id), `${net.name}: ${id}`).toBe(true);
+      }
+    }
+  });
+
+  it("has no duplicates — each entry costs a balance query per portfolio call", () => {
+    for (const net of Object.values(NETWORKS)) {
+      expect(new Set(net.cw20Tokens).size).toBe(net.cw20Tokens.length);
+    }
+  });
+
+  it("keeps SHROOM on mainnet", () => {
+    // The token the gap was found with, and the one an agent is likeliest to
+    // hold — a refactor that drops it reintroduces the original bug.
+    expect(NETWORKS.mainnet.cw20Tokens).toContain("inj1300xcg9naqy00fujsr9r8alwk7dh65uqu87xm8");
+  });
+
+  it("unions a per-install list with the built-ins instead of replacing them", () => {
+    const extra = "inj1dypt8q7gc97vfqe37snleawaz2gp7hquxkvh34";
+    const net = effectiveNetwork({
+      network: "mainnet",
+      cw20Tokens: [extra, "inj1300xcg9naqy00fujsr9r8alwk7dh65uqu87xm8"],
+    } as unknown as Parameters<typeof effectiveNetwork>[0]);
+    expect(net.cw20Tokens).toContain(extra);
+    // Built-ins survive, and re-stating one does not duplicate its probe.
+    for (const id of NETWORKS.mainnet.cw20Tokens) expect(net.cw20Tokens).toContain(id);
+    expect(new Set(net.cw20Tokens).size).toBe(net.cw20Tokens.length);
+  });
+});
+
+describe("prices nobody traded against stay out of totalUsd", () => {
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  /** A runtime whose Choice overview is exactly `overview`. */
+  function rtWithOverview(overview: Record<string, unknown>): Runtime {
+    return {
+      net: { lcdUrl: "https://lcd.test", cw20Tokens: [SHROOM_CW20], quoteAssets: {}, launchDenomIssuer: ISSUER },
+      injAddress: AGENT_INJ,
+      signer: { address: "0x0" },
+      choiceApi: { token: async () => overview },
+      pump: { getLaunch: async () => { throw new Error("nf"); } },
+    } as unknown as Runtime;
+  }
+
+  const held = { [SHROOM_CW20]: { balance: "10000000000000000000000", decimals: 18, symbol: "X" } };
+
+  it("drops a mark on a token with no liquidity and no 24h volume", async () => {
+    // 10,000 of a dead factory denom marked at $541 contributed $5.4M of a
+    // $5.4M total on a wallet that really held dust. Decimals and amount were
+    // both right — only the mark was junk, so no exponent guard caught it.
+    stubChain({ bank: [], cw20: held });
+    const res = (await portfolio(
+      rtWithOverview({ price_usd: 541.323, liquidity_usd: 0, top_markets: [{ vol24h_usd: 0 }] }),
+    )) as { holdings: PortfolioRow[]; totalUsd: number };
+    const row = res.holdings[0]!;
+    expect(row.staleMark).toBe(true);
+    expect(row.valueUsd).toBeNull();
+    expect(res.totalUsd).toBe(0);
+    // The quantity is still reported — only the money claim is withheld.
+    expect(row.amount).toBe(10000);
+  });
+
+  it("keeps a mark when the token has real volume", async () => {
+    stubChain({ bank: [], cw20: held });
+    const res = (await portfolio(
+      rtWithOverview({ price_usd: 2, liquidity_usd: 0, top_markets: [{ vol24h_usd: 1234 }] }),
+    )) as { holdings: PortfolioRow[]; totalUsd: number };
+    expect(res.holdings[0]!.staleMark).toBeUndefined();
+    expect(res.totalUsd).toBe(20000);
+  });
+
+  it("keeps a mark when the token has real liquidity", async () => {
+    stubChain({ bank: [], cw20: held });
+    const res = (await portfolio(
+      rtWithOverview({ price_usd: 2, liquidity_usd: 7776, top_markets: [{ vol24h_usd: 0 }] }),
+    )) as { holdings: PortfolioRow[]; totalUsd: number };
+    expect(res.holdings[0]!.staleMark).toBeUndefined();
+    expect(res.totalUsd).toBe(20000);
+  });
+
+  it("does not treat a missing liquidity field as dead", async () => {
+    // A real quote asset carries no `liquidity_usd` of its own; only an
+    // explicit zero means nothing backs the price.
+    stubChain({ bank: [], cw20: held });
+    const res = (await portfolio(rtWithOverview({ price_usd: 2 }))) as {
+      holdings: PortfolioRow[];
+      totalUsd: number;
+    };
+    expect(res.holdings[0]!.staleMark).toBeUndefined();
+    expect(res.totalUsd).toBe(20000);
   });
 });

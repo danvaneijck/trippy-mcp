@@ -41,6 +41,9 @@ export function effectiveNetwork(cfg: Config): NetworkDef {
     lcdUrl: cfg.lcdUrl ?? base.lcdUrl,
     pumpApiBase: cfg.pumpApiBase ?? base.pumpApiBase,
     choiceApiBase: cfg.choiceApiBase ?? base.choiceApiBase,
+    // Unioned, not replaced: a per-install addition must never silently drop a
+    // built-in, or a wallet holding SHROOM would go back to reporting nothing.
+    cw20Tokens: [...new Set([...base.cw20Tokens, ...(cfg.cw20Tokens ?? [])])],
     gasPriceWei: cfg.gasPriceWei ? BigInt(cfg.gasPriceWei) : base.gasPriceWei,
   };
 }

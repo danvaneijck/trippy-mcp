@@ -81,6 +81,18 @@ export interface NetworkDef {
   launchDenomIssuer: string;
   /** Choice aggregation router (CosmWasm) — the only contract swaps may execute. */
   choiceAggregator: string;
+  /**
+   * CW20 token contracts `portfolio` probes for a balance.
+   *
+   * A CW20 position is not bank state, so unlike every bank denom it cannot be
+   * ENUMERATED — `bankBalances` will never mention it and there is no chain
+   * query for "which CW20s does this address hold". The only way to see one is
+   * to ask a contract you already know about, so holdings are discoverable only
+   * for the contracts listed here (extend per-install via `cw20Tokens` in
+   * config.json — the two lists are unioned, so a local addition never drops
+   * the built-ins).
+   */
+  cw20Tokens: string[];
   /** `choice-claim-drops` rail: the only contract airdrops may execute. */
   claimDrops: ClaimDropsConfig;
   /**
@@ -118,6 +130,30 @@ const MAINNET: NetworkDef = {
   // `cwAddresses.issuer` in shroom_launchpad contracts/deployments/injective_mainnet.json
   launchDenomIssuer: "inj13j2rpnlwl30c02d4pzukykwfeyyhelvry9cqte",
   choiceAggregator: "inj1520rsss9aykhkfmuf89nh5hp2jww770z4u3eu0",
+  // Choice hands out a CW20's contract as its token id, and a buy settles into
+  // that contract — NOT into the token's bank-adapter denom
+  // (`factory/inj14ejqjyq8um4p3xfqj74yld5waqljf88f9eneuk/inj1300xcg9…`) — so a
+  // wallet that just bought one holds a balance no bank query can see.
+  //
+  // Every entry below is a token Choice reports as `type: "CW20"` and prices,
+  // confirmed against its contract's own `token_info`. Tokens Choice routes as
+  // NATIVE are deliberately absent even when a CW20 exists behind them (TRUINJ
+  // and FOOL resolve to their adapter denoms, which bank already reports) —
+  // listing those would probe a balance that is always zero.
+  //
+  // Cost: one balance query each per `portfolio` call, so keep this to tokens
+  // an agent could realistically end up holding rather than every CW20 on-chain.
+  cw20Tokens: [
+    "inj1300xcg9naqy00fujsr9r8alwk7dh65uqu87xm8", // SHROOM
+    "inj134wfjutywny9qnyux2xgdmm0hfj7mwpl39r3r9", // dINJ
+    "inj1fu5u29slsg2xtsj7v5la22vl4mr4ywl7wlqeck", // NONJA
+    "inj18luqttqyckgpddndh8hvaq25d5nfwjc78m56lc", // hINJ — busiest CW20 by volume
+    "inj1zdj9kqnknztl2xclm5ssv25yre09f8908d4923", // DOJO
+    // 6-decimal, unlike every other entry here — the exact shape that once made
+    // `sell all` size a position at a trillionth of itself.
+    "inj14eaxewvy7a3fk948c3g3qham98mcqpm8v5y0dp", // COKE
+    "inj1c6lxety9hqn9q4khwqvjcfa24c2qeqvvfsg4fm", // Pedro — thin, but held is held
+  ],
   claimDrops: {
     // code id 2066 (InstantiatePermission: Everybody), fee_bps 0, wasm admin is
     // the Choice Admin Timelock (48h queued migrations). Deployed 2026-07-27.
@@ -176,6 +212,7 @@ const TESTNET: NetworkDef = {
   // `cwAddresses.issuer` in shroom_launchpad contracts/deployments/injective_testnet.json
   launchDenomIssuer: "inj1wjshrwrmt03v5eywfpuce6sg08h3gfnrcahqgj",
   choiceAggregator: "",
+  cw20Tokens: [],
   claimDrops: {
     // code id 39733, fee_bps 0. Deployed 2026-07-26 for the end-to-end QA run.
     contract: "inj1f2htctksx6jfcrt5gr3yf4vnmgs70a9zxurp53",

@@ -18,6 +18,14 @@ import type { SpendLedger } from "./spend.js";
 
 export type IntentKind = "trade" | "swap" | "launch" | "claim" | "sweep" | "approve" | "airdrop";
 
+/** Intents that move value out and are therefore capped and budgeted. */
+const SPEND_BEARING: ReadonlySet<IntentKind> = new Set<IntentKind>([
+  "trade",
+  "swap",
+  "launch",
+  "airdrop",
+]);
+
 export interface WriteIntent {
   kind: IntentKind;
   /**
@@ -98,7 +106,15 @@ export class PolicyEngine {
       // `allowUnpricedSpend` is a trading convenience — it exists so an
       // illiquid token with no price feed is still tradable. It is NOT an
       // escape hatch for outbound value transfer, so it does not apply here.
-      if (this.cfg.allowUnpricedSpend && !airdrop) return;
+      if (this.cfg.allowUnpricedSpend && !airdrop) {
+        // Permitted, but not free. Letting it through untracked made the 24h
+        // budget count only the trades it happened to be able to price, so an
+        // agent could push out unlimited value in tokens with no feed — while
+        // this file claims the budget is "the real bound". Charged at the
+        // per-tx cap: the most this action could have been allowed to spend.
+        this.assertWithinDailyBudget(perActionCap);
+        return;
+      }
       throw new PolicyError(
         `cannot price this ${intent.kind} in USD — refusing under policy`,
         airdrop
@@ -115,8 +131,14 @@ export class PolicyEngine {
           : "raise policy.perTxCapUsd in config.json (a human action) or trade smaller",
       );
     }
-    // The 24h budget is shared with every trade and swap — it, not the
-    // per-campaign cap, is the real bound on what an agent can push out in a day.
+    this.assertWithinDailyBudget(spend);
+  }
+
+  /**
+   * The 24h budget is shared with every trade and swap — it, not the
+   * per-campaign cap, is the real bound on what an agent can push out in a day.
+   */
+  private assertWithinDailyBudget(spend: number): void {
     const spent = this.ledger.spent();
     if (spent + spend > this.cfg.dailyBudgetUsd) {
       throw new PolicyError(
@@ -140,6 +162,14 @@ export class PolicyEngine {
   recordSpend(intent: WriteIntent): void {
     if (typeof intent.spendUsd === "number" && intent.spendUsd > 0) {
       this.ledger.record(intent.spendUsd, intent.detail);
+      return;
+    }
+    // `null` is a spend of UNKNOWN value (`undefined` is no spend at all — a
+    // claim or an approval, which must not consume budget). One that broadcast
+    // did move money, so it is charged what `enforce` assumed rather than
+    // nothing, which is what let it repeat without limit.
+    if (intent.spendUsd === null && SPEND_BEARING.has(intent.kind)) {
+      this.ledger.record(this.cfg.perTxCapUsd, `${intent.detail} (unpriced)`);
     }
   }
 
