@@ -72,6 +72,7 @@ function policyRt(over: Partial<Record<string, unknown>> = {}): Runtime {
         tradingEnabled: true,
         perTxCapUsd: 200,
         remainingDailyUsd: 999.82,
+        allowUnpricedSpend: false,
         ...over,
       }),
     },
@@ -93,9 +94,29 @@ describe("quote warnings", () => {
     expect(w[0]).toContain("24h budget");
   });
 
-  it("stays quiet for a spend inside both limits, and for an unpriceable one", () => {
+  it("stays quiet for a spend inside both limits", () => {
     expect(policyWarnings(policyRt(), 5)).toEqual([]);
-    expect(policyWarnings(policyRt(), null)).toEqual([]);
+  });
+
+  it("says an unpriceable trade will be refused, because the signer refuses it", () => {
+    // `enforce` throws on spendUsd null unless allowUnpricedSpend, which is
+    // false by default — the likeliest refusal of all on a thin token, and the
+    // one quote used to stay silent about.
+    const w = policyWarnings(policyRt(), null);
+    expect(w).toHaveLength(1);
+    expect(w[0]).toContain("no USD price");
+    expect(w[0]).toContain("would refuse");
+  });
+
+  it("stays quiet about an unpriceable trade when the operator opted in", () => {
+    expect(policyWarnings(policyRt({ allowUnpricedSpend: true }), null)).toEqual([]);
+  });
+
+  it("treats 0 as spends-nothing, not as unpriceable — curve sells pass 0", () => {
+    // A curve sell converts back to the quote asset; the launchpad enforces
+    // spendUsd: 0. Passing null here would warn about a refusal that cannot
+    // happen on every single curve sell quote.
+    expect(policyWarnings(policyRt(), 0)).toEqual([]);
   });
 
   it("reports the kill switch", () => {

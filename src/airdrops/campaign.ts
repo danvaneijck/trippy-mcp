@@ -44,7 +44,14 @@ import {
 import { publishLeaves, recordAirdropLog, recordCampaign } from "./hasura.js";
 import { buildTree } from "./merkle.js";
 import { loadPlan, planId as makePlanId, savePlan, updatePlan, type StoredPlan } from "./plan.js";
-import { denomBalance, denomSymbol, dropDecimals, usdValue } from "./pricing.js";
+import {
+  denomBalance,
+  denomSymbol,
+  dropDecimals,
+  knownDecimals,
+  quantityText,
+  usdValue,
+} from "./pricing.js";
 import { executePush, pushStatus, MAX_PUSH_RECIPIENTS, type PushRun } from "./push.js";
 import { loadCheckpoint } from "./checkpoint.js";
 import { loadSource, normalizeVoteOption, type Source } from "./sources.js";
@@ -59,7 +66,7 @@ export interface PreviewArgs {
     exclude?: string[];
     voteOptions?: string[];
   };
-  allocation: { mode?: DistMode; total?: string; asset: string };
+  allocation: { mode?: DistMode; total?: string; asset: string; assetDecimals?: number };
   delivery?: {
     rail?: Rail;
     title?: string;
@@ -83,7 +90,7 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
   const asset = args.allocation.asset;
   if (!asset) throw new ToolError("bad_input", "allocation.asset is required (the denom to drop)");
 
-  const decimals = await dropDecimals(rt, asset);
+  const decimals = await dropDecimals(rt, asset, args.allocation.assetDecimals);
   const loaded = await loadSource(rt, args.source);
   // Source-level caveats (an in-progress vote, tokens with no resolvable owner,
   // a gov snapshot's weights being vote weight rather than stake) surface in
@@ -403,7 +410,13 @@ export async function execute(
     const started = (cp?.paid.length ?? 0) > 0 || (cp?.failed.length ?? 0) > 0;
     const plan = started ? peek : loadPlan(rt.home, args.planId);
     requireOwnPlan(rt, plan);
-    const decimals = await dropDecimals(rt, plan.denom);
+    // The exponent the plan was BUILT with, not a fresh resolution. Every leaf
+    // in this plan is already denominated in it, so re-deriving could size the
+    // send differently from the amounts the operator approved at preview — and
+    // for a denom the chain publishes nothing for, an operator-stated exponent
+    // only exists on the plan, so re-resolving would refuse to execute a drop
+    // that previewed fine.
+    const decimals = plan.decimals;
     const symbol = plan.symbol ?? plan.denom;
     if (!plan.attemptedAt) {
       updatePlan(rt.home, plan.planId, { attemptedAt: new Date().toISOString() });
@@ -640,12 +653,13 @@ export async function status(
 
   const res = await queryCampaign(rt.net.lcdUrl, contract, campaignId);
   const c = res.campaign;
-  // Same registry-first resolution `preview` uses. Going straight to
-  // denomDecimals here would report a USDC drop a trillion-fold wrong whenever
-  // the metadata read misses, and this is the number a human checks a frozen
-  // campaign against.
-  const decimals = await dropDecimals(rt, c.denom);
   const meta = safeMeta(c.meta);
+  // Registry, then the exponent this campaign recorded when it was created,
+  // then the chain — and null is an answer, not a refusal. Status is read-only:
+  // a campaign that is already funded and live must stay inspectable even when
+  // nothing publishes an exponent for its denom, so unknown prints base units
+  // rather than throwing an operator out of their own campaign.
+  const decimals = await knownDecimals(rt, c.denom, meta.decimals);
 
   return {
     campaignId: res.id,
@@ -653,9 +667,17 @@ export async function status(
     creator: c.creator,
     isThisAgent: c.creator === rt.injAddress,
     denom: c.denom,
-    total: fromBaseUnits(c.total, decimals),
-    claimed: fromBaseUnits(c.claimed_total, decimals),
-    remaining: fromBaseUnits(res.remaining, decimals),
+    total: quantityText(c.total, decimals),
+    claimed: quantityText(c.claimed_total, decimals),
+    remaining: quantityText(res.remaining, decimals),
+    // Without this the three figures above are indistinguishable from whole
+    // tokens, which is the difference between 1000 SAI and 1e-15 of one.
+    ...(decimals === null
+      ? {
+          decimalsUnknown: true as const,
+          amountsNote: `nothing publishes decimals for ${c.denom}, so total/claimed/remaining are BASE units, not whole tokens`,
+        }
+      : {}),
     claimants: c.claimants,
     claimedPct: BigInt(c.total) > 0n ? Number((BigInt(c.claimed_total) * 10_000n) / BigInt(c.total)) / 100 : 0,
     frozen: c.frozen,

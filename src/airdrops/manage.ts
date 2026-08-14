@@ -46,7 +46,7 @@ import {
   type Campaign,
   type CampaignResponse,
 } from "./contract.js";
-import { fromBaseUnits } from "./units.js";
+import { amountText, knownDecimals } from "./pricing.js";
 
 /** The contract's MIN_WIND_DOWN_SECONDS, in ms. */
 export const MIN_WIND_DOWN_MS = 7 * 24 * 60 * 60 * 1000;
@@ -251,7 +251,14 @@ export async function manage(rt: Runtime, args: ManageArgs): Promise<Record<stri
     );
   }
 
-  const decimals = await campaignDecimals(rt, res.campaign);
+  // Display only — the clawback message carries a campaign id, not an amount.
+  // Refusing over a display string would block an operator from recovering
+  // their own funds, so an unknown exponent prints base units instead.
+  const decimals = await knownDecimals(
+    rt,
+    res.campaign.denom,
+    safeMeta(res.campaign.meta).decimals,
+  );
   let msg: object;
   let detail: string;
   let expiryIso: string | null = null;
@@ -374,33 +381,6 @@ function describe(
       : "this agent did not create this campaign, so it can only read it",
     untrusted_metadata: untrustedMeta({ title: meta.title, description: meta.description }),
   };
-}
-
-/**
- * Decimals for the amounts this file prints, or null when nothing knows.
- *
- * Registry, then the campaign's own meta, then the chain. Null is a real answer
- * here rather than a refusal, because these amounts are audit-log and response
- * TEXT — the clawback message carries a campaign id and no amount. Refusing
- * would block an operator from recovering their own funds over a display
- * string, so `amountText` prints base units instead and says so.
- */
-async function campaignDecimals(rt: Runtime, c: Campaign): Promise<number | null> {
-  const known = Object.values(rt.net.quoteAssets).find((q) => q.bankDenom === c.denom);
-  if (known) return known.decimals;
-  const meta = safeMeta(c.meta);
-  if (typeof meta.decimals === "number" && meta.decimals >= 0 && meta.decimals <= 30) {
-    return meta.decimals;
-  }
-  const { denomDecimals } = await import("../api/lcd.js");
-  return denomDecimals(rt.net.lcdUrl, c.denom);
-}
-
-/** Whole tokens when the exponent is known, else an explicit base-unit figure. */
-function amountText(base: string, decimals: number | null, denom: string): string {
-  return decimals === null
-    ? `${base} base units of ${denom} (the chain publishes no decimals for it)`
-    : `${fromBaseUnits(base, decimals)} ${denom}`;
 }
 
 function safeMeta(raw: string): Record<string, unknown> {

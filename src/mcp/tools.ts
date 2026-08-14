@@ -18,6 +18,7 @@ import {
   type PreviewArgs,
 } from "../airdrops/campaign.js";
 import { manage as manageAirdrop, type ManageArgs } from "../airdrops/manage.js";
+import { cw20Balance, cw20TokenInfo, isCw20Id } from "../api/cw20.js";
 import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
 import { quoteAssetBySlot, type QuoteAssetInfo } from "../chain/networks.js";
 import { explain as explainTopic } from "../docs/index.js";
@@ -475,19 +476,117 @@ export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> 
     };
   }
 
-  const payload = await rt.choiceApi.marketCandles(target.tokenId, interval, limit);
+  const picked = await choiceCandleMarket(rt, target.tokenId);
+  if (picked.chartsSomethingElse) {
+    // Returning the series anyway, labelled, was the other option. It carries
+    // no information about the token that was asked for, so it is not returned.
+    return {
+      venue: "choice",
+      tokenId: target.tokenId,
+      symbol: picked.symbol,
+      interval,
+      pricedIn: "USD",
+      columns: CHOICE_CANDLE_COLUMNS,
+      count: 0,
+      candles: [],
+      priceUsd: picked.priceUsd,
+      warnings: [
+        `no price series is available for ${picked.symbol}: Choice lists it only as the QUOTE side (${picked.markets.join(", ")}), and the candles endpoint charts a market's BASE asset — so the only series it can return is the counter asset's, not this token's. \`priceUsd\` above is ${picked.symbol}'s current price.`,
+      ],
+      note: "candles is empty on purpose — see warnings. Use token_info for current price and liquidity.",
+    };
+  }
+
+  const payload = await rt.choiceApi.marketCandles(picked.market ?? target.tokenId, interval, limit);
   const rows = shapeChoiceCandles(payload.candles);
+  const pair = sanitizeText(payload.pair);
+  // Last line of defence: whatever we asked for, the series belongs to the pair
+  // the backend answered with, and only its BASE leg is the token being charted.
+  const base = String(pair ?? "").split("/")[0]?.trim() ?? "";
+  const warnings: string[] = [];
+  if (picked.symbol && base && base.toUpperCase() !== picked.symbol.toUpperCase()) {
+    warnings.push(
+      `these candles are ${base}'s price series, not ${picked.symbol}'s — the pair is ${String(pair)} and this endpoint charts the BASE asset`,
+    );
+  } else if (picked.thin) {
+    warnings.push(
+      `${String(pair)} is the only market ${picked.symbol} is the base of, and it traded $0 in the last 24h — the series is stale or sparse`,
+    );
+  }
   return {
     venue: "choice",
     tokenId: target.tokenId,
-    pair: sanitizeText(payload.pair),
+    pair,
     kind: payload.kind,
     interval: payload.interval ?? interval,
     pricedIn: "USD",
     columns: CHOICE_CANDLE_COLUMNS,
     count: rows.length,
     candles: rows,
+    // A correct anchor for exactly the cases where the series is not one:
+    // a stale market's last close can sit multiples away from the real price.
+    ...(warnings.length > 0 ? { warnings, priceUsd: picked.priceUsd ?? null } : {}),
     note: "each candle is one CSV row of `columns`, oldest first. o/h/l/c/v are USD when the backend has USD marks for the bucket, else raw quote prices.",
+  };
+}
+
+interface ChoiceMarketRef {
+  pair?: string;
+  vol24h_usd?: number;
+}
+
+/**
+ * Which market to chart a Choice token from.
+ *
+ * The candles endpoint charts a market's BASE asset in USD. Asked by token id
+ * it answers from whichever market has the most volume — and a SHROOM Pad
+ * graduation lists against SAI, which sorts as the base — so the series that
+ * came back was SAI's price, with nothing in the payload saying so. Live before
+ * this: `candles SKIBI` returned ~$0.047 for a token trading at $0.0000016, and
+ * `candles MOON` the same, ~130,000x out.
+ *
+ * The endpoint also accepts a "BASE/QUOTE" pair name, so the fix is to name a
+ * market this token is the base of. Some tokens are only ever the quote side —
+ * for those there is no series to return and the caller is told that instead.
+ */
+export async function choiceCandleMarket(
+  rt: Runtime,
+  tokenId: string,
+): Promise<{
+  chartsSomethingElse: boolean;
+  symbol: string | null;
+  market?: string;
+  thin?: boolean;
+  priceUsd?: number | null;
+  markets: string[];
+}> {
+  const info = await rt.choiceApi.token(tokenId).catch(() => null);
+  const symbolRaw = (info as { symbol?: unknown } | null)?.symbol;
+  const symbol = typeof symbolRaw === "string" && symbolRaw.trim() ? symbolRaw.trim() : null;
+  const listed = (info as { top_markets?: unknown } | null)?.top_markets;
+  const markets: ChoiceMarketRef[] = Array.isArray(listed) ? (listed as ChoiceMarketRef[]) : [];
+  const pairs = markets.map((m) => String(m.pair ?? "")).filter(Boolean);
+  if (!symbol || markets.length === 0) return { chartsSomethingElse: false, symbol, markets: pairs };
+
+  const own = markets
+    .filter((m) => String(m.pair ?? "").split("/")[0]?.trim().toUpperCase() === symbol.toUpperCase())
+    .sort((a, z) => (z.vol24h_usd ?? 0) - (a.vol24h_usd ?? 0));
+
+  if (own.length === 0) {
+    return {
+      chartsSomethingElse: true,
+      symbol,
+      priceUsd: extractUsdPrice((info ?? {}) as Record<string, unknown>),
+      markets: pairs,
+    };
+  }
+  return {
+    chartsSomethingElse: false,
+    symbol,
+    market: String(own[0]!.pair),
+    thin: (own[0]!.vol24h_usd ?? 0) === 0,
+    priceUsd: extractUsdPrice((info ?? {}) as Record<string, unknown>),
+    markets: pairs,
   };
 }
 
@@ -519,12 +618,25 @@ export function policyWarnings(rt: Runtime, spendUsd: number | null): string[] {
     tradingEnabled: boolean;
     perTxCapUsd: number;
     remainingDailyUsd: number;
+    allowUnpricedSpend: boolean;
   };
   const out: string[] = [];
   if (!p.tradingEnabled) {
     out.push("trading is disabled by policy — this quote cannot be executed");
   }
-  if (spendUsd === null) return out;
+  // `null` is "nobody could price this", and the signers refuse an unpriceable
+  // spend unless the operator opted in. That is the likeliest refusal of all on
+  // a thinly-traded token — the exact case this tool exists to trade — so it
+  // has to be said here rather than discovered by attempting the trade.
+  // Callers that mean "this spends nothing" pass 0, not null.
+  if (spendUsd === null) {
+    if (!p.allowUnpricedSpend) {
+      out.push(
+        "no USD price for this trade, and policy.allowUnpricedSpend is false — buy/sell would refuse this",
+      );
+    }
+    return out;
+  }
   if (spendUsd > p.perTxCapUsd) {
     out.push(
       `spends ~$${spendUsd.toFixed(2)}, over the $${p.perTxCapUsd} per-tx cap — buy/sell would refuse this`,
@@ -535,6 +647,37 @@ export function policyWarnings(rt: Runtime, spendUsd: number | null): string[] {
     );
   }
   return out;
+}
+
+/**
+ * What the wallet holds of a Choice input, and the exponent it is denominated
+ * in — from whichever module actually holds it.
+ *
+ * A CW20 position is not bank state, so reading it from `bankBalances` reports
+ * 0 and reading its exponent from denom metadata finds nothing. Both are real,
+ * they just live in the token contract. `decimals: null` therefore means "no
+ * source knows", which is the only case worth warning about.
+ */
+async function inputPosition(
+  rt: Runtime,
+  tokenId: string,
+): Promise<{ held: bigint | null; decimals: number | null; label: string }> {
+  if (isCw20Id(tokenId)) {
+    const [held, info] = await Promise.all([
+      cw20Balance(rt.net.lcdUrl, tokenId, rt.injAddress).catch(() => null),
+      cw20TokenInfo(rt.net.lcdUrl, tokenId).catch(() => null),
+    ]);
+    // The contract knows its own ticker, and "0 SHROOM" reads better than 0
+    // followed by 42 characters of bech32.
+    return { held, decimals: info?.decimals ?? null, label: info?.symbol ?? tokenId };
+  }
+  const [held, decimals] = await Promise.all([
+    bankBalances(rt.net.lcdUrl, rt.injAddress)
+      .then((all) => balanceOf(all, tokenId))
+      .catch(() => null),
+    denomDecimals(rt.net.lcdUrl, tokenId),
+  ]);
+  return { held, decimals, label: tokenId };
 }
 
 /** The other thing the venues refuse on: not holding what the quote spends. */
@@ -567,9 +710,18 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
           .then((all) => balanceOf(all, q.bankDenom))
           .catch(() => null),
       ]);
+      // The cap is enforced on what actually FILLS: a buy that crosses the
+      // graduation target refunds the remainder in the same tx, and
+      // launchpad.buy sizes its intent off `pairIn - refund`. Warning off the
+      // gross would announce a refusal that is not going to happen. Both legs
+      // came off the same rate read, so the subtraction cannot disagree.
+      const spendUsd =
+        amountInUsd !== null && refundUsd !== null ? amountInUsd - refundUsd : amountInUsd;
+      // Balance, though, is checked against the gross — the tx moves the whole
+      // `pairIn` and the refund comes back within it.
       const shortfall =
         held === null ? null : shortfallWarning(held, pairIn, q.decimals, q.symbol);
-      warnings.push(...policyWarnings(rt, amountInUsd), ...(shortfall ? [shortfall] : []));
+      warnings.push(...policyWarnings(rt, spendUsd), ...(shortfall ? [shortfall] : []));
       return {
         venue: "curve",
         launchId: target.launch.id,
@@ -598,9 +750,10 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
       rt.shroom.erc20Balance(launch.token, rt.signer.address).catch(() => null),
     ]);
     // A curve sell converts back to the quote asset, so it spends no USD budget
-    // (launchpad passes spendUsd: 0) — balance is the only thing it refuses on.
+    // — 0, not null: the launchpad enforces spendUsd: 0 here, and null would
+    // now read as "unpriceable" and warn about a refusal that cannot happen.
     const shortfall = held === null ? null : shortfallWarning(held, tokenIn, 18, "tokens");
-    warnings.push(...policyWarnings(rt, null), ...(shortfall ? [shortfall] : []));
+    warnings.push(...policyWarnings(rt, 0), ...(shortfall ? [shortfall] : []));
     return {
       venue: "curve",
       launchId: target.launch.id,
@@ -623,24 +776,22 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
   const expectedOutput = String(q.summary.expected_output);
   // Priced from the token overviews, so an unpriceable token reports null
   // rather than failing a quote that is otherwise fine.
-  const [amountInUsd, expectedOutputUsd, held, inDecimals] = await Promise.all([
+  const [amountInUsd, expectedOutputUsd, position] = await Promise.all([
     rt.choice.usdValueIn(tokenIn, args.amount),
     rt.choice.usdValueIn(tokenOut, expectedOutput),
-    bankBalances(rt.net.lcdUrl, rt.injAddress)
-      .then((all) => balanceOf(all, tokenIn))
-      .catch(() => null),
-    denomDecimals(rt.net.lcdUrl, tokenIn),
+    inputPosition(rt, tokenIn),
   ]);
+  const { held, decimals: inDecimals, label } = position;
   // A swap spends its INPUT whichever side it is called, so both directions are
   // budgeted — matching what ChoiceVenue.swap passes to the policy engine.
   const warnings = policyWarnings(rt, amountInUsd);
   if (inDecimals === null) {
     warnings.push(
-      `the chain publishes no decimals for ${tokenIn} — sizing it by "all" is refused, and the balance below is not checked`,
+      `nothing publishes decimals for ${tokenIn} — sizing it by "all" is refused, and the wallet balance is not checked here`,
     );
   } else if (held !== null) {
     try {
-      const shortfall = shortfallWarning(held, parseHuman(args.amount, inDecimals), inDecimals, tokenIn);
+      const shortfall = shortfallWarning(held, parseHuman(args.amount, inDecimals), inDecimals, label);
       if (shortfall) warnings.push(shortfall);
     } catch {
       // The SOR accepted this amount string; if our own parse disagrees, that
@@ -682,29 +833,31 @@ export async function sell(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   let amount = args.amount;
   if (amount === "all") {
-    // Bank-denom balances are readable via LCD; CW20 positions need an amount.
-    const balances = await bankBalances(rt.net.lcdUrl, rt.injAddress);
-    const bal = balanceOf(balances, target.tokenId);
-    if (bal <= 0n) {
+    // Bank denoms and CW20 contracts both answer for a position, just not in
+    // the same module — `inputPosition` asks the right one. Choice quotes take
+    // HUMAN units, so this exponent decides how much of the position actually
+    // goes: guessing is not an option, because 18-for-6 offers a trillionth of
+    // the balance, which either fails as "rounds to zero" or — above ~1e6
+    // tokens — sells that trillionth and reports success.
+    const { held, decimals, label } = await inputPosition(rt, target.tokenId);
+    if (held === null) {
       throw new ToolError(
-        "no_balance",
-        `no bank balance of ${target.tokenId}`,
-        'for CW20 tokens pass an explicit amount instead of "all"',
+        "balance_unavailable",
+        `could not read a balance of ${target.tokenId}`,
+        'pass an explicit amount instead of "all"',
       );
     }
-    // Choice quotes take HUMAN units, so this exponent decides how much of the
-    // position actually goes. Guessing is not an option here: 18-for-6 offers a
-    // trillionth of the balance, which either fails as "rounds to zero" or —
-    // above ~1e6 tokens — sells that trillionth and reports success.
-    const decimals = await denomDecimals(rt.net.lcdUrl, target.tokenId);
+    if (held <= 0n) {
+      throw new ToolError("no_balance", `this wallet holds no ${label}`);
+    }
     if (decimals === null) {
       throw new ToolError(
         "unknown_decimals",
-        `the chain publishes no decimals for ${target.tokenId}, so "all" cannot be sized`,
+        `nothing publishes decimals for ${label}, so "all" cannot be sized`,
         "pass an explicit amount in whole tokens instead",
       );
     }
-    amount = formatUnits(bal, decimals);
+    amount = formatUnits(held, decimals);
   }
   return rt.choice.swap(target.tokenId, counter, amount, slippageBps / 100);
 }

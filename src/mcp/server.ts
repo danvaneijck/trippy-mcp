@@ -105,6 +105,15 @@ function registerAirdropTools(server: McpServer): void {
         .optional()
         .describe("csv only: explicit {address, amount} rows, amounts in WHOLE tokens"),
       denom: z.string().optional().describe("token_holders only: the bank denom to snapshot"),
+      denomDecimals: z
+        .number()
+        .int()
+        .min(0)
+        .max(30)
+        .optional()
+        .describe(
+          "token_holders only: that denom's exponent, when the chain does not publish one. It sets what minWeight counts in, so a wrong value moves every holder across the threshold.",
+        ),
       launchId: z.string().optional().describe("launch_holders only: the SHROOM Pad launch id"),
       collection: z
         .string()
@@ -156,6 +165,15 @@ function registerAirdropTools(server: McpServer): void {
         .optional(),
       allocation: z.object({
         asset: z.string().describe("bank denom of the token being dropped"),
+        assetDecimals: z
+          .number()
+          .int()
+          .min(0)
+          .max(30)
+          .optional()
+          .describe(
+            "the drop asset's exponent, when the chain does not publish one. Most Injective tokens are 18; USDC/USDT are 6. Required for the many factory denoms whose bank metadata says decimals: 0 — without it the drop is refused rather than sized wrong.",
+          ),
         total: z.string().optional().describe("total to distribute in whole tokens; required for snapshot sources, ignored for csv"),
         mode: z.enum(["fair", "proportionate"]).optional().describe("fair = equal split, proportionate = by weight (default)"),
       }),

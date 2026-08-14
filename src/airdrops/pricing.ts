@@ -10,28 +10,71 @@
 import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
 import { ToolError } from "../errors.js";
 import type { Runtime } from "../runtime.js";
+import { fromBaseUnits } from "./units.js";
+
+/** An exponent supplied by the operator, or recorded on a campaign at creation. */
+export function statedDecimals(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 30
+    ? value
+    : null;
+}
 
 /**
- * Decimals of the asset being dropped, or a refusal.
+ * Decimals of an asset, or null when no source knows.
  *
- * The vendored registry wins over chain metadata for the quote assets, and an
- * exponent the chain does not publish is a hard stop rather than a guess. Both
- * rules exist for the same reason: a wrong exponent here does not fail, it
- * silently builds a drop off by a factor of a trillion and funds it. Refusing
- * costs an operator one explicit answer; guessing costs them the campaign.
+ * In order: what the caller stated, the vendored registry, then chain metadata.
+ * The stated value wins because 1,483 of mainnet's 3,497 denoms publish
+ * `decimals: 0` with no populated `denom_units` — Injective's "never filled
+ * in", indistinguishable from a real 0 — so for a large slice of the chain an
+ * operator who knows the exponent is the only source there is.
  */
-export async function dropDecimals(rt: Runtime, denom: string): Promise<number> {
+export async function knownDecimals(
+  rt: Runtime,
+  denom: string,
+  stated?: unknown,
+): Promise<number | null> {
+  const said = statedDecimals(stated);
+  if (said !== null) return said;
   const known = Object.values(rt.net.quoteAssets).find((q) => q.bankDenom === denom);
   if (known) return known.decimals;
-  const decimals = await denomDecimals(rt.net.lcdUrl, denom);
+  return denomDecimals(rt.net.lcdUrl, denom);
+}
+
+/**
+ * Decimals for SIZING a drop — same resolution, but null is a hard stop.
+ *
+ * A wrong exponent here does not fail, it silently builds a drop off by a
+ * factor of a trillion and funds it. Refusing costs an operator one explicit
+ * answer; guessing costs them the campaign.
+ */
+export async function dropDecimals(rt: Runtime, denom: string, stated?: unknown): Promise<number> {
+  const decimals = await knownDecimals(rt, denom, stated);
   if (decimals === null) {
     throw new ToolError(
       "unknown_decimals",
-      `the chain publishes no decimals for ${denom}, so a drop of it cannot be sized`,
-      "drop a denom with bank metadata, or one of the quote assets (INJ/USDC/SAI)",
+      `no decimals published for ${denom}, so a drop of it cannot be sized`,
+      "pass assetDecimals with the token's exponent (most Injective tokens are 18, USDC/USDT are 6) — many factory denoms carry no usable bank metadata, so stating it is the only way",
     );
   }
   return decimals;
+}
+
+/** Whole tokens when the exponent is known, else an explicit base-unit figure. */
+export function amountText(base: string, decimals: number | null, denom: string): string {
+  return decimals === null
+    ? `${base} base units of ${denom} (no decimals published for it)`
+    : `${fromBaseUnits(base, decimals)} ${denom}`;
+}
+
+/**
+ * The bare quantity, for fields that carry the denom separately.
+ *
+ * Unknown returns base units, which is why every caller must also say that the
+ * exponent is unknown — otherwise the two cases are the same string and a
+ * reader cannot tell 1000 tokens from 1000 base units of one.
+ */
+export function quantityText(base: string, decimals: number | null): string {
+  return decimals === null ? base : fromBaseUnits(base, decimals);
 }
 
 export async function denomSymbol(rt: Runtime, denom: string): Promise<string | null> {

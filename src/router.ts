@@ -75,13 +75,26 @@ export async function resolveToken(rt: Runtime, query: string): Promise<Resolved
   // already answers to. Resolving that silently would send a `buy USDC` to
   // whichever venue this function happened to check first, so it is a question
   // for the caller instead.
-  if (padExact.length === 1 && choiceExact.length > 0) {
-    return {
-      venue: "ambiguous",
-      candidates: [launchCandidate(padExact[0]!), ...choiceExact.map(choiceCandidate)],
-    };
+  //
+  // But a GRADUATED launch is exact on both venues by construction: graduating
+  // is what lists the token, so the pad answers the launch and Choice answers
+  // the very denom it graduated into. Those are one asset wearing two names, and
+  // treating them as rivals made every graduated launch — the ones with real
+  // liquidity — unresolvable by symbol. Only a match that is NOT this launch's
+  // own denom is a genuine collision.
+  if (padExact.length === 1) {
+    const own = padExact[0]!.graduatedPoolDenom?.toLowerCase();
+    const rivals = own
+      ? choiceExact.filter((m) => String(m.address ?? m.denom ?? "").toLowerCase() !== own)
+      : choiceExact;
+    if (rivals.length > 0) {
+      return {
+        venue: "ambiguous",
+        candidates: [launchCandidate(padExact[0]!), ...rivals.map(choiceCandidate)],
+      };
+    }
+    return routeLaunch(padExact[0]!);
   }
-  if (padExact.length === 1) return routeLaunch(padExact[0]!);
   if (choiceExact.length === 1) {
     const hit = choiceExact[0]!.address ?? choiceExact[0]!.denom;
     if (hit) return { venue: "choice", tokenId: String(hit) };

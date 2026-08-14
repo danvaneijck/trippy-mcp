@@ -159,6 +159,9 @@ export class PolicyEngine {
       perTxCapUsd: this.cfg.perTxCapUsd,
       dailyBudgetUsd: this.cfg.dailyBudgetUsd,
       remainingDailyUsd: this.remainingDailyUsd(),
+      // Surfaced because `quote` has to be able to say that an unpriceable
+      // trade is about to be refused — that refusal is decided here.
+      allowUnpricedSpend: this.cfg.allowUnpricedSpend,
       maxSlippageBps: this.cfg.maxSlippageBps,
       airdropCapUsd: this.cfg.airdropCapUsd,
       airdropsEnabled: this.airdropsEnabled(),

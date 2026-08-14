@@ -214,7 +214,7 @@ export async function loadSource(rt: Runtime, source: Source): Promise<SourceRes
     // same rule the drop itself is sized under. A guess here would not fail
     // loudly, it would silently move every holder's balance across whatever
     // `minBalance` threshold the caller set.
-    const decimals = await dropDecimals(rt, denom);
+    const decimals = await dropDecimals(rt, denom, raw.denomDecimals);
     const all = await denomOwners(rt.net.grpcUrl, denom, decimals);
     return filterHolders(all, [], `holders of ${denom}`, snapshotAt, decimals, "whole tokens held");
   }

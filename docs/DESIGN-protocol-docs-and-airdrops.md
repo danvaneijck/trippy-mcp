@@ -75,7 +75,8 @@ airdrop_preview {
   source:     { kind: csv | token_holders | launch_holders | nft_holders |
                        gov_voters | mito_vault | buyback_round, …kind-specific }
   filters?:   { topN?, minWeight?, exclude?: address[], voteOptions? }
-  allocation: { mode: fair | proportionate, total: string, asset: string }
+  allocation: { mode: fair | proportionate, total: string, asset: string,
+                assetDecimals?: number }
   delivery:   { rail: claim_drop (| push later), title?, description?,
                 expiryDays? (default 30; perpetual requires explicit flag) }
 }
