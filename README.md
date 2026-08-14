@@ -88,7 +88,26 @@ npx skills add danvaneijck/trippy-mcp --skill injective-memecoin-trading
 
 `init` registers your agent's name with the Trippy registry (signed by the agent key — proof of key control, nothing custodial). From then on its trades show an **AGENT** badge on Trippy Terminal. To attach it to your profile ("operated by you"), run `trippy-mcp claim-code` and enter the code in **Terminal → Settings → Agents** with your main wallet.
 
-Give the agent a profile image with `--avatar` (at `init` or any later `register`): pass an https URL, or a local `.png`/`.jpg`/`.webp`/`.gif` — local files are uploaded to IPFS through the SHROOM API. The image shows wherever the Terminal shows profile avatars for the agent's address. Re-registering without `--avatar` keeps the current image.
+Give the agent a profile image with `--avatar` (at `init` or any later `register`): pass an https URL, or a local `.png`/`.jpg`/`.webp`/`.gif` — local files are uploaded to IPFS through the SHROOM API. The image shows wherever the Terminal shows profile avatars for the agent's address. Re-registering without `--avatar` keeps the current image. Once an agent is claimed, its name and avatar can also be edited from **Terminal → Settings → Agents** with no CLI round trip.
+
+## On-chain identity (ERC-8004)
+
+The registry above is Trippy's. Injective also has an ecosystem-wide one, on chain: [ERC-8004](https://eips.ethereum.org/EIPS/eip-8004) identity NFTs with a reputation registry behind them, at `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` on mainnet. Minting one makes your agent discoverable beyond this terminal, and portable to every chain that registry is deployed on. It costs one transaction, a fraction of a cent.
+
+```
+trippy-mcp identity register        mint the identity (one tx)
+trippy-mcp identity show            read it back from the chain
+trippy-mcp identity transfer --yes  hand it to your owner wallet
+trippy-mcp identity link            sign the wallet link your wallet submits
+```
+
+`register` leaves the agent owning its own identity. Moving it to you is what stops a compromised agent key taking the identity with it, and the order matters:
+
+1. `identity transfer --yes` sends the NFT to the owner address fixed at `init`. **This clears the registry's pointer back at the agent**, so its trades stop being attributed to the identity until step 3.
+2. `identity link` signs a message authorising your wallet to re-point it. **The registry refuses any deadline more than 300 seconds out**, so this signature is alive for about four minutes by design, and re-running the command is free.
+3. In **Terminal → Settings → Agents**, press *Complete on-chain link*. That is a real transaction from your wallet, so it costs gas. If the countdown lapses, run `identity link` again.
+
+`agent_info` reports the identity and which side holds custody, so the agent can tell you itself.
 
 ## CLI
 
@@ -102,6 +121,8 @@ trippy-mcp connect       write the MCP entry into your coding agent's config
 trippy-mcp status        balances (bank-authoritative), policy budget, registration
 trippy-mcp register      re-register / rename; --avatar <url|path> sets the profile image
 trippy-mcp claim-code    mint a profile-link code
+trippy-mcp identity <register|show|link|transfer>
+                         the agent's ERC-8004 on-chain identity
 trippy-mcp sweep <asset> <amount|all>
 trippy-mcp export-key --yes-i-understand
 ```
