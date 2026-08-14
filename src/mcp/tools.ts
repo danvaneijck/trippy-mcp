@@ -19,7 +19,7 @@ import {
 } from "../airdrops/campaign.js";
 import { manage as manageAirdrop, type ManageArgs } from "../airdrops/manage.js";
 import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
-import { quoteAssetBySlot } from "../chain/networks.js";
+import { quoteAssetBySlot, type QuoteAssetInfo } from "../chain/networks.js";
 import { explain as explainTopic } from "../docs/index.js";
 import { ToolError } from "../errors.js";
 import { detectAinj } from "../interop.js";
@@ -62,17 +62,81 @@ export function launchSummary(rt: Runtime, l: ApiLaunch): Record<string, unknown
   };
 }
 
-function tradeSummary(rt: Runtime, t: ApiTrade): Record<string, unknown> {
+/**
+ * launchId → its quote asset, memoised for the process.
+ *
+ * A launch's quote asset is copied onto it at createLaunch and can never
+ * change, so a hit is good forever. The tape spans launches with DIFFERENT
+ * quote assets (and USDC is 6-decimal against everything else's 18), so the
+ * slot has to be resolved per launch rather than assumed.
+ */
+const quoteAssetCache = new WeakMap<Runtime, Map<string, QuoteAssetInfo | null>>();
+
+function quoteAssetMemo(rt: Runtime): Map<string, QuoteAssetInfo | null> {
+  let memo = quoteAssetCache.get(rt);
+  if (!memo) {
+    memo = new Map();
+    quoteAssetCache.set(rt, memo);
+  }
+  return memo;
+}
+
+/** Seed the memo from a launch already in hand, to save a round trip. */
+function rememberQuoteAsset(rt: Runtime, launch: ApiLaunch): void {
+  quoteAssetMemo(rt).set(launch.id, quoteAssetBySlot(rt.net, launch.quoteAsset) ?? null);
+}
+
+async function quoteAssetForLaunch(rt: Runtime, launchId: string): Promise<QuoteAssetInfo | null> {
+  const memo = quoteAssetMemo(rt);
+  const hit = memo.get(launchId);
+  if (hit !== undefined) return hit;
+  // Fails soft: an unpriceable row is still a row worth showing, minus its USD.
+  const info = await rt.pump
+    .getLaunch(launchId)
+    .then((l) => quoteAssetBySlot(rt.net, l.quoteAsset) ?? null)
+    .catch(() => null);
+  memo.set(launchId, info);
+  return info;
+}
+
+/**
+ * One curve trade, sized in quote units and in USD.
+ *
+ * The API's `quoteUsd` is the quote asset's USD RATE at that trade, NOT the
+ * trade's value: a 0.02 INJ buy carries `4.87`, which is the INJ price. It used
+ * to be published as `usd` directly, which overstated small INJ trades ~50x and
+ * understated SAI-quoted trades ~200x. The notional is computed here and the
+ * rate keeps a name that says what it is.
+ */
+export function tradeSummary(t: ApiTrade, q: QuoteAssetInfo | null): Record<string, unknown> {
+  const rate = t.quoteUsd === null ? null : Number(t.quoteUsd);
+  const hasRate = rate !== null && Number.isFinite(rate) && rate > 0;
+  const pairBase = BigInt(t.pairAmount || "0");
+  const pair = q ? Number(formatUnits(pairBase, q.decimals)) : null;
   return {
     launchId: t.launchId,
     side: t.side,
     trader: t.trader,
+    ...(q
+      ? { pairAmount: formatUnits(pairBase, q.decimals), quoteSymbol: q.symbol }
+      : { quoteSymbol: null }),
+    tokenAmount: formatUnits(BigInt(t.tokenAmount || "0"), 18),
+    usd: pair !== null && hasRate ? pair * rate : null,
+    quoteRateUsd: hasRate ? rate : null,
     pairAmountBase: t.pairAmount,
     tokenAmountBase: t.tokenAmount,
-    usd: t.quoteUsd,
     at: t.blockTime,
     txHash: t.txHash,
   };
+}
+
+async function tradeSummaries(rt: Runtime, items: ApiTrade[]): Promise<Record<string, unknown>[]> {
+  const ids = [...new Set(items.map((t) => t.launchId))];
+  const resolved = await Promise.all(
+    ids.map(async (id) => [id, await quoteAssetForLaunch(rt, id)] as const),
+  );
+  const byLaunch = new Map(resolved);
+  return items.map((t) => tradeSummary(t, byLaunch.get(t.launchId) ?? null));
 }
 
 type RoutedTarget = Extract<ResolvedTarget, { venue: "curve" } | { venue: "choice" }>;
@@ -271,13 +335,27 @@ export async function recentTrades(
   if (args.query) {
     const target = await routed(rt, args.query);
     if (target.venue === "curve") {
+      rememberQuoteAsset(rt, target.launch);
       const { items } = await rt.pump.getTrades(target.launchId, limit);
-      return { trades: items.map((t) => tradeSummary(rt, t)) };
+      return { trades: await tradeSummaries(rt, items) };
     }
-    throw new ToolError("not_curve", "per-token trade history is only available for SHROOM launches here", "use token_info for Choice market data");
+    // A graduated launch IS a SHROOM launch — saying otherwise sends the reader
+    // looking for the wrong mistake. Its curve tape simply ended at graduation.
+    if (target.launch) {
+      throw new ToolError(
+        "graduated",
+        `launch #${target.launch.id} has graduated — its curve tape ended there and it now trades on Choice`,
+        "use candles or token_info for its DEX market",
+      );
+    }
+    throw new ToolError(
+      "not_curve",
+      "this is a Choice token, and per-token trade history here covers SHROOM Pad curve trades only",
+      "use token_info for Choice market data",
+    );
   }
   const { items } = await rt.pump.recentTrades(limit);
-  return { trades: items.map((t) => tradeSummary(rt, t)) };
+  return { trades: await tradeSummaries(rt, items) };
 }
 
 export async function myActivity(
@@ -290,7 +368,7 @@ export async function myActivity(
   // Each venue fails soft: one API being down should not blank the other's history.
   try {
     const { items } = await rt.pump.profileTrades(rt.signer.address.toLowerCase(), 50);
-    out.trades = items.map((t) => tradeSummary(rt, t));
+    out.trades = await tradeSummaries(rt, items);
   } catch (e) {
     out.curveNote = `SHROOM Pad history unavailable: ${e instanceof Error ? e.message : String(e)}`;
   }
@@ -316,45 +394,62 @@ export interface CandlesArgs {
 }
 
 /**
+ * Candles go out as CSV rows under a `columns` header rather than as one object
+ * per bucket.
+ *
+ * The reason is size, not taste: the MCP result is pretty-printed JSON, so an
+ * object per bucket spends a LINE on every field name. At the schema's own
+ * `limit: 500` that shaping produced a 66KB payload that clients refuse
+ * outright — the tool's documented maximum could not be read. One row per line
+ * says the same thing in a third of the bytes.
+ */
+export const CURVE_CANDLE_COLUMNS = ["t", "o", "h", "l", "c", "v", "n", "rateUsd", "cUsd", "vUsd"];
+export const CHOICE_CANDLE_COLUMNS = ["t", "o", "h", "l", "c", "v"];
+
+/** Significant digits kept per field — enough for sub-satoshi curve prices. */
+const sig = (n: number): string => (Number.isFinite(n) ? String(Number(n.toPrecision(8))) : "");
+
+const csvRow = (cells: (number | string | null)[]): string =>
+  cells.map((c) => (c === null || c === "" ? "" : typeof c === "number" ? sig(c) : c)).join(",");
+
+/**
  * Curve candles arrive as raw spot_price_wad values: the base-unit pair/token
  * ratio scaled by 1e18. Launch tokens are always 18-decimal, so the human
  * quote-per-token price is wad/1e18 × 10^(18 − pairDecimals). Volume is raw
  * quote base units. `rateUsd` (quote→USD at the bucket's close trade) converts
  * close/volume to USD without rescaling history by today's rate.
  */
-export function shapeCurveCandles(
-  items: ApiCandle[],
-  pairDecimals: number,
-): Record<string, unknown>[] {
+export function shapeCurveCandles(items: ApiCandle[], pairDecimals: number): string[] {
   const px = (v: string): number => (Number(v) / 1e18) * 10 ** (18 - pairDecimals);
   return items.map((cd) => {
     const close = px(cd.c);
     const vol = Number(cd.v) / 10 ** pairDecimals;
     const rate = cd.rateUsd == null ? null : Number(cd.rateUsd);
     const hasRate = rate !== null && Number.isFinite(rate) && rate > 0;
-    return {
-      t: cd.t,
-      o: px(cd.o),
-      h: px(cd.h),
-      l: px(cd.l),
-      c: close,
-      v: vol,
-      n: cd.n,
-      rateUsd: hasRate ? rate : null,
-      ...(hasRate ? { cUsd: close * rate, vUsd: vol * rate } : {}),
-    };
+    return csvRow([
+      cd.t,
+      px(cd.o),
+      px(cd.h),
+      px(cd.l),
+      close,
+      vol,
+      cd.n,
+      hasRate ? rate : null,
+      hasRate ? close * rate : null,
+      hasRate ? vol * rate : null,
+    ]);
   });
 }
 
 /** Choice agent-API candles are compact oldest→newest [t,o,h,l,c,v] arrays. */
-export function shapeChoiceCandles(raw: unknown): Record<string, unknown>[] {
+export function shapeChoiceCandles(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
-  const out: Record<string, unknown>[] = [];
+  const out: string[] = [];
   for (const row of raw.slice(0, 500)) {
     if (!Array.isArray(row) || row.length < 6) continue;
     const [t, o, h, l, c, v] = row.map((x) => Number(x));
-    if (!Number.isFinite(t)) continue;
-    out.push({ t, o, h, l, c, v });
+    if (!Number.isFinite(t as number)) continue;
+    out.push(csvRow([t as number, o as number, h as number, l as number, c as number, v as number]));
   }
   return out;
 }
@@ -367,17 +462,21 @@ export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> 
   if (target.venue === "curve") {
     const q = rt.shroom.quoteInfo(target.launch.quoteAsset);
     const res = await rt.pump.getCandles(target.launchId, { interval, limit });
+    const rows = shapeCurveCandles(res.items, q.decimals);
     return {
       venue: "curve",
       launchId: target.launch.id,
       interval: res.interval,
       pricedIn: q.symbol,
-      candles: shapeCurveCandles(res.items, q.decimals),
-      note: `o/h/l/c are ${q.symbol} per token; cUsd/vUsd use each bucket's quote→USD rate (rateUsd). Only buckets containing trades are returned.`,
+      columns: CURVE_CANDLE_COLUMNS,
+      count: rows.length,
+      candles: rows,
+      note: `each candle is one CSV row of \`columns\`, oldest first. o/h/l/c are ${q.symbol} per token; cUsd/vUsd use each bucket's quote→USD rate (rateUsd), and are empty when the bucket has no rate. Only buckets containing trades are returned.`,
     };
   }
 
   const payload = await rt.choiceApi.marketCandles(target.tokenId, interval, limit);
+  const rows = shapeChoiceCandles(payload.candles);
   return {
     venue: "choice",
     tokenId: target.tokenId,
@@ -385,8 +484,10 @@ export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> 
     kind: payload.kind,
     interval: payload.interval ?? interval,
     pricedIn: "USD",
-    candles: shapeChoiceCandles(payload.candles),
-    note: "o/h/l/c/v are USD when the backend has USD marks for the bucket, else raw quote prices.",
+    columns: CHOICE_CANDLE_COLUMNS,
+    count: rows.length,
+    candles: rows,
+    note: "each candle is one CSV row of `columns`, oldest first. o/h/l/c/v are USD when the backend has USD marks for the bucket, else raw quote prices.",
   };
 }
 
@@ -412,15 +513,27 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
     if (args.side === "buy") {
       const pairIn = parseHuman(args.amount, q.decimals);
       const res = await rt.shroom.quoteBuy(target.launchId, pairIn, rt.signer.address);
+      // Both legs priced off the same rate read, so they cannot disagree.
+      const [amountInUsd, feeUsd, refundUsd] = await Promise.all([
+        rt.shroom.usdValue(launch.quoteAsset, pairIn),
+        rt.shroom.usdValue(launch.quoteAsset, res.fee),
+        res.refund > 0n ? rt.shroom.usdValue(launch.quoteAsset, res.refund) : Promise.resolve(null),
+      ]);
       return {
         venue: "curve",
         launchId: target.launch.id,
         side: "buy",
+        quoteAsset: q.symbol,
         amountIn: `${args.amount} ${q.symbol}`,
+        amountInUsd,
         tokenOut: formatUnits(res.tokenOut, 18),
         fee: `${formatUnits(res.fee, q.decimals)} ${q.symbol}`,
+        feeUsd,
         ...(res.refund > 0n
-          ? { refund: `${formatUnits(res.refund, q.decimals)} ${q.symbol} (buy crosses graduation)` }
+          ? {
+              refund: `${formatUnits(res.refund, q.decimals)} ${q.symbol} (buy crosses graduation)`,
+              refundUsd,
+            }
           : {}),
         slippageBps,
         warnings,
@@ -428,13 +541,20 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
     }
     const tokenIn = parseHuman(args.amount, 18);
     const res = await rt.shroom.quoteSell(target.launchId, tokenIn, rt.signer.address);
+    const [pairOutUsd, feeUsd] = await Promise.all([
+      rt.shroom.usdValue(launch.quoteAsset, res.pairOut),
+      rt.shroom.usdValue(launch.quoteAsset, res.fee),
+    ]);
     return {
       venue: "curve",
       launchId: target.launch.id,
       side: "sell",
+      quoteAsset: q.symbol,
       amountIn: `${args.amount} tokens`,
       pairOut: `${formatUnits(res.pairOut, q.decimals)} ${q.symbol} (net of fee)`,
+      pairOutUsd,
       fee: `${formatUnits(res.fee, q.decimals)} ${q.symbol}`,
+      feeUsd,
       slippageBps,
       warnings,
     };
@@ -444,13 +564,22 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
   const [tokenIn, tokenOut] =
     args.side === "buy" ? [counter, target.tokenId] : [target.tokenId, counter];
   const q = await rt.choice.quote(tokenIn, tokenOut, args.amount, slippageBps / 100);
+  const expectedOutput = String(q.summary.expected_output);
+  // Priced from the token overviews, so an unpriceable token reports null
+  // rather than failing a quote that is otherwise fine.
+  const [amountInUsd, expectedOutputUsd] = await Promise.all([
+    rt.choice.usdValueIn(tokenIn, args.amount),
+    rt.choice.usdValueIn(tokenOut, expectedOutput),
+  ]);
   return {
     venue: "choice",
     side: args.side,
     tokenIn,
     tokenOut,
     amountIn: args.amount,
-    expectedOutput: String(q.summary.expected_output),
+    amountInUsd,
+    expectedOutput,
+    expectedOutputUsd,
     minimumReceive: String(q.summary.minimum_receive),
     route: q.summary.route_venues,
     slippageBps,

@@ -22,15 +22,37 @@ import { ToolError } from "../errors.js";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-interface RetryOpts {
+export interface RetryOpts {
   /** Total attempts, including the first. */
   attempts?: number;
-  /** Base backoff in ms; doubles per attempt, capped at 8s. */
+  /** Base backoff in ms; doubles per attempt, capped at `maxBackoffMs`. */
   backoffMs?: number;
+  /** Ceiling on the doubling backoff (default 8s). */
+  maxBackoffMs?: number;
   /** Error code for the ToolError raised once attempts run out. */
   errorCode?: string;
   /** Extra request headers — `x-cosmos-block-height` for at-height reads. */
   headers?: Record<string, string>;
+  /**
+   * Called for a failed response before another attempt. Return false to stop
+   * immediately. Overrides the default status-based rule, which cannot see the
+   * difference between "this node is busy" and "the contract said no".
+   */
+  retryOn?: (status: number, body: string) => boolean;
+}
+
+/** First line of an LCD error body, short enough to carry in a message. */
+function bodySnippet(text: string): string {
+  const line = (text.trim().split("\n")[0] ?? "").trim();
+  if (!line) return "";
+  try {
+    const parsed = JSON.parse(line) as { message?: unknown; error?: unknown };
+    const msg = parsed.message ?? parsed.error;
+    if (typeof msg === "string" && msg) return msg.slice(0, 200);
+  } catch {
+    /* not JSON — fall through to the raw line */
+  }
+  return line.slice(0, 200);
 }
 
 /**
@@ -39,10 +61,17 @@ interface RetryOpts {
  * A 4xx that is not 429 is NOT retried: a bad contract address or a query the
  * contract does not implement fails the same way ten times in a row, and the
  * agent should hear about it in a second rather than in a minute.
+ *
+ * The failure body travels into the thrown message on purpose. CosmWasm and
+ * Tendermint both answer "no such thing" with HTTP 500, so status alone cannot
+ * tell a missing campaign or a pruned height from a broken node — callers
+ * classify on the body, and `retryOn` lets them stop the ladder early when it
+ * is provably not worth retrying.
  */
 export async function lcdGetJson<T>(url: string, opts: RetryOpts = {}): Promise<T> {
   const attempts = opts.attempts ?? 5;
   const backoff = opts.backoffMs ?? 500;
+  const maxBackoff = opts.maxBackoffMs ?? 8_000;
   let last = "";
   for (let attempt = 0; attempt < attempts; attempt++) {
     let status = 0;
@@ -50,14 +79,30 @@ export async function lcdGetJson<T>(url: string, opts: RetryOpts = {}): Promise<
       const res = await fetch(url, opts.headers ? { headers: opts.headers } : undefined);
       status = res.status;
       if (res.ok) return (await res.json()) as T;
-      last = `HTTP ${res.status}`;
-      if (status >= 400 && status < 500 && status !== 429) break;
+      const text = await res.text().catch(() => "");
+      const detail = bodySnippet(text);
+      last = `HTTP ${res.status}${detail ? `: ${detail}` : ""}`;
+      const retry = opts.retryOn
+        ? opts.retryOn(status, text)
+        : !(status >= 400 && status < 500 && status !== 429);
+      if (!retry) break;
     } catch (e) {
       last = e instanceof Error ? e.message : String(e);
     }
-    if (attempt < attempts - 1) await sleep(Math.min(8_000, backoff * 2 ** attempt));
+    if (attempt < attempts - 1) await sleep(Math.min(maxBackoff, backoff * 2 ** attempt));
   }
   throw new ToolError(opts.errorCode ?? "lcd_error", `${url.split("?")[0]} failed: ${last}`);
+}
+
+/**
+ * Whether an LCD failure body is the chain saying "that does not exist".
+ *
+ * CosmWasm wraps a contract-level not-found in HTTP 500, so without this every
+ * missing campaign reads as an infrastructure outage AND burns the whole retry
+ * ladder on an answer that will never change.
+ */
+export function isNotFoundBody(text: string): boolean {
+  return /not found|no such|unknown request/i.test(text);
 }
 
 const base = (lcdUrl: string): string => lcdUrl.replace(/\/$/, "");
@@ -71,10 +116,25 @@ export async function smartQuery<T>(
 ): Promise<T> {
   const encoded = Buffer.from(JSON.stringify(query)).toString("base64");
   const url = `${base(lcdUrl)}/cosmwasm/wasm/v1/contract/${contract}/smart/${encodeURIComponent(encoded)}`;
-  const body = await lcdGetJson<{ data?: T }>(url, {
-    errorCode: "contract_query_failed",
-    ...opts,
-  });
+  let body: { data?: T };
+  try {
+    body = await lcdGetJson<{ data?: T }>(url, {
+      errorCode: "contract_query_failed",
+      ...opts,
+      // A contract that says "not found" says it identically every time, so the
+      // ladder stops on the first one instead of spending ~15s to repeat it.
+      retryOn: (status, text) => !isNotFoundBody(text) && (status >= 500 || status === 429),
+    });
+  } catch (e) {
+    if (e instanceof ToolError && isNotFoundBody(e.message)) {
+      throw new ToolError(
+        "not_found",
+        `${contract} has no entry for ${JSON.stringify(query)}`,
+        "the contract answered the query — the id simply does not exist",
+      );
+    }
+    throw e;
+  }
   if (body.data === undefined) {
     throw new ToolError(opts.errorCode ?? "contract_query_failed", `${contract} returned no data`);
   }

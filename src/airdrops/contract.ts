@@ -7,6 +7,7 @@
  * transport this package did not already have.
  */
 
+import { ToolError } from "../errors.js";
 import { smartQuery as wasmSmartQuery } from "./wasm.js";
 
 export interface ContractConfig {
@@ -113,11 +114,26 @@ const smartQuery = <T>(lcdUrl: string, contract: string, query: object): Promise
 export const queryContractConfig = (lcdUrl: string, contract: string): Promise<ContractConfig> =>
   smartQuery<ContractConfig>(lcdUrl, contract, { config: {} });
 
-export const queryCampaign = (
+export const queryCampaign = async (
   lcdUrl: string,
   contract: string,
   id: number,
-): Promise<CampaignResponse> => smartQuery<CampaignResponse>(lcdUrl, contract, { campaign: { id } });
+): Promise<CampaignResponse> => {
+  try {
+    return await smartQuery<CampaignResponse>(lcdUrl, contract, { campaign: { id } });
+  } catch (e) {
+    // The contract answers a missing id with a wrapped HTTP 500. Reporting that
+    // as a query failure sends the reader looking for an outage that isn't there.
+    if (e instanceof ToolError && e.code === "not_found") {
+      throw new ToolError(
+        "not_found",
+        `no claim-drop campaign #${id} on ${contract}`,
+        "check the id, or pass the planId instead to find a campaign this agent created by its merkle root",
+      );
+    }
+    throw e;
+  }
+};
 
 export const queryCampaignsByCreator = (
   lcdUrl: string,

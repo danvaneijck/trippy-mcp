@@ -98,6 +98,10 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
   // than producing an equal split under a name that implies otherwise.
   let mode: DistMode =
     args.allocation.mode ?? (args.source.kind === "gov_voters" ? "fair" : "proportionate");
+  // How the split is DESCRIBED, which is not always a DistMode. A csv bypasses
+  // the allocator, so reporting the value the allocator type happens to need
+  // would claim a weighting that never ran.
+  let modeLabel: string = mode;
   let allocatorDroppedZero = 0;
   let allocatorMergedRows = 0;
 
@@ -116,6 +120,7 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
     }
     amountRows = args.source.rows;
     mode = "proportionate";
+    modeLabel = "explicit";
   } else {
     if (!args.allocation.total) {
       throw new ToolError("bad_input", "allocation.total is required for a snapshot source");
@@ -289,7 +294,11 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
   }
 
   const symbol = await denomSymbol(rt, asset);
-  const criteria = `${loaded.description}, ${mode} split of ${totalWhole} ${symbol ?? asset}`;
+  const criteria = `${loaded.description}, ${
+    modeLabel === "explicit"
+      ? `amounts as given, totalling ${totalWhole}`
+      : `${modeLabel} split of ${totalWhole}`
+  } ${symbol ?? asset}`;
   const id = makePlanId(rt.injAddress, asset, tree.leaves);
   const plan: StoredPlan = {
     planId: id,
@@ -331,7 +340,7 @@ export async function preview(rt: Runtime, args: PreviewArgs): Promise<Record<st
     // For a push drop the root is published nowhere — it is just a stable
     // fingerprint of the exact list, which is also what planId is derived from.
     root: tree.rootHex,
-    mode,
+    mode: modeLabel,
     criteria,
     snapshotAt: loaded.snapshotAt,
     ...(loaded.snapshotHeight !== undefined

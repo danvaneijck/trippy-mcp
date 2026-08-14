@@ -27,17 +27,50 @@ export interface BlockRef {
   timeIso: string;
 }
 
+/** Host of an LCD URL, for error text that names the endpoint not the whole path. */
+function hostOf(lcdUrl: string): string {
+  try {
+    return new URL(lcdUrl).host;
+  } catch {
+    return lcdUrl;
+  }
+}
+
 interface BlockResponse {
   block?: { header?: { height?: string; time?: string } };
 }
 
+/** Tendermint's answer when the node it hit has pruned past the height asked for. */
+const PRUNED_RE = /lowest height is (\d+)/i;
+
 export async function fetchBlock(lcdUrl: string, height: number | "latest"): Promise<BlockRef> {
   const url = `${lcdUrl.replace(/\/$/, "")}/cosmos/base/tendermint/v1beta1/blocks/${height}`;
-  const body = await lcdGetJson<BlockResponse>(url, {
-    attempts: 6,
-    backoffMs: 700,
-    errorCode: "block_query_failed",
-  });
+  let body: BlockResponse;
+  try {
+    // A public LCD host is a load balancer over nodes with DIFFERENT retention,
+    // so "height not available" is a property of the node that answered, not of
+    // the chain: an immediate retry lands on a different node and usually
+    // succeeds. That makes fast, frequent retries the right shape here — the
+    // slow doubling ladder used for rate-limited paging would just wait out a
+    // failure that a second request fixes.
+    body = await lcdGetJson<BlockResponse>(url, {
+      attempts: 8,
+      backoffMs: 250,
+      maxBackoffMs: 2_000,
+      errorCode: "block_query_failed",
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const pruned = PRUNED_RE.exec(msg);
+    if (pruned) {
+      throw new ToolError(
+        "block_pruned",
+        `block ${height} is not retained by ${hostOf(lcdUrl)} — the nodes answering there keep history from ~${pruned[1]} up`,
+        "pass `height` explicitly to snapshot at a height the node still has, or point config.lcdUrl at an archive node",
+      );
+    }
+    throw e;
+  }
   const h = Number(body.block?.header?.height);
   const t = body.block?.header?.time;
   if (!Number.isInteger(h) || h <= 0 || !t) {

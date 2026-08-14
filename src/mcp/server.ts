@@ -308,7 +308,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "recent_trades",
-    "Recent SHROOM Pad curve trades — global tape, or one launch when `query` is set." + UNTRUSTED_NOTE,
+    "Recent SHROOM Pad curve trades — global tape, or one launch when `query` is set. Each trade carries `pairAmount` in its launch's own quote asset, `usd` as that trade's NOTIONAL, and `quoteRateUsd` as the quote asset's price at the time." + UNTRUSTED_NOTE,
     { query: query.optional(), limit: z.number().int().min(1).max(50).optional() },
     (rt2, a: { query?: string; limit?: number }) => t.recentTrades(rt2, a),
   );
@@ -327,7 +327,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "candles",
-    "OHLCV price history for a token. Auto-routes: active SHROOM curve launches return quote-priced candles with a per-bucket USD rate; graduated/DEX tokens return Choice market candles (USD-priced). Use this to measure momentum before trading. Covers spot only — Helix perp/spot market prices come from the Injective SDK's `market_price`/`market_list`." + UNTRUSTED_NOTE,
+    "OHLCV price history for a token. Auto-routes: active SHROOM curve launches return quote-priced candles with a per-bucket USD rate; graduated/DEX tokens return Choice market candles (USD-priced). Candles come back as CSV rows under a `columns` header, oldest first, one row per bucket. Use this to measure momentum before trading. Covers spot only — Helix perp/spot market prices come from the Injective SDK's `market_price`/`market_list`." + UNTRUSTED_NOTE,
     {
       query,
       interval: z.enum(t.CANDLE_INTERVALS).optional().describe("bucket size (default 1h)"),
@@ -347,7 +347,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "quote",
-    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; graduated/DEX tokens quote through the Choice aggregator (counterToken defaults to INJ). Buy amounts are in the counter/quote asset; sell amounts in the token." +
+    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; graduated/DEX tokens quote through the Choice aggregator (counterToken defaults to INJ). Buy amounts are in the counter/quote asset; sell amounts in the token. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
       SPOT_ONLY_NOTE,
     {
       query,
