@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { explain, TOPICS, TOPIC_IDS, findTopic, topicIndex } from "../src/docs/index.js";
 import { bps, fee, UNKNOWN, type LiveParams, type QuoteParams } from "../src/docs/params.js";
+import type { CurvePreset } from "../src/venues/shroom/curves.js";
 import type { Runtime } from "../src/runtime.js";
 
 const quote = (over: Partial<QuoteParams> = {}): QuoteParams => ({
@@ -22,15 +23,34 @@ const quote = (over: Partial<QuoteParams> = {}): QuoteParams => ({
   ...over,
 });
 
+const preset = (over: Partial<CurvePreset> = {}): CurvePreset => ({
+  id: 0,
+  name: "standard",
+  rBps: 4000,
+  targetMulBps: 10_000,
+  // Legal on every slot 0-7.
+  quoteMask: 0xff,
+  enabled: true,
+  floatBps: 8000,
+  lpBps: 2000,
+  virtualToken: 1_073_000_000,
+  ...over,
+});
+
 const params = (over: Partial<LiveParams> = {}): LiveParams => ({
   creationFeeInj: "0.2",
   referralShareBps: 1000,
   treasury: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
   quotes: [quote()],
+  curves: [preset(), preset({ id: 1, name: "whale", targetMulBps: 40_000, quoteMask: 0b10 })],
   errors: [],
   fetchedAt: "2026-08-02T00:00:00.000Z",
   ...over,
 });
+
+/// A runtime stub that only answers what `topicIndex` asks of it.
+const rtWith = (curvesSelectable: boolean) =>
+  ({ shroom: { curvesSelectable } }) as unknown as Runtime;
 
 describe("docs registry", () => {
   it("every topic has a unique id, a summary and sources", () => {
@@ -48,10 +68,29 @@ describe("docs registry", () => {
   });
 
   it("indexes topics when called with no topic", async () => {
-    const idx = topicIndex();
+    const rt = rtWith(true);
+    const idx = topicIndex(rt);
     expect((idx.topics as unknown[]).length).toBe(TOPICS.length);
-    const viaExplain = await explain({} as Runtime, undefined);
+    const viaExplain = await explain(rt, undefined);
     expect(viaExplain).toEqual(idx);
+  });
+
+  it("hides curve choice from the index where there is no menu to choose from", () => {
+    const listed = (rt: Runtime) =>
+      (topicIndex(rt).topics as { topic: string }[]).map((t) => t.topic);
+    expect(listed(rtWith(true))).toContain("shroom_pad_curves");
+    expect(listed(rtWith(false))).not.toContain("shroom_pad_curves");
+    // Everything else is unconditional — only curve choice is deployment-shaped.
+    expect(listed(rtWith(false)).length).toBe(TOPICS.length - 1);
+  });
+
+  it("still answers the curve topic by name on a deployment without one", async () => {
+    // An agent that read about curves elsewhere deserves an answer, not an
+    // unknown-topic error — and the answer has to say the menu is absent
+    // rather than describe one.
+    const text = findTopic("shroom_pad_curves")!.render(params({ curves: null }));
+    expect(text).toContain("does not offer a curve menu");
+    expect(text).not.toContain("curveId 0");
   });
 
   it("rejects an unknown topic with the list of known ones", async () => {
@@ -73,6 +112,9 @@ describe("prose carries no numbers", () => {
       referralShareBps: null,
       treasury: null,
       quotes: [],
+      // null is "no registry on this deployment", which is a different answer
+      // from "the menu read failed" — but both must render without figures.
+      curves: null,
       errors: ["denomCreationFeeInj: boom"],
     });
     for (const topic of TOPICS) {
