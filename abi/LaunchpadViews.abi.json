@@ -1,0 +1,304 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "core_",
+        "type": "address",
+        "internalType": "contract LaunchpadCore"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "CORE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract LaunchpadCore"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getLaunch",
+    "inputs": [
+      {
+        "name": "launchId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "l",
+        "type": "tuple",
+        "internalType": "struct LaunchpadCore.Launch",
+        "components": [
+          {
+            "name": "state",
+            "type": "uint8",
+            "internalType": "enum ILaunchpadCore.LaunchState"
+          },
+          {
+            "name": "creator",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "sink",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "quoteAsset",
+            "type": "uint8",
+            "internalType": "uint8"
+          },
+          {
+            "name": "gate",
+            "type": "tuple",
+            "internalType": "struct LaunchpadCore.LaunchGate",
+            "components": [
+              {
+                "name": "gateToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "minBalance",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "windowEndsAt",
+                "type": "uint64",
+                "internalType": "uint64"
+              },
+              {
+                "name": "discountBps",
+                "type": "uint16",
+                "internalType": "uint16"
+              }
+            ]
+          },
+          {
+            "name": "tradingOpensAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "guardWindowEndsAt",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "maxBuyBpsInGuardWindow",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "bindDeadline",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "settler",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "pairAsset",
+            "type": "address",
+            "internalType": "contract IERC20"
+          },
+          {
+            "name": "virtualPair",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "virtualToken",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "curveSupply",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "graduationPairTarget",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "graduationTokenReserve",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "realPair",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "tokensSold",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "refundPairTotal",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "refundTokensTotal",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "refundPairPaid",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "refundTokensReceived",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feeEscrowed",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "tradeFeeBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "creatorFeeShareBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "curveId",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "bankDenom",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "requiresChoiceFactoryDust",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "metadataURI",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "poolKind",
+            "type": "uint8",
+            "internalType": "enum ILaunchpadCore.PoolKind"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getQuoteAssetConfig",
+    "inputs": [
+      {
+        "name": "q",
+        "type": "uint8",
+        "internalType": "uint8"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "c",
+        "type": "tuple",
+        "internalType": "struct LaunchpadCore.QuoteAssetConfig",
+        "components": [
+          {
+            "name": "pairAsset",
+            "type": "address",
+            "internalType": "contract IERC20"
+          },
+          {
+            "name": "graduationPairTarget",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "enabled",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "bankDenom",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "requiresChoiceFactoryDust",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "tradeFeeBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          },
+          {
+            "name": "creatorFeeShareBps",
+            "type": "uint16",
+            "internalType": "uint16"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "graduationProgressBps",
+    "inputs": [
+      {
+        "name": "launchId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "error",
+    "name": "ZeroAddress",
+    "inputs": []
+  }
+]

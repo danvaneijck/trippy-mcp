@@ -92,6 +92,23 @@ export interface NetworkDef {
     launchpadCore: Address;
     winj9: Address;
     feeTreasury: Address;
+    /**
+     * v2 read satellite. `getLaunch` and `getQuoteAssetConfig` were moved off
+     * LaunchpadCore to reclaim EIP-170 headroom and are served from here,
+     * rebuilt from raw storage through core's `extsload`.
+     *
+     * PRESENCE OF THIS FIELD IS THE v1/v2 SWITCH for this package (see
+     * `isCurveV2`). It is not cosmetic: on v2 the `Launch` and
+     * `QuoteAssetConfig` tuples have different shapes and `createLaunch` takes
+     * an extra `curveId`, so decoding one network's surface with the other's
+     * ABI returns garbage or reverts on a missing selector.
+     *
+     * A LaunchpadViews reads ONE core's storage layout, so it is pinned to the
+     * core it shipped with — never carry it across a redeploy.
+     */
+    launchpadViews?: Address;
+    /** v2 curve presets. Only meaningful where `launchpadViews` is set. */
+    curveRegistry?: Address;
   };
   /**
    * The launchpad's tokenfactory issuer — launch tokens live at
@@ -311,4 +328,28 @@ export function makeChain(def: NetworkDef, rpcUrls?: string[]): Chain {
 
 export function quoteAssetBySlot(def: NetworkDef, slot: number): QuoteAssetInfo | undefined {
   return Object.values(def.quoteAssets).find((q) => q.slot === slot);
+}
+
+/**
+ * Does this network run the v2 launchpad (CurveRegistry + LaunchpadViews)?
+ *
+ * The two versions are not ABI-compatible on three surfaces — the `Launch`
+ * tuple gained `curveId`, `QuoteAssetConfig` lost its four curve-shape fields
+ * (the curve is per LAUNCH now, not per quote), and `createLaunch` takes a
+ * `curveId` — so every caller of those has to pick a shape. Reading v2 with the
+ * v1 ABI does not fail cleanly: the tuple still decodes, with fields shifted.
+ *
+ * Keyed off `launchpadViews` because that address is exactly what v2 adds and
+ * v1 does not have.
+ */
+export function isCurveV2(def: NetworkDef): boolean {
+  return Boolean(def.addresses.launchpadViews);
+}
+
+/**
+ * Where this network's `getLaunch` / `getQuoteAssetConfig` actually live: the
+ * views satellite on v2, LaunchpadCore itself on v1.
+ */
+export function launchViewsAddress(def: NetworkDef): Address {
+  return def.addresses.launchpadViews ?? def.addresses.launchpadCore;
 }

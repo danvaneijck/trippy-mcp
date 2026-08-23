@@ -57,6 +57,57 @@ export const LAUNCHPAD_ABI = parseAbi([
   "function withdrawRefund() returns (uint256)",
 ]);
 
+/**
+ * v2 read surface (CurveRegistry release). Two things changed shape, so this
+ * cannot be folded into LAUNCHPAD_ABI — mainnet still runs v1, and the same
+ * package serves both:
+ *
+ *  - `Launch` gained `uint16 curveId` (after creatorFeeShareBps). Curves are
+ *    chosen PER LAUNCH from the registry rather than being a property of the
+ *    quote asset.
+ *  - `QuoteAssetConfig` LOST virtualPair / virtualToken / curveSupply /
+ *    graduationTokenReserve for the same reason. `graduationPairTarget`
+ *    survives as the quote's BASE raise size, which presets scale.
+ *
+ * Both are served by LaunchpadViews, not core: they were moved off to reclaim
+ * EIP-170 headroom (core sat at 24,282 B with 294 B spare) and are rebuilt from
+ * raw storage through core's `extsload`. Same values, different address.
+ *
+ * Decoding a v2 launch with the v1 tuple does NOT throw — `curveId` shifts
+ * every field after it — so the shape is selected by network, never guessed.
+ */
+export const LAUNCHPAD_VIEWS_ABI = parseAbi([
+  "struct LaunchGate { address gateToken; uint256 minBalance; uint64 windowEndsAt; uint16 discountBps; }",
+  "struct LaunchV2 { uint8 state; address creator; address token; address sink; uint8 quoteAsset; LaunchGate gate; uint64 tradingOpensAt; uint64 guardWindowEndsAt; uint16 maxBuyBpsInGuardWindow; uint64 bindDeadline; address settler; address pairAsset; uint256 virtualPair; uint256 virtualToken; uint256 curveSupply; uint256 graduationPairTarget; uint256 graduationTokenReserve; uint256 realPair; uint256 tokensSold; uint256 refundPairTotal; uint256 refundTokensTotal; uint256 refundPairPaid; uint256 refundTokensReceived; uint256 feeEscrowed; uint16 tradeFeeBps; uint16 creatorFeeShareBps; uint16 curveId; string bankDenom; bool requiresChoiceFactoryDust; string metadataURI; uint8 poolKind; }",
+  "struct QuoteAssetConfigV2 { address pairAsset; uint256 graduationPairTarget; bool enabled; string bankDenom; bool requiresChoiceFactoryDust; uint16 tradeFeeBps; uint16 creatorFeeShareBps; }",
+  "function getLaunch(uint256 launchId) view returns (LaunchV2)",
+  "function getQuoteAssetConfig(uint8 q) view returns (QuoteAssetConfigV2)",
+  // Progress derived from the launch's OWN snapshotted target. A per-quote
+  // target is not a valid denominator on v2: presets scale it per launch.
+  "function graduationProgressBps(uint256 launchId) view returns (uint256)",
+]);
+
+/**
+ * v2 `createLaunch`. `LaunchConfig` gained `uint16 curveId` (after quoteAsset),
+ * so the v1 write ABI encodes a different calldata layout and the call reverts.
+ * curveId 0 is the standard preset and reproduces the v1 curve exactly, so it
+ * is the safe default for a caller that does not care.
+ */
+export const LAUNCHPAD_WRITE_V2_ABI = parseAbi([
+  "struct LaunchGate { address gateToken; uint256 minBalance; uint64 windowEndsAt; uint16 discountBps; }",
+  "struct LaunchConfigV2 { string name; string symbol; string metadataURI; uint8 quoteAsset; uint16 curveId; LaunchGate gate; uint64 tradingOpensAt; uint64 guardWindowEndsAt; uint16 maxBuyBpsInGuardWindow; uint64 bindDeadlineSeconds; uint8 poolKind; }",
+  "function createLaunch(LaunchConfigV2 cfg) payable returns (uint256)",
+]);
+
+/** Curated curve presets (v2 only). */
+export const CURVE_REGISTRY_ABI = parseAbi([
+  "struct Preset { uint256 virtualToken; uint256 curveSupply; uint256 graduationTokenReserve; uint16 rBps; uint16 targetMulBps; uint32 quoteMask; bool enabled; string name; }",
+  "function presetCount() view returns (uint256)",
+  "function getPreset(uint16 curveId) view returns (Preset)",
+  "function getPresets() view returns (Preset[])",
+  "function isAllowed(uint16 curveId, uint8 quote) view returns (bool)",
+]);
+
 export const ERC20_ABI = parseAbi([
   "function balanceOf(address) view returns (uint256)",
   "function allowance(address owner, address spender) view returns (uint256)",

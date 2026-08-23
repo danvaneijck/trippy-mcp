@@ -28,13 +28,19 @@ export interface QuoteParams {
   pairAsset: string;
   bankDenom: string;
   decimals: number;
-  /** Human units of the quote asset. */
-  virtualPair: string;
+  /**
+   * Curve shape, in human units — and ONLY on a v1 network. On v2 the curve is
+   * picked per launch from the CurveRegistry, so there is no such thing as
+   * "the curve for this quote" and these are null. A specific launch's real
+   * numbers come from `token_info`.
+   */
+  virtualPair: string | null;
+  /** The quote's BASE raise size. Present on both; presets scale it on v2. */
   graduationPairTarget: string;
-  /** Human units of the launch token (always 18-decimal). */
-  virtualToken: string;
-  curveSupply: string;
-  graduationTokenReserve: string;
+  /** Human units of the launch token (always 18-decimal). v1 only. */
+  virtualToken: string | null;
+  curveSupply: string | null;
+  graduationTokenReserve: string | null;
   tradeFeeBps: number;
   creatorFeeShareBps: number;
   /** Convenience for prose: creatorFeeShareBps as a % of every trade. */
@@ -126,11 +132,12 @@ async function readLiveParams(rt: Runtime): Promise<LiveParams> {
       pairAsset: cfg.pairAsset,
       bankDenom: cfg.bankDenom,
       decimals,
-      virtualPair: formatUnits(cfg.virtualPair, decimals),
+      virtualPair: cfg.virtualPair === null ? null : formatUnits(cfg.virtualPair, decimals),
       graduationPairTarget: formatUnits(cfg.graduationPairTarget, decimals),
-      virtualToken: formatUnits(cfg.virtualToken, 18),
-      curveSupply: formatUnits(cfg.curveSupply, 18),
-      graduationTokenReserve: formatUnits(cfg.graduationTokenReserve, 18),
+      virtualToken: cfg.virtualToken === null ? null : formatUnits(cfg.virtualToken, 18),
+      curveSupply: cfg.curveSupply === null ? null : formatUnits(cfg.curveSupply, 18),
+      graduationTokenReserve:
+        cfg.graduationTokenReserve === null ? null : formatUnits(cfg.graduationTokenReserve, 18),
       tradeFeeBps: cfg.tradeFeeBps,
       creatorFeeShareBps: cfg.creatorFeeShareBps,
       creatorTakePct: (cfg.tradeFeeBps / 10_000) * (cfg.creatorFeeShareBps / 10_000) * 100,

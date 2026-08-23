@@ -30,6 +30,11 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** Each checked surface: vendored artifact ← built module export. */
 const SURFACES = [
   {
+    // PINNED TO v1 while mainnet runs v1. `LAUNCHPAD_ABI` is the v1 surface and
+    // this artifact must stay a v1 build: `createLaunch` takes a tuple, so its
+    // SELECTOR differs between v1 and v2, and refreshing this from a v2 repo
+    // would fail the check for the v1 createLaunch entry. That failure is
+    // correct — it means mainnet moved, and `isCurveV2` should move with it.
     label: "LaunchpadCore",
     vendored: join(root, "abi", "LaunchpadCore.abi.json"),
     module: "dist/venues/shroom/abi.js",
@@ -38,6 +43,36 @@ const SURFACES = [
     refresh: {
       env: "SHROOM_REPO",
       path: "contracts/out/LaunchpadCore.sol/LaunchpadCore.json",
+      pick: (artifact) => artifact.abi,
+    },
+  },
+  {
+    // v2 read satellite. Checked separately from LaunchpadCore because the two
+    // are different contracts at different addresses — and because a
+    // selector-level check CANNOT see the thing that actually broke here: the
+    // `Launch` tuple gained a field, and `getLaunch(uint256)` keeps the same
+    // selector either way. Only the vendored artifact's return types record
+    // that, so keep this file refreshed from a v2 build.
+    label: "LaunchpadViews (v2)",
+    vendored: join(root, "abi", "LaunchpadViews.abi.json"),
+    module: "dist/venues/shroom/abi.js",
+    exportName: "LAUNCHPAD_VIEWS_ABI",
+    source: "src/venues/shroom/abi.ts",
+    refresh: {
+      env: "SHROOM_REPO",
+      path: "contracts/out/LaunchpadViews.sol/LaunchpadViews.json",
+      pick: (artifact) => artifact.abi,
+    },
+  },
+  {
+    label: "CurveRegistry (v2)",
+    vendored: join(root, "abi", "CurveRegistry.abi.json"),
+    module: "dist/venues/shroom/abi.js",
+    exportName: "CURVE_REGISTRY_ABI",
+    source: "src/venues/shroom/abi.ts",
+    refresh: {
+      env: "SHROOM_REPO",
+      path: "contracts/out/CurveRegistry.sol/CurveRegistry.json",
       pick: (artifact) => artifact.abi,
     },
   },
