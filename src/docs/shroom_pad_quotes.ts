@@ -32,12 +32,19 @@ const CHARACTER: Record<string, string> = {
 
 function row(q: QuoteParams): string {
   const flag = q.enabled ? "" : "  [DISABLED — new launches cannot use it]";
+  // The four curve-shape fields exist only where the curve belongs to the quote
+  // asset. Where it belongs to the LAUNCH they are null, and printing "null" —
+  // or worse, a stale number — would describe a curve no launch here has.
+  const shape =
+    q.virtualPair !== null && q.virtualToken !== null
+      ? `  virtual reserves       ${q.virtualPair} ${q.symbol} / ${q.virtualToken} tokens
+  curve supply           ${q.curveSupply} tokens
+  graduation reserve     ${q.graduationTokenReserve} tokens`
+      : `  curve shape            chosen per launch — see topic \`shroom_pad_curves\``;
   return `### ${q.symbol} (slot ${q.slot})${flag}
 
-  graduation target      ${q.graduationPairTarget} ${q.symbol}
-  virtual reserves       ${q.virtualPair} ${q.symbol} / ${q.virtualToken} tokens
-  curve supply           ${q.curveSupply} tokens
-  graduation reserve     ${q.graduationTokenReserve} tokens
+  graduation target      ${q.graduationPairTarget} ${q.symbol}${q.virtualPair === null ? " (base — a curve preset scales it)" : ""}
+${shape}
   trade fee              ${q.tradeFeeBps} bps (${q.tradeFeeBps / 100}%)
   creator share of fee   ${q.creatorFeeShareBps} bps (${q.creatorFeeShareBps / 100}%)
   creator take per trade ~${q.creatorTakePct.toFixed(4)}% of trade size
@@ -62,6 +69,10 @@ The quote asset is the currency a launch raises in. It is fixed at
 createLaunch and cannot be changed afterwards. It decides four things: what
 buyers must hold to buy, how large the raise is, how much the creator earns
 per trade, and the decimal scale of every amount on the launch.
+
+Where a curve menu exists, the quote asset no longer decides the SHAPE of the
+raise — that is a separate, separately-chosen thing. See topic
+\`shroom_pad_curves\`.
 
 ## Live terms
 

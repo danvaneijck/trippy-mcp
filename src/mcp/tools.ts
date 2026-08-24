@@ -33,6 +33,12 @@ import { deepSanitize, sanitizeText, untrustedMeta } from "../untrusted.js";
 import { checkForUpdate, PKG_VERSION } from "../version.js";
 import { extractUsdPrice } from "../venues/choice/swap.js";
 import { LAUNCH_STATE_LABEL, LaunchState } from "../venues/shroom/abi.js";
+import {
+  presetAllowedOnQuote,
+  priceRunX,
+  resolveCurveChoice,
+  type CurvePreset,
+} from "../venues/shroom/curves.js";
 import type { LaunchView } from "../venues/shroom/launchpad.js";
 import { sweep as walletSweep, walletStatus } from "../wallet.js";
 import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
@@ -193,11 +199,36 @@ export async function tokenInfo(rt: Runtime, args: { query: string }): Promise<u
         tokensSold: formatUnits(live.tokensSold, 18),
       },
       terms: await launchTerms(rt, live),
+      curve: await launchCurve(rt, live),
       terminalUrl: rt.net.terminalBase ? `${rt.net.terminalBase}/t/shroom-curve%3A${target.launch.id}` : undefined,
     };
   }
   const payload = await rt.choiceApi.token(target.tokenId);
   return { venue: "choice", tokenId: target.tokenId, data: deepSanitize(payload) };
+}
+
+/**
+ * Which curve THIS launch was created on.
+ *
+ * Worth reporting to a buyer, not just a creator: the preset decides how much
+ * of the supply reaches the market and how far the price travels to
+ * graduation, and two launches on the same quote asset can now differ
+ * completely. Before the registry there was one curve per quote and this was
+ * not a question anyone could ask.
+ *
+ * Null on a launch created before the registry (no `curveId` on its tuple), and
+ * null rather than a number if the menu will not read — a bare id names
+ * nothing an agent can reason about.
+ */
+async function launchCurve(rt: Runtime, live: LaunchView): Promise<unknown> {
+  if (live.curveId === null || !rt.shroom.curvesSelectable) return null;
+  const presets = await rt.shroom.curvePresets().catch(() => null);
+  const preset = presets?.find((c) => c.id === live.curveId);
+  if (!preset) return null;
+  return {
+    ...curveSummary(preset),
+    note: "the curve is frozen onto the launch at creation — retiring or adding presets later does not change it",
+  };
 }
 
 /**
@@ -948,6 +979,11 @@ export interface CreateTokenArgs {
   website?: string;
   telegram?: string;
   quoteAsset?: "INJ" | "USDC" | "SAI";
+  /**
+   * Bonding curve, by preset name or curveId. Only where a CurveRegistry
+   * exists; omitted = curveId 0, which reproduces the pre-registry curve.
+   */
+  curve?: string;
   initialBuy?: string;
 }
 
@@ -955,6 +991,8 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
   if (!args.name.trim() || !args.symbol.trim()) {
     throw new ToolError("bad_input", "name and symbol are required");
   }
+  const quoteSymbol = args.quoteAsset ?? "INJ";
+  const chosen = await resolveCurve(rt, args.curve, quoteSymbol);
   const image = await resolveImage(rt.pump, args.imageUrl, args.imagePath);
   const created = await rt.shroom.createLaunch({
     meta: {
@@ -966,7 +1004,8 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
       website: args.website,
       telegram: args.telegram,
     },
-    quoteSymbol: args.quoteAsset ?? "INJ",
+    quoteSymbol,
+    curveId: chosen?.curveId,
   });
 
   let initialBuy: unknown = undefined;
@@ -984,10 +1023,73 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
 
   return {
     ...created,
+    ...(chosen ? { curve: curveSummary(chosen.preset) } : {}),
     ...(initialBuy !== undefined ? { initialBuy } : {}),
     ...(rt.net.terminalBase
       ? { terminalUrl: `${rt.net.terminalBase}/t/shroom-curve%3A${created.launchId}` }
       : {}),
+  };
+}
+
+/**
+ * Turn a `curve` argument into a curveId, or refuse with the menu attached.
+ *
+ * Refusing here rather than letting `createLaunch` revert matters: the revert
+ * costs gas and says nothing an agent can act on, while `quoteMask` and
+ * `enabled` are both readable up front. A wrong pick is also not recoverable —
+ * the curve is frozen onto the launch forever.
+ *
+ * Returns null when no choice was expressed, which is a no-op: curveId 0 is
+ * `standard` and reproduces the pre-registry curve exactly.
+ */
+async function resolveCurve(
+  rt: Runtime,
+  choice: string | undefined,
+  quoteSymbol: "INJ" | "USDC" | "SAI",
+): Promise<{ curveId: number; preset: CurvePreset } | null> {
+  if (choice === undefined || choice === "") return null;
+  if (!rt.shroom.curvesSelectable) {
+    // Dropping it silently would hand back a launch on a curve the caller did
+    // not pick, permanently, and report success.
+    throw new ToolError(
+      "bad_curve",
+      "this network runs the v1 launchpad, where the curve is fixed per quote asset",
+      "omit `curve` — there is nothing to choose here",
+    );
+  }
+  const slot = rt.net.quoteAssets[quoteSymbol]?.slot;
+  if (slot === undefined) {
+    throw new ToolError("bad_input", `unknown quote asset ${quoteSymbol}`);
+  }
+  const presets = await rt.shroom.curvePresets();
+  if (!presets || presets.length === 0) {
+    throw new ToolError("bad_curve", "the curve registry returned no presets");
+  }
+  const picked = resolveCurveChoice(presets, choice, slot);
+  if ("error" in picked) {
+    throw new ToolError(
+      "bad_curve",
+      picked.error,
+      `curves available on ${quoteSymbol}: ${
+        presets
+          .filter((c) => presetAllowedOnQuote(c, slot))
+          .map((c) => `${c.name} (id ${c.id})`)
+          .join(", ") || "none"
+      } — see explain("shroom_pad_curves")`,
+    );
+  }
+  return picked;
+}
+
+/** The preset, as reported back on a launch. */
+function curveSummary(c: CurvePreset): Record<string, unknown> {
+  return {
+    curveId: c.id,
+    name: c.name,
+    floatPct: c.floatBps / 100,
+    poolLiquidityPct: c.lpBps / 100,
+    priceRunX: Number(priceRunX(c.rBps).toFixed(2)),
+    raiseMultiplier: c.targetMulBps / 10_000,
   };
 }
 

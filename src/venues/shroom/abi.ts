@@ -105,6 +105,11 @@ export const CURVE_REGISTRY_ABI = parseAbi([
   "function presetCount() view returns (uint256)",
   "function getPreset(uint16 curveId) view returns (Preset)",
   "function getPresets() view returns (Preset[])",
+  // Quote-invariant shape stats — float and LP are the two numbers a creator
+  // actually chooses between, and the registry is the only authority on them.
+  // Recomputing them here would drift silently the moment `MIN_LP_BPS` or the
+  // ceiling form changed, and it would drift toward over-promising float.
+  "function shapeOf(uint16 curveId) view returns (uint256 tokensAtGrad, uint256 lpTokens, uint256 totalSupply, uint256 floatBps, uint256 lpBps)",
   "function isAllowed(uint16 curveId, uint8 quote) view returns (bool)",
 ]);
 

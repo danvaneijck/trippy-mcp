@@ -26,6 +26,7 @@ import type { NetworkDef, QuoteAssetInfo } from "../../chain/networks.js";
 import { isCurveV2, launchViewsAddress, quoteAssetBySlot } from "../../chain/networks.js";
 import { ToolError } from "../../errors.js";
 import { encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
+import type { CurvePreset } from "./curves.js";
 import {
   CURVE_REGISTRY_ABI,
   ERC20_ABI,
@@ -136,6 +137,11 @@ export class ShroomVenue {
     return isCurveV2(this.net);
   }
 
+  /** True where a creator can choose a curve at all. */
+  get curvesSelectable(): boolean {
+    return this.v2 && Boolean(this.net.addresses.curveRegistry);
+  }
+
   // ---- reads ---------------------------------------------------------------
 
   async getLaunchView(launchId: bigint): Promise<LaunchView> {
@@ -210,6 +216,66 @@ export class ShroomVenue {
       abi: LAUNCHPAD_ABI,
       functionName: "treasury",
       args: [],
+    });
+  }
+
+  /**
+   * The curated curve menu, or null where there is none (a v1 network, where
+   * the curve belongs to the quote asset and there is nothing to choose).
+   *
+   * `floatBps`/`lpBps` come from the registry's own `shapeOf`, not from local
+   * arithmetic: they are the two numbers a creator actually picks between, and
+   * a reimplementation of the contract's rounding would drift the moment
+   * `MIN_LP_BPS` or the ceiling form changed — silently, and in the direction
+   * of over-promising float.
+   */
+  async curvePresets(): Promise<CurvePreset[] | null> {
+    const registry = this.net.addresses.curveRegistry;
+    if (!this.v2 || !registry) return null;
+
+    const raw = await this.signer.readContract<
+      readonly {
+        virtualToken: bigint;
+        rBps: number | bigint;
+        targetMulBps: number | bigint;
+        quoteMask: number | bigint;
+        enabled: boolean;
+        name: string;
+      }[]
+    >({
+      address: registry,
+      abi: CURVE_REGISTRY_ABI,
+      functionName: "getPresets",
+      args: [],
+    });
+
+    const shapes = await Promise.all(
+      raw.map((_, i) =>
+        this.signer
+          .readContract<{ floatBps: bigint; lpBps: bigint }>({
+            address: registry,
+            abi: CURVE_REGISTRY_ABI,
+            functionName: "shapeOf",
+            args: [i],
+          })
+          // One dead entry must not take down the whole menu.
+          .catch(() => null),
+      ),
+    );
+
+    return raw.map((p, i) => {
+      const shape = shapes[i];
+      return {
+        id: i,
+        name: String(p.name),
+        rBps: Number(p.rBps),
+        targetMulBps: Number(p.targetMulBps),
+        quoteMask: Number(p.quoteMask),
+        enabled: Boolean(p.enabled),
+        floatBps: shape ? Number(shape.floatBps) : 0,
+        lpBps: shape ? Number(shape.lpBps) : 0,
+        virtualToken: Number(formatUnits(BigInt(p.virtualToken), 18)),
+      };
     });
   }
 
