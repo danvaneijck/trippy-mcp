@@ -447,14 +447,21 @@ const csvRow = (cells: (number | string | null)[]): string =>
   cells.map((c) => (c === null || c === "" ? "" : typeof c === "number" ? sig(c) : c)).join(",");
 
 /**
- * Curve candles arrive as raw spot_price_wad values: the base-unit pair/token
- * ratio scaled by 1e18. Launch tokens are always 18-decimal, so the human
- * quote-per-token price is wad/1e18 × 10^(18 − pairDecimals). Volume is raw
- * quote base units. `rateUsd` (quote→USD at the bucket's close trade) converts
- * close/volume to USD without rescaling history by today's rate.
+ * Curve candles arrive as NORMALISED spot_price_wad values: display-quote per
+ * display-token, scaled by 1e18. The decimal gap is already folded in by the
+ * indexer (backend shared/curve.ts scales before dividing; migration sql/0024
+ * rewrote history), so the human quote-per-token price is just wad/1e18.
+ *
+ * ⛔ Do NOT re-apply a `10 ** (18 − pairDecimals)` correction here. It used to
+ * live in this function and made every USDC-quoted launch read 1e12 too high;
+ * it was invisible on INJ/SAI/SHROOM because the factor is exactly 1 at 18
+ * decimals. `pairDecimals` is still needed for volume, which IS raw base units.
+ *
+ * `rateUsd` (quote→USD at the bucket's close trade) converts close/volume to
+ * USD without rescaling history by today's rate.
  */
 export function shapeCurveCandles(items: ApiCandle[], pairDecimals: number): string[] {
-  const px = (v: string): number => (Number(v) / 1e18) * 10 ** (18 - pairDecimals);
+  const px = (v: string): number => Number(v) / 1e18;
   return items.map((cd) => {
     const close = px(cd.c);
     const vol = Number(cd.v) / 10 ** pairDecimals;
@@ -1308,7 +1315,8 @@ async function curveHoldingRow(
     const { items } = await rt.pump.getTrades(launch.id, 1);
     const wad = items[0]?.spotPriceWad;
     if (wad) {
-      const priceQuote = (Number(wad) / 1e18) * 10 ** (18 - q.decimals);
+      // Already normalised by the indexer — no decimal correction here.
+      const priceQuote = Number(wad) / 1e18;
       const rate = await rt.shroom.usdValue(q.slot, 10n ** BigInt(q.decimals));
       if (rate !== null && Number.isFinite(priceQuote)) priceUsd = priceQuote * rate;
     }

@@ -44,14 +44,31 @@ describe("shapeCurveCandles", () => {
     expect(c.cUsd).toBe("");
   });
 
-  it("rescales by the decimal gap for a 6-decimal quote (USDC)", () => {
-    // spot_price_wad is the RAW base-unit ratio × 1e18: for a 6-decimal quote
-    // the human price needs the 10^(18-6) correction (mirrors the FE's
-    // spotPriceHuman) — wad 3e6 → 3 USDC per token.
-    const [row] = shapeCurveCandles([candle({ o: "3000000", h: "3000000", l: "3000000", c: "3000000", v: "1500000" })], 6);
+  it("does NOT rescale price for a 6-decimal quote (USDC), but does rescale volume", () => {
+    // spot_price_wad is stored NORMALISED — display-quote per display-token
+    // x1e18 — so the price is wad/1e18 on every quote, with no decimal gap
+    // applied here. This test used to assert the opposite, which is what let
+    // every USDC launch read 1e12 too high.
+    //
+    // Real values from mainnet launch 234 (INJEGG/USDC): the API serves
+    // 4136178109927, and the reserves say the price is 4.136178109927e-6 USDC
+    // per token. Volume IS raw base units, so it still takes the 1e6 divide.
+    const wad = "4136178109927";
+    const [row] = shapeCurveCandles([candle({ o: wad, h: wad, l: wad, c: wad, v: "1500000" })], 6);
+    const c = cells(row!, CURVE_CANDLE_COLUMNS);
+    // Relative, not absolute: the CSV formatter rounds to significant figures,
+    // and an absolute tolerance at this magnitude would pass for 0 too.
+    const expected = 4.136178109927e-6;
+    expect(Math.abs(Number(c.c) - expected) / expected).toBeLessThan(1e-6);
+    expect(Number(c.v)).toBeCloseTo(1.5);
+  });
+
+  it("treats an 18-decimal quote identically — the gap correction is gone for good", () => {
+    const wad = "3000000000000000000"; // 3e18 -> 3.0
+    const [row] = shapeCurveCandles([candle({ o: wad, h: wad, l: wad, c: wad, v: "1000000000000000000" })], 18);
     const c = cells(row!, CURVE_CANDLE_COLUMNS);
     expect(Number(c.c)).toBeCloseTo(3);
-    expect(Number(c.v)).toBeCloseTo(1.5);
+    expect(Number(c.v)).toBeCloseTo(1);
   });
 
   it("adds USD fields only when the bucket carries a usable rate", () => {
