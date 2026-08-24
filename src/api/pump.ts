@@ -62,6 +62,8 @@ export interface ApiTrade {
   pairAmount: string;
   tokenAmount: string;
   fee: string;
+  /// NORMALISED: display-quote per display-token, x1e18. The decimal gap is
+  /// already applied by the indexer — do NOT rescale by 10^(18-quoteDecimals).
   spotPriceWad: string;
   quoteUsd: string | null;
 }
@@ -75,7 +77,7 @@ export interface QuotePriceRow {
 
 export interface ApiCandle {
   t: number; // unix seconds, bucket open
-  o: string; // spot_price_wad (1e18-scaled pair-per-token, raw base-unit ratio)
+  o: string; // spot_price_wad — NORMALISED display-quote per display-token, x1e18
   h: string;
   l: string;
   c: string;
