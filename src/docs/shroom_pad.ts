@@ -51,9 +51,11 @@ non-zero starting price with no seeded liquidity:
 
     price = (virtualPair + realPair) / (virtualToken - tokensSold)
 
-\`virtualPair\` and \`virtualToken\` are per-quote-asset constants${
-    q ? ` (currently ${q.virtualPair} ${q.symbol} / ${q.virtualToken} tokens on ${q.symbol})` : ""
-  }.
+${
+    q && q.virtualPair && q.virtualToken
+      ? `\`virtualPair\` and \`virtualToken\` are per-quote-asset constants (currently ${q.virtualPair} ${q.symbol} / ${q.virtualToken} tokens on ${q.symbol}).`
+      : "`virtualPair` and `virtualToken` are chosen PER LAUNCH from the curve registry, so two launches on the same quote asset can have completely different curves. Read a specific launch's own numbers with `token_info` — there is no single curve for a quote asset."
+  }
 Buys move along the curve and raise the price; sells move back down it. There
 is no orderbook and no counterparty — the curve is always willing to trade.
 
@@ -61,10 +63,10 @@ is no orderbook and no counterparty — the curve is always willing to trade.
 
 Total supply is fixed at 1,000,000,000 tokens, split at bind time:
 ${
-  q
+  q && q.curveSupply && q.graduationTokenReserve
     ? `  - ${q.curveSupply} sold through the curve
   - ${q.graduationTokenReserve} held back as the graduation pool reserve`
-    : "  - a curve tranche sold through the curve\n  - a reserve tranche held back for the graduation pool"
+    : "  - a curve tranche sold through the curve\n  - a reserve tranche held back for the graduation pool\n\nThe exact split is set by the launch's curve preset, so it varies per launch."
 }
 
 Unsold curve supply lives in the launch's own sink contract, not with the

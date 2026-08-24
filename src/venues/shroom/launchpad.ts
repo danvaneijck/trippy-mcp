@@ -23,10 +23,19 @@ import { formatUnits, maxUint256, parseUnits, zeroAddress, type Address } from "
 import type { PumpApi } from "../../api/pump.js";
 import type { EvmSigner, WriteTxResult } from "../../chain/evm.js";
 import type { NetworkDef, QuoteAssetInfo } from "../../chain/networks.js";
-import { quoteAssetBySlot } from "../../chain/networks.js";
+import { isCurveV2, launchViewsAddress, quoteAssetBySlot } from "../../chain/networks.js";
 import { ToolError } from "../../errors.js";
 import { encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
-import { ERC20_ABI, LAUNCHPAD_ABI, LAUNCH_STATE_LABEL, LaunchState, PoolKind } from "./abi.js";
+import {
+  CURVE_REGISTRY_ABI,
+  ERC20_ABI,
+  LAUNCHPAD_ABI,
+  LAUNCHPAD_VIEWS_ABI,
+  LAUNCHPAD_WRITE_V2_ABI,
+  LAUNCH_STATE_LABEL,
+  LaunchState,
+  PoolKind,
+} from "./abi.js";
 
 export interface LaunchView {
   state: number;
@@ -47,6 +56,12 @@ export interface LaunchView {
   /** Snapshotted at createLaunch — NOT the current global quote-asset config. */
   tradeFeeBps: number;
   creatorFeeShareBps: number;
+  /**
+   * CurveRegistry preset this launch was created with. `null` on a v1 network,
+   * where the curve was a property of the quote asset and there was nothing to
+   * choose. 0 is the standard preset, which reproduces the v1 curve exactly.
+   */
+  curveId: number | null;
   metadataURI: string;
   bankDenom: string;
 }
@@ -59,11 +74,19 @@ export interface LaunchView {
  */
 export interface QuoteAssetConfigView {
   pairAsset: Address;
-  virtualPair: bigint;
-  virtualToken: bigint;
-  curveSupply: bigint;
+  /**
+   * Curve SHAPE, and only on v1. On v2 the curve is chosen per launch from the
+   * CurveRegistry and these four fields no longer exist on the quote config —
+   * they are `null`, and a launch's real shape comes from `LaunchView`.
+   * Rendering a per-quote curve as "the" curve is wrong on v2: two launches on
+   * the same quote can have completely different ones.
+   */
+  virtualPair: bigint | null;
+  virtualToken: bigint | null;
+  curveSupply: bigint | null;
+  /** The quote's BASE raise size. Survives on v2; presets scale it. */
   graduationPairTarget: bigint;
-  graduationTokenReserve: bigint;
+  graduationTokenReserve: bigint | null;
   enabled: boolean;
   bankDenom: string;
   requiresChoiceFactoryDust: boolean;
@@ -103,12 +126,25 @@ export class ShroomVenue {
     return this.net.addresses.launchpadCore;
   }
 
+  /** Where `getLaunch` / `getQuoteAssetConfig` live: views on v2, core on v1. */
+  private get views(): Address {
+    return launchViewsAddress(this.net);
+  }
+
+  /** True where the launchpad runs CurveRegistry + LaunchpadViews. */
+  private get v2(): boolean {
+    return isCurveV2(this.net);
+  }
+
   // ---- reads ---------------------------------------------------------------
 
   async getLaunchView(launchId: bigint): Promise<LaunchView> {
+    // The v2 `Launch` tuple carries `curveId`, which shifts every field after
+    // it — so the ABI is chosen by network rather than assumed. Both are read
+    // from `this.views`, which is the core itself on v1.
     const l = await this.signer.readContract<LaunchView & Record<string, unknown>>({
-      address: this.core,
-      abi: LAUNCHPAD_ABI,
+      address: this.views,
+      abi: (this.v2 ? LAUNCHPAD_VIEWS_ABI : LAUNCHPAD_ABI) as never,
       functionName: "getLaunch",
       args: [launchId],
     });
@@ -134,6 +170,7 @@ export class ShroomVenue {
       graduationPairTarget: BigInt(l.graduationPairTarget),
       tradeFeeBps: Number(l.tradeFeeBps),
       creatorFeeShareBps: Number(l.creatorFeeShareBps),
+      curveId: this.v2 ? Number(l.curveId ?? 0) : null,
       metadataURI: String(l.metadataURI),
       bankDenom: String(l.bankDenom),
     };
@@ -177,19 +214,22 @@ export class ShroomVenue {
   }
 
   async getQuoteAssetConfig(slot: number): Promise<QuoteAssetConfigView> {
-    const c = await this.signer.readContract<QuoteAssetConfigView & Record<string, unknown>>({
-      address: this.core,
-      abi: LAUNCHPAD_ABI,
+    const c = await this.signer.readContract<Record<string, unknown>>({
+      address: this.views,
+      abi: (this.v2 ? LAUNCHPAD_VIEWS_ABI : LAUNCHPAD_ABI) as never,
       functionName: "getQuoteAssetConfig",
       args: [slot],
     });
+    // On v2 the four curve-shape fields are simply not on this struct any more
+    // — the curve is per launch. Reporting a per-quote curve there would be a
+    // confident lie, so they are null and callers must read `LaunchView`.
     return {
-      pairAsset: c.pairAsset,
-      virtualPair: BigInt(c.virtualPair),
-      virtualToken: BigInt(c.virtualToken),
-      curveSupply: BigInt(c.curveSupply),
-      graduationPairTarget: BigInt(c.graduationPairTarget),
-      graduationTokenReserve: BigInt(c.graduationTokenReserve),
+      pairAsset: c.pairAsset as Address,
+      virtualPair: this.v2 ? null : BigInt(c.virtualPair as bigint),
+      virtualToken: this.v2 ? null : BigInt(c.virtualToken as bigint),
+      curveSupply: this.v2 ? null : BigInt(c.curveSupply as bigint),
+      graduationPairTarget: BigInt(c.graduationPairTarget as bigint),
+      graduationTokenReserve: this.v2 ? null : BigInt(c.graduationTokenReserve as bigint),
       enabled: Boolean(c.enabled),
       bankDenom: String(c.bankDenom),
       requiresChoiceFactoryDust: Boolean(c.requiresChoiceFactoryDust),
@@ -557,6 +597,8 @@ export class ShroomVenue {
   async createLaunch(opts: {
     meta: LaunchMetadata;
     quoteSymbol: "INJ" | "USDC" | "SAI";
+    /** CurveRegistry preset (v2 only). Omitted / 0 = the standard curve. */
+    curveId?: number;
   }): Promise<{
     launchId: string;
     token: string | null;
@@ -588,7 +630,12 @@ export class ShroomVenue {
       args: [],
     });
 
-    const cfg = {
+    // v2's LaunchConfig carries `curveId` (after quoteAsset), so the two
+    // versions encode different calldata and the wrong one reverts rather than
+    // misbehaving quietly. curveId 0 is the standard preset, which reproduces
+    // the v1 curve exactly — so an agent that expresses no curve preference
+    // gets the same launch on both networks.
+    const base = {
       name: opts.meta.name,
       symbol: opts.meta.symbol,
       metadataURI: encodeMetadataUri(opts.meta),
@@ -600,6 +647,28 @@ export class ShroomVenue {
       bindDeadlineSeconds: 0n, // contract default (1h)
       poolKind: PoolKind.Clmm, // mainnet only allows CLMM graduation
     };
+    const curveId = opts.curveId ?? 0;
+    const cfg = this.v2
+      ? {
+          name: base.name,
+          symbol: base.symbol,
+          metadataURI: base.metadataURI,
+          quoteAsset: base.quoteAsset,
+          curveId,
+          gate: base.gate,
+          tradingOpensAt: base.tradingOpensAt,
+          guardWindowEndsAt: base.guardWindowEndsAt,
+          maxBuyBpsInGuardWindow: base.maxBuyBpsInGuardWindow,
+          bindDeadlineSeconds: base.bindDeadlineSeconds,
+          poolKind: base.poolKind,
+        }
+      : base;
+    if (!this.v2 && curveId !== 0) {
+      throw new ToolError(
+        "bad_curve",
+        "this network runs the v1 launchpad, where the curve is fixed per quote asset — curveId is not selectable",
+      );
+    }
 
     const feeUsd = await this.usdValue(this.net.quoteAssets.INJ!.slot, fee);
     const resolveOurId = async (): Promise<bigint | null> => {
@@ -616,9 +685,9 @@ export class ShroomVenue {
 
     const res = await this.signer.writeTx({
       address: this.core,
-      abi: LAUNCHPAD_ABI,
+      abi: (this.v2 ? LAUNCHPAD_WRITE_V2_ABI : LAUNCHPAD_ABI) as never,
       functionName: "createLaunch",
-      args: [cfg],
+      args: [cfg as never],
       value: fee,
       intent: {
         kind: "launch",
