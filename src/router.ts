@@ -136,9 +136,23 @@ function choiceCandidate(m: { address?: string; denom?: string; symbol?: string;
   return { venue: "choice", tokenId: m.address ?? m.denom, symbol: m.symbol, name: m.name };
 }
 
+/**
+ * This launch's id ON ITS OWN CORE — the only id a chain call may use.
+ *
+ * `ApiLaunch.id` is the API's surrogate: unique across cores, and equal to the
+ * on-chain id only while one core exists. Mainnet's first v2 launch is
+ * surrogate 16 and on-chain 0, so feeding a surrogate to `getLaunch`/`buy`
+ * reads a real but DIFFERENT launch. Falls back to `id` only for an API old
+ * enough not to serve the column, which is also an API old enough to have one
+ * core.
+ */
+function onchainIdOf(launch: ApiLaunch): bigint {
+  return BigInt(launch.onchainId ?? launch.id);
+}
+
 function routeLaunch(launch: ApiLaunch): ResolvedTarget {
   if (CURVE_STATES.has(launch.state)) {
-    return { venue: "curve", launch, launchId: BigInt(launch.id) };
+    return { venue: "curve", launch, launchId: onchainIdOf(launch) };
   }
   // `graduatedPoolDenom` and nothing else. `bankDenom` reads like a fallback
   // but it is the launch's QUOTE asset (SAI on every mainnet launch today), not
@@ -150,5 +164,5 @@ function routeLaunch(launch: ApiLaunch): ResolvedTarget {
     return { venue: "choice", tokenId: launch.graduatedPoolDenom, launch };
   }
   // Cancelled/refunded/etc — still return curve so tools can explain why.
-  return { venue: "curve", launch, launchId: BigInt(launch.id) };
+  return { venue: "curve", launch, launchId: onchainIdOf(launch) };
 }

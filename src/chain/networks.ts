@@ -111,6 +111,22 @@ export interface NetworkDef {
     curveRegistry?: Address;
   };
   /**
+   * Cores this network still serves that are NOT `addresses.launchpadCore`.
+   *
+   * `LaunchpadCore` has a plain constructor and no proxy, so every contract
+   * change is a new address and the old core stays live for the launches
+   * already on it — mainnet has served two since 2026-08-24. Each core numbers
+   * its launches from 0, so an on-chain id only means anything against the core
+   * that issued it, and reading one core's id on another does NOT fail: it
+   * returns a real, valid, DIFFERENT launch.
+   *
+   * Every launch-scoped call therefore binds to the core named on the launch
+   * row (`ApiLaunch.core`) via `ShroomVenue.forLaunch`, and an unknown core is
+   * refused rather than guessed at. Only `createLaunch` may assume the current
+   * core, because a new launch has no core yet.
+   */
+  legacyCores?: readonly CoreDeployment[];
+  /**
    * The launchpad's tokenfactory issuer — launch tokens live at
    * `factory/<issuer>/<prefix>_<launchId>_<hash>`.
    *
@@ -165,10 +181,25 @@ const MAINNET: NetworkDef = {
   choiceApiBase: "https://api.choice.exchange",
   terminalBase: "https://trade.trippyinj.xyz",
   addresses: {
-    launchpadCore: "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227",
+    // v2, live 2026-08-24 at block 180013452.
+    launchpadCore: "0xd948740da926E8908A08414879490d0D8F96D463",
+    launchpadViews: "0x4a4e90f87F5376E25E235B1d0609857C06f520B6",
+    curveRegistry: "0x684e7dd1E8E3b9777B7f9b373c494Ad8CdaE9B39",
     winj9: "0x0000000088827d2d103ee2d9A6b781773AE03FfB",
     feeTreasury: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
   },
+  legacyCores: [
+    // v1. Closed to NEW launches on chain (`launchesPaused = true`, so its
+    // `nextLaunchId` is frozen at 16) and still trading, graduating and paying
+    // out the 16 launches already on it. Serves its own getters — no views
+    // satellite — and its `Launch` tuple has no `curveId`.
+    {
+      core: "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227",
+      views: "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227",
+      hasCurveId: false,
+      legacy: true,
+    },
+  ],
   // `cwAddresses.issuer` in shroom_launchpad contracts/deployments/injective_mainnet.json
   launchDenomIssuer: "inj13j2rpnlwl30c02d4pzukykwfeyyhelvry9cqte",
   choiceAggregator: "inj1520rsss9aykhkfmuf89nh5hp2jww770z4u3eu0",
@@ -344,6 +375,61 @@ export function quoteAssetBySlot(def: NetworkDef, slot: number): QuoteAssetInfo 
  */
 export function isCurveV2(def: NetworkDef): boolean {
   return Boolean(def.addresses.launchpadViews);
+}
+
+/**
+ * One deployed core and the addresses that belong to it.
+ *
+ * `views` and `curveRegistry` are pinned to their core — a LaunchpadViews reads
+ * ONE core's storage layout — and `hasCurveId` picks the `Launch` tuple shape.
+ * That last flag is config, never a probe: `getLaunch` has the same selector on
+ * both versions, so a wrong shape decodes silently with every field after
+ * `curveId` shifted by one slot.
+ */
+export interface CoreDeployment {
+  core: Address;
+  views: Address;
+  curveRegistry?: Address;
+  hasCurveId: boolean;
+  /** A superseded core, still serving the launches already on it. */
+  legacy: boolean;
+}
+
+/** The core new launches are created on. */
+export function currentCoreDeployment(def: NetworkDef): CoreDeployment {
+  return {
+    core: def.addresses.launchpadCore,
+    views: launchViewsAddress(def),
+    curveRegistry: def.addresses.curveRegistry,
+    hasCurveId: isCurveV2(def),
+    legacy: false,
+  };
+}
+
+/** Every core this network serves, current first. */
+export function coreDeployments(def: NetworkDef): CoreDeployment[] {
+  return [currentCoreDeployment(def), ...(def.legacyCores ?? [])];
+}
+
+/**
+ * Resolve a launch's `ApiLaunch.core` to the deployment that serves it.
+ *
+ * A MISSING core resolves to the current one only while this network has
+ * exactly one — either the row predates the backend's `core` column or the
+ * caller genuinely has one choice, so it is arithmetic rather than a guess.
+ * With several cores it returns null, because that is precisely the case where
+ * guessing picks a real but different launch.
+ *
+ * An UNKNOWN core is always null: this build is older than the backend's list.
+ */
+export function coreDeploymentFor(
+  def: NetworkDef,
+  core: string | null | undefined,
+): CoreDeployment | null {
+  const all = coreDeployments(def);
+  if (!core) return all.length === 1 ? all[0]! : null;
+  const want = core.toLowerCase();
+  return all.find((c) => c.core.toLowerCase() === want) ?? null;
 }
 
 /**

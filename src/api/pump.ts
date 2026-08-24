@@ -32,6 +32,23 @@ export interface ApiLaunch {
   featured: boolean;
   flagged: boolean;
   progressBps?: number;
+  /**
+   * The LaunchpadCore this launch lives on. Optional because an API older than
+   * the multi-core migration does not serve it; absent resolves to the current
+   * core only where a single core is deployed (see `coreDeploymentFor`).
+   */
+  core?: string;
+  /**
+   * This launch's id ON ITS OWN CORE — what every chain call takes.
+   *
+   * 🔴 NOT `id`. `id` is the API's surrogate, unique across cores; the on-chain
+   * id restarts at 0 for each core. They coincided while one core existed, and
+   * stopped the moment a second one deployed: mainnet's first v2 launch is
+   * surrogate 16 and on-chain 0. Passing a surrogate to the chain reads a real
+   * but different launch, so use this everywhere a `launchId: bigint` is
+   * wanted.
+   */
+  onchainId?: string;
 }
 
 export interface ApiTrade {

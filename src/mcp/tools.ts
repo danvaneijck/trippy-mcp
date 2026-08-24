@@ -182,7 +182,7 @@ export async function searchTokens(rt: Runtime, args: { query: string }): Promis
 export async function tokenInfo(rt: Runtime, args: { query: string }): Promise<unknown> {
   const target = await routed(rt, args.query);
   if (target.venue === "curve") {
-    const live = await rt.shroom.getLaunchView(target.launchId);
+    const live = await rt.shroom.forLaunch(target.launch).getLaunchView(target.launchId);
     const q = rt.shroom.quoteInfo(live.quoteAsset);
     const progress =
       live.graduationPairTarget > 0n
@@ -806,11 +806,11 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
     sellAll && target.venue === "choice" ? await sizeChoiceSellAll(rt, target.tokenId) : args.amount;
 
   if (target.venue === "curve") {
-    const { launch, warnings } = await rt.shroom.precheckTrade(target.launchId, args.side);
+    const { launch, warnings } = await rt.shroom.forLaunch(target.launch).precheckTrade(target.launchId, args.side);
     const q = rt.shroom.quoteInfo(launch.quoteAsset);
     if (args.side === "buy") {
       const pairIn = parseHuman(amount, q.decimals);
-      const res = await rt.shroom.quoteBuy(target.launchId, pairIn, rt.signer.address);
+      const res = await rt.shroom.forLaunch(target.launch).quoteBuy(target.launchId, pairIn, rt.signer.address);
       // Both legs priced off the same rate read, so they cannot disagree.
       const [amountInUsd, feeUsd, refundUsd, held] = await Promise.all([
         rt.shroom.usdValue(launch.quoteAsset, pairIn),
@@ -871,7 +871,7 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
       );
     }
     const tokenIn = sellAll && held !== null ? held : parseHuman(amount, 18);
-    const res = await rt.shroom.quoteSell(target.launchId, tokenIn, rt.signer.address);
+    const res = await rt.shroom.forLaunch(target.launch).quoteSell(target.launchId, tokenIn, rt.signer.address);
     const [pairOutUsd, feeUsd] = await Promise.all([
       rt.shroom.usdValue(launch.quoteAsset, res.pairOut),
       rt.shroom.usdValue(launch.quoteAsset, res.fee),
@@ -947,7 +947,7 @@ export async function buy(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<u
   const slippageBps = rt.policy.clampSlippageBps(args.slippageBps);
   const target = await routed(rt, args.query);
   if (target.venue === "curve") {
-    return rt.shroom.buy(target.launchId, args.amount, slippageBps);
+    return rt.shroom.forLaunch(target.launch).buy(target.launchId, args.amount, slippageBps);
   }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   return rt.choice.swap(counter, target.tokenId, args.amount, slippageBps / 100);
@@ -957,7 +957,9 @@ export async function sell(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<
   const slippageBps = rt.policy.clampSlippageBps(args.slippageBps);
   const target = await routed(rt, args.query);
   if (target.venue === "curve") {
-    return rt.shroom.sell(target.launchId, args.amount === "all" ? "all" : args.amount, slippageBps);
+    return rt.shroom
+      .forLaunch(target.launch)
+      .sell(target.launchId, args.amount === "all" ? "all" : args.amount, slippageBps);
   }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   // Same sizing `quote` reports, so the preview and the broadcast agree.

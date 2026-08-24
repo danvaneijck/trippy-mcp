@@ -22,8 +22,12 @@ import { formatUnits, maxUint256, parseUnits, zeroAddress, type Address } from "
 
 import type { PumpApi } from "../../api/pump.js";
 import type { EvmSigner, WriteTxResult } from "../../chain/evm.js";
-import type { NetworkDef, QuoteAssetInfo } from "../../chain/networks.js";
-import { isCurveV2, launchViewsAddress, quoteAssetBySlot } from "../../chain/networks.js";
+import type { CoreDeployment, NetworkDef, QuoteAssetInfo } from "../../chain/networks.js";
+import {
+  coreDeploymentFor,
+  currentCoreDeployment,
+  quoteAssetBySlot,
+} from "../../chain/networks.js";
 import { ToolError } from "../../errors.js";
 import { encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
 import type { CurvePreset } from "./curves.js";
@@ -121,25 +125,56 @@ export class ShroomVenue {
     private readonly signer: EvmSigner,
     private readonly pump: PumpApi,
     private readonly referrer: Address | null,
+    /**
+     * The core this instance acts against. Null = the current one, which is
+     * correct for `createLaunch` and for any network serving a single core.
+     * Set by `forLaunch` for everything scoped to an EXISTING launch.
+     */
+    private readonly bound: CoreDeployment | null = null,
   ) {}
 
+  /**
+   * A clone bound to the core that owns `launch`.
+   *
+   * Every read and write below addresses a launch by a bare on-chain id, and
+   * ids are per core: the same id exists on both deployed cores and naming the
+   * wrong one returns a real, valid, DIFFERENT launch rather than an error. So
+   * a launch-scoped call must go through here, and an unresolvable core is a
+   * refusal — never a fallback to the current core, which is exactly the
+   * substitution this guards against.
+   */
+  forLaunch(launch: { core?: string | null }): ShroomVenue {
+    const dep = coreDeploymentFor(this.net, launch.core);
+    if (!dep) {
+      throw new ToolError(
+        "unknown_core",
+        `this launch lives on LaunchpadCore ${launch.core ?? "(unnamed)"}, which this build does not know. Upgrade trippy-mcp.`,
+      );
+    }
+    return new ShroomVenue(this.net, this.signer, this.pump, this.referrer, dep);
+  }
+
+  private get deployment(): CoreDeployment {
+    return this.bound ?? currentCoreDeployment(this.net);
+  }
+
   private get core(): Address {
-    return this.net.addresses.launchpadCore;
+    return this.deployment.core;
   }
 
   /** Where `getLaunch` / `getQuoteAssetConfig` live: views on v2, core on v1. */
   private get views(): Address {
-    return launchViewsAddress(this.net);
+    return this.deployment.views;
   }
 
   /** True where the launchpad runs CurveRegistry + LaunchpadViews. */
   private get v2(): boolean {
-    return isCurveV2(this.net);
+    return this.deployment.hasCurveId;
   }
 
   /** True where a creator can choose a curve at all. */
   get curvesSelectable(): boolean {
-    return this.v2 && Boolean(this.net.addresses.curveRegistry);
+    return this.v2 && Boolean(this.deployment.curveRegistry);
   }
 
   // ---- reads ---------------------------------------------------------------
@@ -230,7 +265,7 @@ export class ShroomVenue {
    * of over-promising float.
    */
   async curvePresets(): Promise<CurvePreset[] | null> {
-    const registry = this.net.addresses.curveRegistry;
+    const registry = this.deployment.curveRegistry;
     if (!this.v2 || !registry) return null;
 
     const raw = await this.signer.readContract<

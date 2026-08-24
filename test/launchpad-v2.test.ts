@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { toFunctionSelector, type AbiFunction, type AbiParameter } from "viem";
 
-import { getNetwork, isCurveV2, launchViewsAddress, type NetworkDef } from "../src/chain/networks.js";
+import {
+  coreDeploymentFor,
+  coreDeployments,
+  getNetwork,
+  isCurveV2,
+  launchViewsAddress,
+  type NetworkDef,
+} from "../src/chain/networks.js";
 import {
   LAUNCHPAD_ABI,
   LAUNCHPAD_VIEWS_ABI,
@@ -83,10 +90,11 @@ describe("network version detection", () => {
     addresses: { ...def.addresses, launchpadViews: views },
   });
 
-  it("mainnet is v1 today: no views satellite, getters read off the core", () => {
+  it("mainnet is v2 since the 2026-08-24 cutover: getters read off the satellite", () => {
     const net = getNetwork("mainnet");
-    expect(isCurveV2(net)).toBe(false);
-    expect(launchViewsAddress(net)).toBe(net.addresses.launchpadCore);
+    expect(isCurveV2(net)).toBe(true);
+    expect(launchViewsAddress(net)).toBe(net.addresses.launchpadViews);
+    expect(launchViewsAddress(net)).not.toBe(net.addresses.launchpadCore);
   });
 
   it("a network with a views satellite is v2 and reads are routed to it", () => {
@@ -101,5 +109,70 @@ describe("network version detection", () => {
     const net = withViews(getNetwork("mainnet"), undefined);
     expect(isCurveV2(net)).toBe(false);
     expect(launchViewsAddress(net)).toBe(net.addresses.launchpadCore);
+  });
+});
+
+/**
+ * Multi-core resolution.
+ *
+ * An on-chain launch id only means something against the core that issued it,
+ * and every core numbers from 0 — so naming the wrong core does not error, it
+ * returns a real and DIFFERENT launch. These pin the cases where the answer
+ * must be a refusal rather than a best guess.
+ */
+describe("core resolution", () => {
+  const MAINNET_V2 = "0xd948740da926E8908A08414879490d0D8F96D463";
+  const MAINNET_V1 = "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227";
+
+  it("mainnet serves both cores, current first", () => {
+    const all = coreDeployments(getNetwork("mainnet"));
+    expect(all).toHaveLength(2);
+    expect(all[0]!.core.toLowerCase()).toBe(MAINNET_V2.toLowerCase());
+    expect(all[0]!.legacy).toBe(false);
+    expect(all[1]!.core.toLowerCase()).toBe(MAINNET_V1.toLowerCase());
+    expect(all[1]!.legacy).toBe(true);
+  });
+
+  it("each core carries its OWN tuple shape and views address", () => {
+    const net = getNetwork("mainnet");
+    const v2 = coreDeploymentFor(net, MAINNET_V2)!;
+    const v1 = coreDeploymentFor(net, MAINNET_V1)!;
+    // The silent one: v1's Launch tuple has no curveId, so decoding it with
+    // v2's shape shifts every field after it.
+    expect(v2.hasCurveId).toBe(true);
+    expect(v1.hasCurveId).toBe(false);
+    // v1 has no satellite — it answers its own getters.
+    expect(v1.views.toLowerCase()).toBe(MAINNET_V1.toLowerCase());
+    expect(v2.views.toLowerCase()).not.toBe(v2.core.toLowerCase());
+    // And no curve menu.
+    expect(v1.curveRegistry).toBeUndefined();
+    expect(v2.curveRegistry).toBeDefined();
+  });
+
+  it("case-insensitive: the API serves lowercase, the config is checksummed", () => {
+    const net = getNetwork("mainnet");
+    expect(coreDeploymentFor(net, MAINNET_V1.toLowerCase())).not.toBeNull();
+    expect(coreDeploymentFor(net, MAINNET_V2.toUpperCase().replace("0X", "0x"))).not.toBeNull();
+  });
+
+  it("refuses an UNKNOWN core rather than falling back to the current one", () => {
+    const net = getNetwork("mainnet");
+    expect(coreDeploymentFor(net, "0x000000000000000000000000000000000000dead")).toBeNull();
+  });
+
+  it("refuses a MISSING core while several are deployed", () => {
+    // This is the whole point: with two cores a bare id is ambiguous, and the
+    // wrong choice reads a real launch, so there is nothing safe to guess.
+    const net = getNetwork("mainnet");
+    expect(coreDeploymentFor(net, null)).toBeNull();
+    expect(coreDeploymentFor(net, undefined)).toBeNull();
+  });
+
+  it("resolves a MISSING core where exactly one is deployed", () => {
+    // An API older than the `core` column, on a single-core network: there is
+    // one address the launch can be on, so this is arithmetic, not a guess.
+    const net = getNetwork("testnet");
+    if (coreDeployments(net).length !== 1) return;
+    expect(coreDeploymentFor(net, null)).not.toBeNull();
   });
 });
