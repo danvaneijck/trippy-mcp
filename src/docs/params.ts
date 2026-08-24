@@ -19,6 +19,7 @@ import { formatUnits, type Address } from "viem";
 
 import { quoteAssetBySlot } from "../chain/networks.js";
 import type { Runtime } from "../runtime.js";
+import type { CurvePreset } from "../venues/shroom/curves.js";
 
 /** One quote asset's terms for a NEW launch (see `snapshotNote`). */
 export interface QuoteParams {
@@ -52,6 +53,12 @@ export interface LiveParams {
   referralShareBps: number | null;
   treasury: string | null;
   quotes: QuoteParams[];
+  /**
+   * The curve menu, or null where a creator cannot choose one — a v1 network,
+   * where the curve is a property of the quote asset. Null and an empty list
+   * mean different things, so topics must not conflate them.
+   */
+  curves: CurvePreset[] | null;
   /** Reads that failed, so a topic can say "unavailable" rather than guess. */
   errors: string[];
   fetchedAt: string;
@@ -146,11 +153,24 @@ async function readLiveParams(rt: Runtime): Promise<LiveParams> {
 
   if (quotes.length === 0) errors.push("getQuoteAssetConfig: no quote assets readable");
 
+  // Fails soft like everything else here: a network with no registry answers
+  // null (there is no menu), and a registry that will not read answers null
+  // with a note, rather than an empty menu that reads as "no curves offered".
+  let curves: CurvePreset[] | null = null;
+  if (rt.shroom.curvesSelectable) {
+    try {
+      curves = await rt.shroom.curvePresets();
+    } catch (e) {
+      errors.push(`curvePresets: ${reason(e)}`);
+    }
+  }
+
   return {
     creationFeeInj,
     referralShareBps,
     treasury,
     quotes,
+    curves,
     errors,
     fetchedAt: new Date().toISOString(),
   };

@@ -20,6 +20,7 @@ import * as airdrops from "./airdrops.js";
 import * as choice from "./choice.js";
 import { loadLiveParams, type LiveParams } from "./params.js";
 import * as shroomPad from "./shroom_pad.js";
+import * as shroomPadCurves from "./shroom_pad_curves.js";
 import * as shroomPadFees from "./shroom_pad_fees.js";
 import * as shroomPadQuotes from "./shroom_pad_quotes.js";
 
@@ -34,6 +35,7 @@ export interface DocTopic {
 export const TOPICS: readonly DocTopic[] = [
   shroomPad,
   shroomPadQuotes,
+  shroomPadCurves,
   shroomPadFees,
   choice,
   agentWallet,
@@ -46,10 +48,22 @@ export function findTopic(id: string): DocTopic | undefined {
   return TOPICS.find((t) => t.id === id);
 }
 
-/** The index an agent gets when it calls `explain` with no topic. */
-export function topicIndex(): Record<string, unknown> {
+/**
+ * The index an agent gets when it calls `explain` with no topic.
+ *
+ * Curve choice is listed only where it exists. On a deployment with no
+ * `CurveRegistry` the curve is a property of the quote asset and a creator has
+ * nothing to pick, so advertising the topic would be advertising a decision the
+ * agent cannot make. The topic still RENDERS if asked for by name — and says so
+ * — because an agent that read about it elsewhere deserves an answer rather
+ * than an unknown-topic error.
+ */
+export function topicIndex(rt: Runtime): Record<string, unknown> {
+  const listed = rt.shroom.curvesSelectable
+    ? TOPICS
+    : TOPICS.filter((t) => t.id !== shroomPadCurves.id);
   return {
-    topics: TOPICS.map((t) => ({ topic: t.id, title: t.title, summary: t.summary })),
+    topics: listed.map((t) => ({ topic: t.id, title: t.title, summary: t.summary })),
     usage: "call explain again with one of these `topic` values for the full explanation",
     note: "every number in these topics is read from the chain at call time, so they cannot go stale between package releases",
   };
@@ -66,7 +80,7 @@ export interface Explanation {
 }
 
 export async function explain(rt: Runtime, topicId?: string): Promise<Record<string, unknown>> {
-  if (!topicId) return topicIndex();
+  if (!topicId) return topicIndex(rt);
 
   const topic = findTopic(topicId);
   if (!topic) {
@@ -121,6 +135,10 @@ function liveParamsFor(topicId: string, p: LiveParams): Record<string, unknown> 
       return { creationFeeInj: p.creationFeeInj, quotes };
     case "shroom_pad_quotes":
       return { quotes, referralShareBps: p.referralShareBps };
+    case "shroom_pad_curves":
+      // `curves: null` is not an empty menu — it means this deployment has no
+      // registry at all. Passed through as-is so an agent can tell them apart.
+      return { curves: p.curves, quotes };
     case "shroom_pad_fees":
       return {
         creationFeeInj: p.creationFeeInj,
