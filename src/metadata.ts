@@ -140,8 +140,17 @@ export async function resolveImage(
   } catch {
     throw new ToolError("bad_image", `cannot read image file at ${imagePath}`);
   }
-  if (bytes.length > 5 * 1024 * 1024) {
-    throw new ToolError("bad_image", "image larger than 5MB");
+  // Mirrors the backend's `UPLOAD_MAX_BYTES` (2 MB). It used to say 5 MB, which
+  // meant a 2-5 MB logo was read, POSTed, and rejected by the server — a
+  // round trip and a worse error for something knowable locally. The backend
+  // downscales into a 512px box and re-encodes to (animated) webp itself, so
+  // this is purely a transfer cap, not a quality one.
+  if (bytes.length > 2 * 1024 * 1024) {
+    throw new ToolError(
+      "bad_image",
+      `image is ${(bytes.length / 1024 / 1024).toFixed(2)} MB — the launchpad accepts up to 2 MB`,
+      "the server downscales to 512px and re-encodes to webp anyway, so shrink it to fit and nothing is lost",
+    );
   }
   const { url } = await pump.uploadImage(new Uint8Array(bytes), `logo${extname(imagePath)}`, mime);
   return url;

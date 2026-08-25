@@ -936,6 +936,8 @@ export class ShroomVenue {
     onchainId: string;
     /** The core it was created on, so the id above can be resolved later. */
     core: string;
+    /** Unix seconds public trading opens; 0 = immediately. */
+    tradingOpensAt: number;
     token: string | null;
     state: string;
     hash: string | null;
@@ -1045,6 +1047,7 @@ export class ShroomVenue {
       return {
         onchainId: predictedId.toString(),
         core: this.core,
+        tradingOpensAt: Number(timing.tradingOpensAt),
         token: null,
         state: "dry-run",
         hash: null,
@@ -1094,6 +1097,7 @@ export class ShroomVenue {
     return {
       onchainId: launchId.toString(),
       core: this.core,
+      tradingOpensAt: Number(timing.tradingOpensAt),
       token,
       state: LAUNCH_STATE_LABEL[state] ?? String(state),
       hash: res.hash,

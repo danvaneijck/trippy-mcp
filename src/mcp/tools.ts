@@ -1141,6 +1141,20 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
     }
   }
 
+  // The exclusive window has to contain the keeper bind AND this buy. Binds run
+  // ~30s and have been seen at 65s, so a short delay can lapse before the buy
+  // lands — the buy still succeeds, it is just a public one, and the launch is
+  // then open at a moment every watcher can predict. Say so: the alternative is
+  // reporting a dev buy that quietly bought nothing it was promised.
+  if (created.tradingOpensAt > 0 && initialBuy !== undefined) {
+    const openedAt = created.tradingOpensAt * 1000;
+    if (Date.now() >= openedAt) {
+      created.warnings.push(
+        `the exclusive window closed at ${new Date(openedAt).toISOString()}, before the opening buy landed — that buy competed with everyone else. Bind latency ate the delay; use a longer devBuyDelaySeconds next time.`,
+      );
+    }
+  }
+
   // Everything the caller does next — token_info, quote, the Terminal link —
   // speaks the API's surrogate id, and it is NOT the id the chain just assigned
   // (the next launch is on-chain 114, which is an unrelated existing coin as a
