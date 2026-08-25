@@ -32,6 +32,17 @@ export const sources = [
   "LaunchpadCore.getQuoteAssetConfig(slot) for the base raise each preset scales (live read)",
 ];
 
+/**
+ * A bps share as a percentage, or an honest gap.
+ *
+ * "unavailable" and not "0.00%": float is the number a creator picks a preset
+ * ON, and a fabricated zero reads as a fact about the curve rather than as a
+ * failed read of the registry.
+ */
+function pct(bps: number | null): string {
+  return bps === null ? "unavailable (registry read failed)" : `${(bps / 100).toFixed(2)}%`;
+}
+
 /** Total supply of every launch token — fixed by the launchpad, not the curve. */
 const TOTAL_SUPPLY = 1_000_000_000;
 
@@ -50,8 +61,8 @@ function presetBlock(c: CurvePreset, p: LiveParams): string {
 
   return `### ${c.name}  —  curveId ${c.id}${flag}
 
-  float                 ${(c.floatBps / 100).toFixed(2)}% of supply reaches the market through the curve
-  pool liquidity        ${(c.lpBps / 100).toFixed(2)}% of supply is locked to seed the graduated pool
+  float                 ${pct(c.floatBps)} of supply reaches the market through the curve
+  pool liquidity        ${pct(c.lpBps)} of supply is locked to seed the graduated pool
   price run             ${priceRunX(c.rBps).toFixed(1)}x from the first buy to graduation
   raise multiplier      ${mul}x the quote's base target${mul === 1 ? " (the standard raise)" : ""}
   available on          ${quotes.length > 0 ? quotes.join(", ") : "no enabled quote asset"}`;

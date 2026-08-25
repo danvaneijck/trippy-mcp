@@ -14,6 +14,8 @@
 
 import { formatUnits } from "viem";
 
+import { asApiLaunchId } from "../api/pump.js";
+import { coreDeploymentFor } from "../chain/networks.js";
 import { ToolError } from "../errors.js";
 import { evmToInj } from "../keystore.js";
 import type { Runtime } from "../runtime.js";
@@ -277,8 +279,15 @@ async function launchHolders(
   if (!/^\d+$/.test(launchIdRaw)) {
     throw new ToolError("bad_input", `launchId must be numeric, got "${launchIdRaw}"`);
   }
-  const launchId = BigInt(launchIdRaw);
-  const live = await rt.shroom.getLaunchView(launchId);
+  // `launchId` is the surrogate every tool prints, so it is resolved through
+  // the API and the read is bound to the core that issued the launch. Reading
+  // it as a bare on-chain id on the current core returned a real but DIFFERENT
+  // launch, and the holders of that one would have been the airdrop's
+  // recipients — with nothing in the output to say so.
+  const row = await rt.pump.getLaunch(asApiLaunchId(launchIdRaw)).catch(() => null);
+  if (!row) throw new ToolError("not_found", `no SHROOM launch #${launchIdRaw}`);
+  const venue = rt.shroom.forLaunch(row);
+  const live = await venue.getLaunchView(BigInt(row.onchainId ?? row.id));
   if (live.state === LaunchState.Reserved || live.state === LaunchState.Created) {
     throw new ToolError(
       "not_bound",
@@ -317,8 +326,11 @@ async function launchHolders(
   const all = await denomOwners(rt.net.grpcUrl, tokenDenom, 18);
   // The EVM-side contracts hold the token under their bech32 mirror — the same
   // 20 bytes, addressed the way the bank module indexes them.
-  const launchOwned = [live.sink, rt.net.addresses.launchpadCore, rt.net.addresses.feeTreasury].map(
-    (a) => evmToInj(a as `0x${string}`),
+  // The core to exclude is the one that ISSUED this launch, not whichever one
+  // is current — a superseded core still holds its own launches' balances.
+  const issuingCore = coreDeploymentFor(rt.net, row.core)?.core ?? rt.net.addresses.launchpadCore;
+  const launchOwned = [live.sink, issuingCore, rt.net.addresses.feeTreasury].map((a) =>
+    evmToInj(a as `0x${string}`),
   );
   return filterHolders(
     all,

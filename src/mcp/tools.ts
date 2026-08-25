@@ -9,7 +9,7 @@
  *    on SHROOM Pad (EVM), everything else through the Choice aggregator
  */
 
-import { formatUnits } from "viem";
+import { formatUnits, parseUnits } from "viem";
 
 import {
   execute as executeAirdrop,
@@ -19,8 +19,15 @@ import {
 } from "../airdrops/campaign.js";
 import { manage as manageAirdrop, type ManageArgs } from "../airdrops/manage.js";
 import { cw20Balance, cw20TokenInfo, isCw20Id } from "../api/cw20.js";
-import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
-import { quoteAssetBySlot, type QuoteAssetInfo } from "../chain/networks.js";
+import { asApiLaunchId, type ApiCandle, type ApiLaunch, type ApiLaunchId, type ApiTrade } from "../api/pump.js";
+import {
+  coreDeploymentFor,
+  coreDeployments,
+  quoteAssetBySlot,
+  type QuoteAssetInfo,
+} from "../chain/networks.js";
+import { smartQuery } from "../airdrops/wasm.js";
+import { evmToInj } from "../keystore.js";
 import { explain as explainTopic } from "../docs/index.js";
 import { ToolError } from "../errors.js";
 import { IdentityRegistry } from "../identity/registry.js";
@@ -95,7 +102,7 @@ function rememberQuoteAsset(rt: Runtime, launch: ApiLaunch): void {
   quoteAssetMemo(rt).set(launch.id, quoteAssetBySlot(rt.net, launch.quoteAsset) ?? null);
 }
 
-async function quoteAssetForLaunch(rt: Runtime, launchId: string): Promise<QuoteAssetInfo | null> {
+async function quoteAssetForLaunch(rt: Runtime, launchId: ApiLaunchId): Promise<QuoteAssetInfo | null> {
   const memo = quoteAssetMemo(rt);
   const hit = memo.get(launchId);
   if (hit !== undefined) return hit;
@@ -370,7 +377,9 @@ export async function recentTrades(
     const target = await routed(rt, args.query);
     if (target.venue === "curve") {
       rememberQuoteAsset(rt, target.launch);
-      const { items } = await rt.pump.getTrades(target.launchId, limit);
+      // The API is keyed by the SURROGATE id; `target.launchId` is the
+      // on-chain one and fetches a different launch's tape.
+      const { items } = await rt.pump.getTrades(target.launch.id, limit);
       return { trades: await tradeSummaries(rt, items) };
     }
     // A graduated launch IS a SHROOM launch — saying otherwise sends the reader
@@ -502,7 +511,9 @@ export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> 
 
   if (target.venue === "curve") {
     const q = rt.shroom.quoteInfo(target.launch.quoteAsset);
-    const res = await rt.pump.getCandles(target.launchId, { interval, limit });
+    // Surrogate id — see `getTrades` above. This one was the worse of the two:
+    // the payload is labelled with the id the caller asked for.
+    const res = await rt.pump.getCandles(target.launch.id, { interval, limit });
     const rows = shapeCurveCandles(res.items, q.decimals);
     return {
       venue: "curve",
@@ -1020,8 +1031,9 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
   let initialBuy: unknown = undefined;
   if (args.initialBuy && created.state === "Trading") {
     try {
+      // On-chain id, on the core we just created against — the chain's namespace.
       initialBuy = await rt.shroom.buy(
-        BigInt(created.launchId),
+        BigInt(created.onchainId),
         args.initialBuy,
         rt.policy.clampSlippageBps(undefined),
       );
@@ -1030,13 +1042,29 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
     }
   }
 
+  // Everything the caller does next — token_info, quote, the Terminal link —
+  // speaks the API's surrogate id, and it is NOT the id the chain just assigned
+  // (the next launch is on-chain 114, which is an unrelated existing coin as a
+  // surrogate). The token address is the only handle that crosses, so resolve
+  // through it rather than printing an id that names someone else's launch.
+  const row = created.token ? await findLaunchByToken(rt, created.token) : null;
+  const warnings = [...created.warnings];
+  if (created.status !== "dry-run" && !row) {
+    warnings.push(
+      "the pad API has not indexed this launch yet, so it has no launch id to quote at — look it up by its token address in a moment",
+    );
+  }
+
   return {
     ...created,
+    launchId: row?.id ?? null,
     ...(chosen ? { curve: curveSummary(chosen.preset) } : {}),
     ...(initialBuy !== undefined ? { initialBuy } : {}),
-    ...(rt.net.terminalBase
-      ? { terminalUrl: `${rt.net.terminalBase}/t/shroom-curve%3A${created.launchId}` }
+    ...(rt.net.terminalBase && row
+      ? { terminalUrl: `${rt.net.terminalBase}/t/shroom-curve%3A${row.id}` }
       : {}),
+    warnings,
+    note: "`launchId` is the id every other tool takes; `onchainId` is this launch's id on its own core and is only for raw chain calls",
   };
 }
 
@@ -1095,25 +1123,83 @@ function curveSummary(c: CurvePreset): Record<string, unknown> {
   return {
     curveId: c.id,
     name: c.name,
-    floatPct: c.floatBps / 100,
-    poolLiquidityPct: c.lpBps / 100,
+    floatPct: c.floatBps === null ? null : c.floatBps / 100,
+    poolLiquidityPct: c.lpBps === null ? null : c.lpBps / 100,
     priceRunX: Number(priceRunX(c.rBps).toFixed(2)),
     raiseMultiplier: c.targetMulBps / 10_000,
   };
 }
 
+/**
+ * Claim creator fees, referral fees and refunds across EVERY deployed core.
+ *
+ * Two things this has to get right, both of which broke when a second core
+ * deployed. The ids a caller passes are the surrogates every other tool prints,
+ * so they are resolved through the API rather than handed to the chain, where
+ * they would name a different launch. And each core keeps its OWN referral and
+ * refund ledgers, so the superseded core has to be visited even when no launch
+ * id names it — otherwise everything owed on it is simply unreachable.
+ */
 export async function claimFees(rt: Runtime, args: { launchIds?: string[] }): Promise<unknown> {
-  const ids = (args.launchIds ?? []).map((s) => {
-    if (!/^\d+$/.test(s)) throw new ToolError("bad_input", `launchIds must be numeric, got "${s}"`);
-    return BigInt(s);
-  });
-  const res = await rt.shroom.claimAll(ids);
+  const rows: ApiLaunch[] = [];
+  for (const raw of args.launchIds ?? []) {
+    if (!/^\d+$/.test(raw)) {
+      throw new ToolError("bad_input", `launchIds must be numeric, got "${raw}"`);
+    }
+    const row = await rt.pump.getLaunch(asApiLaunchId(raw)).catch(() => null);
+    if (!row) throw new ToolError("not_found", `no SHROOM launch #${raw}`);
+    // Refuse a core this build cannot name rather than dropping the launch out
+    // of every per-core batch below and reporting "nothing to claim".
+    if (!coreDeploymentFor(rt.net, row.core)) {
+      throw new ToolError(
+        "unknown_core",
+        `launch #${raw} lives on LaunchpadCore ${row.core ?? "(unnamed)"}, which this build does not know. Upgrade trippy-mcp.`,
+      );
+    }
+    rows.push(row);
+  }
+
+  const creatorFees: { launchId: string; amount: string }[] = [];
+  const referralFees: { pairAsset: string; symbol: string; amount: string }[] = [];
+  const txHashes: string[] = [];
+  const notes = new Set<string>();
+  let refundBase = 0n;
+
+  for (const dep of coreDeployments(rt.net)) {
+    const mine = rows.filter(
+      (r) => coreDeploymentFor(rt.net, r.core)?.core.toLowerCase() === dep.core.toLowerCase(),
+    );
+    const bySurrogate = new Map(mine.map((r) => [String(r.onchainId ?? r.id), r.id]));
+    const res = await rt.shroom
+      .forLaunch({ core: dep.core })
+      .claimAll(mine.map((r) => BigInt(r.onchainId ?? r.id)));
+
+    for (const c of res.creatorFees) {
+      creatorFees.push({ launchId: bySurrogate.get(c.onchainId) ?? c.onchainId, amount: c.amount });
+    }
+    referralFees.push(...res.referralFees);
+    txHashes.push(...res.txHashes);
+    for (const n of res.notes) {
+      // "nothing to claim" is only worth saying once, about all cores at once.
+      if (!n.startsWith("nothing to claim")) notes.add(n);
+    }
+    if (res.refundInj) {
+      // Base units, not floats: this is a token amount, and two cores can both
+      // owe one (a cancelled launch refunds on the core it was created on).
+      refundBase += parseUnits(res.refundInj, 18);
+    }
+  }
+
+  const refundInj = refundBase > 0n ? formatUnits(refundBase, 18) : null;
+  if (creatorFees.length === 0 && referralFees.length === 0 && refundInj === null) {
+    notes.add("nothing to claim — every ledger on every deployed core is zero");
+  }
   if (!args.launchIds?.length) {
-    res.notes.push(
+    notes.add(
       "creator fees are only checked for launch ids you pass in `launchIds` — referral fees and refunds were checked for the agent wallet",
     );
   }
-  return res;
+  return { creatorFees, referralFees, refundInj, txHashes, notes: [...notes] };
 }
 
 export async function walletStatusTool(rt: Runtime): Promise<unknown> {
@@ -1277,18 +1363,61 @@ export async function portfolio(rt: Runtime): Promise<unknown> {
  * `curveHoldingRow` — written for exactly this case — never ran.
  *
  * The issuer prefix is the check. Tokenfactory only lets an address mint under
- * its own namespace, so a denom under the launchpad's issuer cannot be spoofed
- * and the launch id it carries can be trusted without a second lookup.
+ * its own namespace, so a denom under the launchpad's issuer cannot be spoofed.
+ *
+ * 🔴 The id it carries is the launch's id ON ITS OWN CORE, and every core mints
+ * under the SAME issuer — so it is neither unique nor in the API's namespace.
+ * Mainnet's two cores collide outright on ids 0..15 (`shroom_9_31dcaf…` and
+ * `shroom_9_f28bdc…` are different tokens), and handing that id to the API
+ * resolves a real but unrelated launch: `shroom_108_…` is INJEGG, while API
+ * launch 108 is PEDRO. So the id is resolved against each core in turn, and the
+ * salt in the subdenom breaks a tie.
  */
 export async function launchFromDenom(rt: Runtime, denom: string): Promise<ApiLaunch | null> {
   const issuer = rt.net.launchDenomIssuer;
   if (!issuer || !denom.startsWith(`factory/${issuer}/`)) return null;
   const subdenom = denom.slice(`factory/${issuer}/`.length);
-  // `<prefix>_<launchId>_<hash>` — the prefix is a deploy-time setting
+  // `<prefix>_<onchainId>_<salt>` — the prefix is a deploy-time setting
   // ("shroom" on mainnet, "shroom_t" on testnet), so anchor on the tail.
-  const id = /^[A-Za-z][A-Za-z_]*_(\d+)_[0-9a-fA-F]+$/.exec(subdenom)?.[1];
-  if (!id) return null;
-  return rt.pump.getLaunch(id).catch(() => null);
+  const onchainId = /^[A-Za-z][A-Za-z_]*_(\d+)_[0-9a-fA-F]+$/.exec(subdenom)?.[1];
+  if (!onchainId) return null;
+
+  const hits: ApiLaunch[] = [];
+  for (const dep of coreDeployments(rt.net)) {
+    const live = await rt.shroom
+      .forLaunch({ core: dep.core })
+      .getLaunchView(BigInt(onchainId))
+      .catch(() => null);
+    if (!live) continue;
+    // The token address is the launch's identity across both namespaces: the
+    // chain gave it to us for (core, onchainId), and the API row it resolves to
+    // has to agree about both before it names the same launch.
+    const row = await findLaunchByToken(rt, live.token);
+    if (!row) continue;
+    if (row.core && row.core.toLowerCase() !== dep.core.toLowerCase()) continue;
+    if (String(row.onchainId ?? row.id) !== onchainId) continue;
+    hits.push(row);
+  }
+  if (hits.length <= 1) return hits[0] ?? null;
+
+  // Two cores both issued a launch at this id. Only the sink knows which of
+  // them minted THIS denom, so ask it rather than picking the newer core —
+  // guessing here mislabels and misprices a holding in the caller's own wallet.
+  for (const row of hits) {
+    const sink = await rt.shroom
+      .forLaunch(row)
+      .getLaunchView(BigInt(row.onchainId ?? row.id))
+      .then((l) => evmToInj(l.sink))
+      .catch(() => null);
+    if (!sink) continue;
+    const cfg = await smartQuery<{ token_denom?: string }>(
+      rt.net.lcdUrl,
+      sink,
+      { sink_config: {} },
+    ).catch(() => null);
+    if (cfg?.token_denom === denom) return row;
+  }
+  return null;
 }
 
 async function findLaunchByToken(rt: Runtime, token: string): Promise<ApiLaunch | null> {

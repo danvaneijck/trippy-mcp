@@ -10,6 +10,13 @@
  * Pure types and arithmetic live here; the chain reads are on `ShroomVenue`.
  */
 
+/**
+ * Positions of `floatBps` / `lpBps` in `CurveRegistry.shapeOf`'s return tuple
+ * `(tokensAtGrad, lpTokens, totalSupply, floatBps, lpBps)`.
+ */
+export const SHAPE_FLOAT_BPS = 3;
+export const SHAPE_LP_BPS = 4;
+
 /** One entry of the menu, as an agent sees it. */
 export interface CurvePreset {
   /**
@@ -33,10 +40,16 @@ export interface CurvePreset {
   /** Bit `q` set => legal on quote slot `q`. See `presetAllowedOnQuote`. */
   quoteMask: number;
   enabled: boolean;
-  /** Share of total supply reaching the market through the curve, in bps. */
-  floatBps: number;
-  /** Share held back to seed the graduation pool, in bps. */
-  lpBps: number;
+  /**
+   * Share of total supply reaching the market through the curve, in bps.
+   *
+   * Null when the registry's `shapeOf` would not read. Nullable rather than 0
+   * on purpose: a zero float is a claim about the launch, and the wrong one —
+   * an absent number has to render as absent everywhere it is shown.
+   */
+  floatBps: number | null;
+  /** Share held back to seed the graduation pool, in bps. Null: see `floatBps`. */
+  lpBps: number | null;
   /** Virtual token reserve, whole tokens (launch tokens are 18-decimal). */
   virtualToken: number;
 }

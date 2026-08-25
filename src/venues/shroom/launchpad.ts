@@ -30,7 +30,7 @@ import {
 } from "../../chain/networks.js";
 import { ToolError } from "../../errors.js";
 import { encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
-import type { CurvePreset } from "./curves.js";
+import { SHAPE_FLOAT_BPS, SHAPE_LP_BPS, type CurvePreset } from "./curves.js";
 import {
   CURVE_REGISTRY_ABI,
   ERC20_ABI,
@@ -284,10 +284,15 @@ export class ShroomVenue {
       args: [],
     });
 
+    // 🔴 `shapeOf` has FIVE outputs, so it decodes to a positional tuple, not
+    // an object — viem only keys a result by name for a single struct return.
+    // Reading `.floatBps` off it yielded `undefined` -> `NaN` -> `null` on the
+    // wire, and the `shape ? … : 0` guard never fired because an array is
+    // truthy. Indices, and a test that asserts the arity.
     const shapes = await Promise.all(
       raw.map((_, i) =>
         this.signer
-          .readContract<{ floatBps: bigint; lpBps: bigint }>({
+          .readContract<readonly [bigint, bigint, bigint, bigint, bigint]>({
             address: registry,
             abi: CURVE_REGISTRY_ABI,
             functionName: "shapeOf",
@@ -307,8 +312,8 @@ export class ShroomVenue {
         targetMulBps: Number(p.targetMulBps),
         quoteMask: Number(p.quoteMask),
         enabled: Boolean(p.enabled),
-        floatBps: shape ? Number(shape.floatBps) : 0,
-        lpBps: shape ? Number(shape.lpBps) : 0,
+        floatBps: shape ? Number(shape[SHAPE_FLOAT_BPS]) : null,
+        lpBps: shape ? Number(shape[SHAPE_LP_BPS]) : null,
         virtualToken: Number(formatUnits(BigInt(p.virtualToken), 18)),
       };
     });
@@ -701,7 +706,14 @@ export class ShroomVenue {
     /** CurveRegistry preset (v2 only). Omitted / 0 = the standard curve. */
     curveId?: number;
   }): Promise<{
-    launchId: string;
+    /**
+     * The new launch's id ON THE CORE THAT ISSUED IT. Deliberately not called
+     * `launchId`: every user-facing surface prints the API's surrogate under
+     * that name, and the two are different numbers. Chain calls take this one.
+     */
+    onchainId: string;
+    /** The core it was created on, so the id above can be resolved later. */
+    core: string;
     token: string | null;
     state: string;
     hash: string | null;
@@ -801,7 +813,8 @@ export class ShroomVenue {
 
     if (res.status === "dry-run") {
       return {
-        launchId: predictedId.toString(),
+        onchainId: predictedId.toString(),
+        core: this.core,
         token: null,
         state: "dry-run",
         hash: null,
@@ -849,7 +862,8 @@ export class ShroomVenue {
     }
 
     return {
-      launchId: launchId.toString(),
+      onchainId: launchId.toString(),
+      core: this.core,
       token,
       state: LAUNCH_STATE_LABEL[state] ?? String(state),
       hash: res.hash,
@@ -861,8 +875,17 @@ export class ShroomVenue {
 
   // ---- claims --------------------------------------------------------------
 
+  /**
+   * Claim everything this wallet is owed ON THIS VENUE'S CORE.
+   *
+   * `launchIds` are on-chain ids and must belong to the bound core — creator
+   * fees are a per-launch ledger, and the same id names a different launch on
+   * every other core. Referral fees and refunds are per-WALLET ledgers, but
+   * each core keeps its own, so a caller with several cores has to run this
+   * against each of them; `claim_fees` does.
+   */
   async claimAll(launchIds: bigint[]): Promise<{
-    creatorFees: { launchId: string; amount: string }[];
+    creatorFees: { onchainId: string; amount: string }[];
     referralFees: { pairAsset: string; symbol: string; amount: string }[];
     refundInj: string | null;
     txHashes: string[];
@@ -952,7 +975,7 @@ export class ShroomVenue {
 
     return {
       creatorFees: creatorOwed.map((c) => ({
-        launchId: c.launchId.toString(),
+        onchainId: c.launchId.toString(),
         amount: `${formatUnits(c.amount, c.q.decimals)} ${c.q.symbol}`,
       })),
       referralFees: referral,

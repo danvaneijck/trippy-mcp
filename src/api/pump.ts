@@ -8,8 +8,30 @@
 
 import { ToolError } from "../errors.js";
 
+/**
+ * The pad API's SURROGATE launch id — the only id any endpoint on this client
+ * accepts. Branded so the compiler refuses the on-chain id, which is a
+ * different number in a different namespace and, fed to `/launches/:id`,
+ * returns a real but DIFFERENT launch instead of a 404.
+ *
+ * The two coincided while one core existed and diverged the moment a second
+ * deployed: mainnet's surrogate 234 is on-chain 108, and surrogate 108 is
+ * on-chain 46. Every crossing this brand has caught was silent.
+ */
+export type ApiLaunchId = string & { readonly __brand: "ApiLaunchId" };
+
+/**
+ * Assert that a string is a surrogate id. Use ONLY where the value provably
+ * came from the API's own `id` field or from a caller naming a launch the way
+ * the tools report it — never on an id read off the chain or out of a denom.
+ */
+export function asApiLaunchId(id: string | number): ApiLaunchId {
+  return String(id) as ApiLaunchId;
+}
+
 export interface ApiLaunch {
-  id: string;
+  /** 🔴 The API's surrogate id, NOT the on-chain id — see `onchainId`. */
+  id: ApiLaunchId;
   creator: string;
   token: string;
   quoteAsset: number;
@@ -54,7 +76,8 @@ export interface ApiLaunch {
 export interface ApiTrade {
   txHash: string;
   logIndex: number;
-  launchId: string;
+  /** Surrogate id, same namespace as `ApiLaunch.id`. */
+  launchId: ApiLaunchId;
   blockNumber: string;
   blockTime: string;
   trader: string;
@@ -178,15 +201,15 @@ export class PumpApi {
     });
   }
 
-  getLaunch(id: string | number | bigint): Promise<ApiLaunch> {
+  getLaunch(id: ApiLaunchId): Promise<ApiLaunch> {
     return this.get(`/launches/${id}`);
   }
 
-  getTrades(launchId: string | bigint, limit = 20): Promise<{ items: ApiTrade[] }> {
+  getTrades(launchId: ApiLaunchId, limit = 20): Promise<{ items: ApiTrade[] }> {
     return this.get(`/launches/${launchId}/trades`, { limit });
   }
 
-  getHolders(launchId: string | bigint, limit = 20): Promise<{ items: unknown[] }> {
+  getHolders(launchId: ApiLaunchId, limit = 20): Promise<{ items: unknown[] }> {
     return this.get(`/launches/${launchId}/holders`, { limit });
   }
 
@@ -195,7 +218,7 @@ export class PumpApi {
   }
 
   getCandles(
-    launchId: string | bigint,
+    launchId: ApiLaunchId,
     opts: { interval?: string; from?: number; to?: number; limit?: number },
   ): Promise<{ interval: string; from: number; to: number; items: ApiCandle[] }> {
     return this.get(`/launches/${launchId}/candles`, {
