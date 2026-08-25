@@ -402,8 +402,18 @@ export async function serve(): Promise<void> {
     "create_token",
     'Launch a new token on SHROOM Pad (bonding curve, graduates to a Choice CLMM pool). Costs the on-chain creation fee (read it live with explain("shroom_pad_fees") — it is owner-settable and has changed on mainnet) plus optional initialBuy. The launch binds via the keeper within ~a minute — the tool waits and reports the tradable state. Where the deployment offers a curve menu, `curve` picks the shape of the raise and is FROZEN onto the launch forever — read explain("shroom_pad_curves") before choosing one; omitting it uses the standard curve.',
     {
-      name: z.string().min(1).max(48),
-      symbol: z.string().min(1).max(12),
+      name: z
+        .string()
+        .min(1)
+        .max(64)
+        .describe(
+          "display name. The chain's limit is 64 UTF-8 BYTES, not characters — accents, CJK and emoji each cost several, and an over-long name is DROPPED at creation, leaving the token named after its raw denom forever.",
+        ),
+      symbol: z
+        .string()
+        .min(1)
+        .max(32)
+        .describe("ticker, uppercased. Limit is 32 UTF-8 bytes, and it is permanent."),
       description: z.string().max(500).optional(),
       imageUrl: z.string().optional().describe("https URL of the token image"),
       imagePath: z.string().optional().describe("local file path — uploaded to IPFS via the SHROOM API"),

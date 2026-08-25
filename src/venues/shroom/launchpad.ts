@@ -29,7 +29,7 @@ import {
   quoteAssetBySlot,
 } from "../../chain/networks.js";
 import { ToolError } from "../../errors.js";
-import { encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
+import { assertBrandable, encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
 import { SHAPE_FLOAT_BPS, SHAPE_LP_BPS, type CurvePreset } from "./curves.js";
 import {
   CURVE_REGISTRY_ABI,
@@ -731,6 +731,12 @@ export class ShroomVenue {
     if (await this.isPaused()) {
       throw new ToolError("paused", "the launchpad is paused — launches are temporarily disabled");
     }
+    // Before anything is spent. The chain takes name/symbol once, at
+    // MsgCreateDenom, and DROPS whatever it will not accept rather than
+    // truncating it — so this is the last point at which a bad name is still
+    // fixable instead of permanent.
+    assertBrandable("name", opts.meta.name);
+    assertBrandable("symbol", opts.meta.symbol);
     const q = this.net.quoteAssets[opts.quoteSymbol];
     if (!q) throw new ToolError("bad_quote", `unknown quote asset ${opts.quoteSymbol}`);
 
