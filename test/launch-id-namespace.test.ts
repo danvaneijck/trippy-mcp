@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { asApiLaunchId, type ApiLaunch } from "../src/api/pump.js";
-import { candles, claimFees, createToken, recentTrades } from "../src/mcp/tools.js";
+import { buy, candles, claimFees, createToken, recentTrades, sell } from "../src/mcp/tools.js";
 import { ShroomVenue } from "../src/venues/shroom/launchpad.js";
 import { allowedTargetsFor, type Runtime } from "../src/runtime.js";
 import { NETWORKS, coreDeployments, quoteAssetBySlot } from "../src/chain/networks.js";
@@ -172,7 +172,7 @@ describe("claim_fees", () => {
 describe("create_token", () => {
   const TOKEN = `0x${"c7".repeat(20)}`;
 
-  function createRt(indexed: ApiLaunch | null): Runtime {
+  function createRt(indexed: ApiLaunch | null): Runtime & Record<string, any> {
     return {
       net: NETWORKS.mainnet,
       pump: {
@@ -209,6 +209,17 @@ describe("create_token", () => {
     expect(res.terminalUrl).toBe("https://trade.trippyinj.xyz/t/shroom-curve%3A247");
   });
 
+  it("tags the opening buy with the surrogate too", async () => {
+    const rt = createRt(row({ id: "247", onchainId: "114", token: TOKEN }));
+    rt.shroom.buy = async () => ({ onchainId: "114", side: "buy", status: "confirmed", hash: "0x1" });
+    rt.policy = { clampSlippageBps: () => 100 };
+    const res = (await createToken(rt, { name: "T", symbol: "T", initialBuy: "1" })) as {
+      initialBuy: { launchId: string | null; onchainId: string };
+    };
+    expect(res.initialBuy.launchId).toBe("247");
+    expect(res.initialBuy.onchainId).toBe("114");
+  });
+
   it("says so rather than inventing a link when the API has not indexed the launch yet", async () => {
     const res = (await createToken(createRt(null), { name: "Test", symbol: "TEST" })) as {
       launchId: string | null;
@@ -218,6 +229,50 @@ describe("create_token", () => {
     expect(res.launchId).toBeNull();
     expect(res.terminalUrl).toBeUndefined();
     expect(res.warnings.join(" ")).toMatch(/has not indexed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// a trade result names the launch the caller asked for
+// ---------------------------------------------------------------------------
+
+describe("buy / sell results", () => {
+  function tradeRt(launch: ApiLaunch) {
+    return {
+      net: NETWORKS.mainnet,
+      policy: { clampSlippageBps: () => 100 },
+      pump: {
+        getLaunch: async (id: string) => {
+          if (id !== launch.id) throw new Error("not found");
+          return launch;
+        },
+      },
+      shroom: {
+        forLaunch: () => ({
+          // What ShroomVenue really returns: the id it executed against.
+          buy: async (id: bigint) => ({ onchainId: id.toString(), side: "buy", status: "confirmed" }),
+          sell: async (id: bigint) => ({ onchainId: id.toString(), side: "sell", status: "confirmed" }),
+        }),
+      },
+    } as unknown as Runtime;
+  }
+
+  it("reports the surrogate the caller traded, not the id it executed against", async () => {
+    // Live fire caught this: buying launch 21 (MASK, on-chain 2 on the current
+    // core) came back as `launchId: "2"`, which is BALLS on the other core.
+    const rt = tradeRt(row({ id: "21", onchainId: "2" }));
+    const b = (await buy(rt, { query: "21", amount: "0.1" })) as {
+      launchId: string;
+      onchainId: string;
+    };
+    expect(b.launchId).toBe("21");
+    expect(b.onchainId).toBe("2");
+  });
+
+  it("does the same on the sell side", async () => {
+    const rt = tradeRt(row({ id: "21", onchainId: "2" }));
+    const s = (await sell(rt, { query: "21", amount: "all" })) as { launchId: string };
+    expect(s.launchId).toBe("21");
   });
 });
 

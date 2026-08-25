@@ -965,7 +965,8 @@ export async function buy(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<u
   const slippageBps = rt.policy.clampSlippageBps(args.slippageBps);
   const target = await routed(rt, args.query);
   if (target.venue === "curve") {
-    return rt.shroom.forLaunch(target.launch).buy(target.launchId, args.amount, slippageBps);
+    const res = await rt.shroom.forLaunch(target.launch).buy(target.launchId, args.amount, slippageBps);
+    return { ...res, launchId: target.launch.id };
   }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   return rt.choice.swap(counter, target.tokenId, args.amount, slippageBps / 100);
@@ -975,9 +976,10 @@ export async function sell(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<
   const slippageBps = rt.policy.clampSlippageBps(args.slippageBps);
   const target = await routed(rt, args.query);
   if (target.venue === "curve") {
-    return rt.shroom
+    const res = await rt.shroom
       .forLaunch(target.launch)
       .sell(target.launchId, args.amount === "all" ? "all" : args.amount, slippageBps);
+    return { ...res, launchId: target.launch.id };
   }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   // Same sizing `quote` reports, so the preview and the broadcast agree.
@@ -1065,8 +1067,10 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
   return {
     ...created,
     launchId: row?.id ?? null,
+    ...(initialBuy && typeof initialBuy === "object" && "onchainId" in initialBuy
+      ? { initialBuy: { ...initialBuy, launchId: row?.id ?? null } }
+      : {}),
     ...(chosen ? { curve: curveSummary(chosen.preset) } : {}),
-    ...(initialBuy !== undefined ? { initialBuy } : {}),
     ...(rt.net.terminalBase && row
       ? { terminalUrl: `${rt.net.terminalBase}/t/shroom-curve%3A${row.id}` }
       : {}),

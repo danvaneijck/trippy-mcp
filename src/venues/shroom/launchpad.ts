@@ -102,7 +102,14 @@ export interface QuoteAssetConfigView {
 export interface TradeResult {
   hash: string | null;
   status: WriteTxResult["status"];
-  launchId: string;
+  /**
+   * The traded launch's id ON ITS OWN CORE. Deliberately not `launchId`: the
+   * tool layer adds that, and it is the API's surrogate — the id every other
+   * surface prints and the only one a caller can look the launch up by. A buy
+   * of surrogate 21 executes against on-chain 2, and reporting "2" back named
+   * a different, real launch on the other core.
+   */
+  onchainId: string;
   side: "buy" | "sell";
   /** Human units of the pair asset that entered/left the curve. */
   pairAmount: string;
@@ -687,7 +694,7 @@ export class ShroomVenue {
     return {
       hash: res.hash,
       status: res.status,
-      launchId: launchId.toString(),
+      onchainId: launchId.toString(),
       side,
       pairAmount: formatUnits(pairWei, q.decimals),
       tokenAmount: formatUnits(tokenWei, 18),
