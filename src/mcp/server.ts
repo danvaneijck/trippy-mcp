@@ -444,7 +444,7 @@ export async function serve(): Promise<void> {
         .max(2_000)
         .optional()
         .describe(
-          "cap on the creator's pre-open buy, in bps of the graduation raise (default 2000 = 20%, the contract maximum). ALSO capped at 50% of the launch's float, which binds sooner on steeper curves — `steep` tops out at 1154 bps. Only meaningful with devBuyDelaySeconds.",
+          "cap on the creator's pre-open buy, in bps of the graduation raise. Omit it to take the most THIS curve allows: the contract also holds the cap to 50% of the launch's float, which binds sooner on steeper curves, so the ceiling is 2000 on most presets and 1154 on `steep`. An explicit value over that is refused rather than clamped. Only meaningful with devBuyDelaySeconds.",
         ),
       gateToken: z
         .string()

@@ -63,6 +63,17 @@ describe("dev-buy float ceiling", () => {
     }
   });
 
+  it("the default cap is the curve's own maximum, so it never reverts", () => {
+    // `create_token` leaves maxBuyBps unset by default and the venue resolves
+    // it per curve. Defaulting to the absolute 2000 instead would refuse a
+    // `steep` launch over a number the caller never chose.
+    for (const rBps of [1500, 2500, 4000, 7000, 10_000]) {
+      const chosen = Math.min(MAX_DEV_BUY_BPS, maxDevBuyBpsFor(rBps));
+      expect(chosen).toBeGreaterThan(0);
+      expect(devBuyFloatBps(rBps, chosen)).toBeLessThanOrEqual(MAX_DEV_FLOAT_BPS);
+    }
+  });
+
   it("returns 0 for a degenerate curve rather than dividing by zero", () => {
     expect(devBuyFloatBps(0, 2000)).toBe(0);
     expect(maxDevBuyBpsFor(0)).toBe(0);

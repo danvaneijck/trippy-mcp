@@ -1018,9 +1018,6 @@ export interface CreateTokenArgs {
   gateWindowEndsAt?: number;
 }
 
-/** The pad's own default: a 10-minute exclusive window at the 20% cap. */
-const DEFAULT_DEV_BUY_MAX_BPS = 2_000;
-
 /**
  * Turn the flat gate arguments into the contract's `LaunchGate`.
  *
@@ -1121,7 +1118,9 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
       ? {
           devBuy: {
             openDelaySeconds: args.devBuyDelaySeconds,
-            maxBuyBps: args.devBuyMaxBps ?? DEFAULT_DEV_BUY_MAX_BPS,
+            // Left undefined on purpose: the venue defaults it to the most
+            // THIS curve allows, which differs per preset.
+            maxBuyBps: args.devBuyMaxBps,
           },
         }
       : {}),

@@ -780,7 +780,7 @@ export class ShroomVenue {
    * refusal can name the actual maximum for the curve being launched on.
    */
   private async resolveLaunchTiming(
-    devBuy: { openDelaySeconds: number; maxBuyBps: number } | undefined,
+    devBuy: { openDelaySeconds: number; maxBuyBps?: number } | undefined,
     curveId: number,
     quoteSlot: number,
   ): Promise<{ tradingOpensAt: bigint; guardWindowEndsAt: bigint; maxBuyBpsInGuardWindow: number }> {
@@ -796,7 +796,7 @@ export class ShroomVenue {
         `openDelaySeconds ${devBuy.openDelaySeconds} is over the contract's ceiling of ${MAX_OPEN_DELAY_SECONDS} (24h)`,
       );
     }
-    if (devBuy.maxBuyBps <= 0 || devBuy.maxBuyBps > MAX_DEV_BUY_BPS) {
+    if (devBuy.maxBuyBps !== undefined && (devBuy.maxBuyBps <= 0 || devBuy.maxBuyBps > MAX_DEV_BUY_BPS)) {
       throw new ToolError(
         "bad_dev_buy",
         `maxBuyBps must be between 1 and ${MAX_DEV_BUY_BPS} — the contract refuses a pre-open window without a cap that binds it`,
@@ -807,13 +807,24 @@ export class ShroomVenue {
     const preset = this.curvesSelectable
       ? (await this.curvePresets())?.find((p) => p.id === curveId)
       : null;
+
+    // No cap named: take the most this CURVE allows rather than the absolute
+    // maximum. They are the same on six of seven presets, and on `steep` the
+    // absolute maximum reverts — refusing a launch over a default the caller
+    // never chose is a bad trade for one line of arithmetic. An explicit
+    // over-cap value is still refused: silently changing what was asked for is
+    // the one thing that must not happen to a parameter frozen at creation.
+    const maxBuyBps =
+      devBuy.maxBuyBps ??
+      (preset ? Math.min(MAX_DEV_BUY_BPS, maxDevBuyBpsFor(preset.rBps)) : MAX_DEV_BUY_BPS);
+
     if (preset) {
-      const floatBps = devBuyFloatBps(preset.rBps, devBuy.maxBuyBps);
+      const floatBps = devBuyFloatBps(preset.rBps, maxBuyBps);
       if (floatBps > MAX_DEV_FLOAT_BPS) {
         const max = maxDevBuyBpsFor(preset.rBps);
         throw new ToolError(
           "bad_dev_buy",
-          `a ${devBuy.maxBuyBps} bps dev buy takes ${(floatBps / 100).toFixed(2)}% of the float on the "${preset.name}" curve, over the contract's ${MAX_DEV_FLOAT_BPS / 100}% ceiling`,
+          `a ${maxBuyBps} bps dev buy takes ${(floatBps / 100).toFixed(2)}% of the float on the "${preset.name}" curve, over the contract's ${MAX_DEV_FLOAT_BPS / 100}% ceiling`,
           `the most this curve allows is ${max} bps (${(devBuyFloatBps(preset.rBps, max) / 100).toFixed(2)}% of float) — steeper curves hit the ceiling sooner`,
         );
       }
@@ -828,7 +839,7 @@ export class ShroomVenue {
       // where the creator is the only permitted buyer and uncapped, which the
       // contract rejects as the same hole by another route.
       guardWindowEndsAt: opensAt,
-      maxBuyBpsInGuardWindow: devBuy.maxBuyBps,
+      maxBuyBpsInGuardWindow: maxBuyBps,
     };
   }
 
@@ -908,7 +919,7 @@ export class ShroomVenue {
      * trade only — so the opening buy is theirs rather than a public race.
      * The contract refuses exclusivity without a cap that binds it.
      */
-    devBuy?: { openDelaySeconds: number; maxBuyBps: number };
+    devBuy?: { openDelaySeconds: number; maxBuyBps?: number };
     /** Holder discount, or a hard access gate when `discountBps` is 0. */
     gate?: {
       gateToken: Address;
