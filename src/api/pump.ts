@@ -80,6 +80,60 @@ export interface ApiLaunch {
   onchainId?: string;
 }
 
+/**
+ * A created-launch row from `/profiles/:address`.
+ *
+ * 🔴 The activity columns are OMITTED, not zero. The backend's created-launches
+ * query selects a fixed column list that leaves out `volume_24h`,
+ * `holder_count` and `user_holder_count`, and the shared serialiser then
+ * defaults all three to the string "0" — so a launch doing 58 INJ a day
+ * reports "0" here and looks dead. `Omit` keeps them off the type so a reader
+ * has to go to `getLaunch` for the real figures instead of printing a zero
+ * that is a serialiser artefact.
+ */
+export type ApiProfileLaunch = Omit<ApiLaunch, "volume24h" | "holderCount" | "userHolderCount">;
+
+/**
+ * One launch this wallet holds or has traded, with ITS OWN flow through that
+ * launch — the sums are this address's trades only, not the launch's totals.
+ *
+ * `realizableValuePair` is what the position would fetch if sold right now:
+ * the backend quotes it live per row (curve `quoteSell` for an active launch,
+ * the Choice pool once graduated) with this wallet's holder discount applied,
+ * so it is an exit price and not `balance x spot`. Null when the quote failed.
+ */
+export interface ApiProfileHolding {
+  launchId: ApiLaunchId;
+  core?: string;
+  onchainId?: string;
+  creator: string;
+  token: string;
+  quoteAsset: number;
+  state: number;
+  metadataURI: string;
+  realPair: string;
+  tokensSold: string;
+  /** This wallet's own buys/sells on this launch, in base units. */
+  sumBuyPair: string;
+  sumBuyToken: string;
+  sumSellPair: string;
+  sumSellToken: string;
+  sumSellFee: string;
+  feesPaid: string;
+  volumePair: string;
+  tradeCount: string;
+  lastTradeAt: string | null;
+  currentBalance: string;
+  spotPriceWad: string | null;
+  realizableValuePair: string | null;
+}
+
+export interface ApiProfile {
+  address: string;
+  holdings: ApiProfileHolding[];
+  createdLaunches: ApiProfileLaunch[];
+}
+
 export interface ApiTrade {
   txHash: string;
   logIndex: number;
@@ -241,6 +295,20 @@ export class PumpApi {
 
   profileTrades(address: string, limit = 50): Promise<{ items: ApiTrade[] }> {
     return this.get(`/profiles/${address}/trades`, { limit });
+  }
+
+  /**
+   * A wallet's pad profile: the launches it CREATED, and every launch it holds
+   * or has traded, with that wallet's own cash flow per launch.
+   *
+   * This is the only endpoint that answers "which launches are mine". The
+   * `/launches` list has no creator filter — an unknown `creator=` param is
+   * dropped by the route's zod schema, so filtering that way silently returns
+   * every creator's launches — and the `q=` search matches a creator prefix
+   * only as one of five surfaces it ranks.
+   */
+  profile(address: string): Promise<ApiProfile> {
+    return this.get(`/profiles/${address.toLowerCase()}`);
   }
 
   quotePrices(): Promise<{ items: QuotePriceRow[] }> {

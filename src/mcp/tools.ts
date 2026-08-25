@@ -19,7 +19,15 @@ import {
 } from "../airdrops/campaign.js";
 import { manage as manageAirdrop, type ManageArgs } from "../airdrops/manage.js";
 import { cw20Balance, cw20TokenInfo, isCw20Id } from "../api/cw20.js";
-import { asApiLaunchId, type ApiCandle, type ApiLaunch, type ApiLaunchId, type ApiTrade } from "../api/pump.js";
+import {
+  asApiLaunchId,
+  type ApiCandle,
+  type ApiLaunch,
+  type ApiLaunchId,
+  type ApiProfileHolding,
+  type ApiProfileLaunch,
+  type ApiTrade,
+} from "../api/pump.js";
 import {
   coreDeploymentFor,
   coreDeployments,
@@ -421,7 +429,45 @@ export async function myActivity(
   } catch (e) {
     out.choiceNote = `Choice swap history unavailable: ${e instanceof Error ? e.message : String(e)}`;
   }
+  // Creating a launch is activity, and it was the one kind this tool could not
+  // see: the tape carries trades, so a launch of your own showed up as the buy
+  // that followed it and nothing else — indistinguishable from buying a
+  // stranger's coin. The row is deliberately thin (no chain reads here);
+  // `my_launches` is where a creator's launches get valued.
+  try {
+    const { createdLaunches } = await rt.pump.profile(rt.signer.address);
+    if (createdLaunches.length > 0) {
+      out.created = createdLaunches.map((l) => createdLaunchDigest(rt, l));
+      out.createdNote = "launches created by this wallet — `my_launches` values them and shows the creator fees each one is owed";
+    }
+  } catch (e) {
+    out.createdNote = `created-launch history unavailable: ${e instanceof Error ? e.message : String(e)}`;
+  }
   return out;
+}
+
+/**
+ * A created launch at a glance, from API fields alone.
+ *
+ * ⛔ Never reach for `volume24h`/`holderCount` here: the profile endpoint's
+ * created-launches query does not select them and the serialiser fills in "0",
+ * so reporting them would state that a busy launch is dead. `ApiProfileLaunch`
+ * omits the three fields for exactly that reason — see `my_launches`, which
+ * refetches the full row when the numbers matter.
+ */
+function createdLaunchDigest(rt: Runtime, l: ApiProfileLaunch): Record<string, unknown> {
+  const meta = decodeMetadataUri(l.metadataURI) ?? {};
+  const q = quoteAssetBySlot(rt.net, l.quoteAsset);
+  return {
+    launchId: l.id,
+    state: LAUNCH_STATE_LABEL[l.state] ?? String(l.state),
+    createdAt: l.createdAt,
+    raised: q ? `${formatUnits(BigInt(l.realPair || "0"), q.decimals)} ${q.symbol}` : l.realPair,
+    untrusted_metadata: untrustedMeta({
+      name: (meta as LaunchMetadata).name,
+      symbol: (meta as LaunchMetadata).symbol,
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1270,6 +1316,200 @@ function curveSummary(c: CurvePreset): Record<string, unknown> {
   };
 }
 
+// ---------------------------------------------------------------------------
+// launches this wallet created
+// ---------------------------------------------------------------------------
+
+/** Most created launches one call will read the chain for. */
+const MAX_CREATED_ROWS = 25;
+
+/**
+ * The launches this wallet created, valued, with what each one owes it.
+ *
+ * The gap this fills: nothing else could answer "which launches are mine".
+ * `my_activity` carries trades, `portfolio` carries balances, and
+ * `create_token` reports a launch once and then forgets it — so a creator's own
+ * launch was visible only as the dev buy that followed it, and the creator-fee
+ * ledger accruing underneath it was reachable only by broadcasting a claim.
+ *
+ * Three sources, because no one of them knows everything:
+ *  - the pad profile knows WHICH launches are this wallet's, and its own flow
+ *    through each (`realizableValuePair` is a live exit quote, not spot x size)
+ *  - `getLaunch` knows the launch's activity — the profile's created rows do
+ *    not select those columns and serialise them as "0"
+ *  - the chain knows the fee ledger, the live curve state and the dev-buy
+ *    window, none of which the API serves
+ *
+ * Every per-launch read fails soft. One unreachable core or one launch whose
+ * view reverts must not blank the rest of a creator's portfolio.
+ */
+export async function myLaunches(rt: Runtime, args: { limit?: number } = {}): Promise<unknown> {
+  const limit = Math.min(Math.max(args.limit ?? 10, 1), MAX_CREATED_ROWS);
+  const profile = await rt.pump.profile(rt.signer.address);
+  const shown = profile.createdLaunches.slice(0, limit);
+  // The wallet's own flow per launch, keyed by surrogate id — a creator who
+  // never dev-bought simply has no row.
+  const flow = new Map(profile.holdings.map((h) => [String(h.launchId), h]));
+
+  const launches = await Promise.all(
+    shown.map((l) => createdLaunchRow(rt, l, flow.get(String(l.id)) ?? null)),
+  );
+
+  const notes: string[] = [];
+  if (profile.createdLaunches.length > shown.length) {
+    notes.push(
+      `showing ${shown.length} of ${profile.createdLaunches.length} launches — raise \`limit\` for the rest`,
+    );
+  }
+  const owedTotals = totalOwedByQuote(launches);
+  if (owedTotals.length > 0) {
+    notes.push(
+      "creator fees accrue to a per-launch ledger on the core, NOT to the wallet — `claim_fees` moves them",
+    );
+  }
+  return {
+    agent: rt.signer.address,
+    created: profile.createdLaunches.length,
+    launches,
+    creatorFeesOwed: owedTotals,
+    notes,
+  };
+}
+
+/** Sum the unclaimed creator fees across the rows, per quote asset. */
+function totalOwedByQuote(rows: Record<string, unknown>[]): { symbol: string; amount: string }[] {
+  const byQuote = new Map<string, number>();
+  for (const r of rows) {
+    const fees = r.fees as { owed?: string | null } | undefined;
+    if (!fees?.owed) continue;
+    const [amount, symbol] = fees.owed.split(" ");
+    const n = Number(amount);
+    if (!symbol || !Number.isFinite(n) || n === 0) continue;
+    byQuote.set(symbol, (byQuote.get(symbol) ?? 0) + n);
+  }
+  return [...byQuote].map(([symbol, amount]) => ({ symbol, amount: String(Number(amount.toPrecision(12))) }));
+}
+
+async function createdLaunchRow(
+  rt: Runtime,
+  l: ApiProfileLaunch,
+  flow: ApiProfileHolding | null,
+): Promise<Record<string, unknown>> {
+  const meta = decodeMetadataUri(l.metadataURI) ?? {};
+  const q = quoteAssetBySlot(rt.net, l.quoteAsset);
+  const row: Record<string, unknown> = {
+    launchId: l.id,
+    // Both ids, deliberately: `launchId` is what every other tool takes, and
+    // `onchainId` is the only one a raw chain call may use.
+    onchainId: l.onchainId ?? null,
+    core: l.core ?? null,
+    state: LAUNCH_STATE_LABEL[l.state] ?? String(l.state),
+    quote: q?.symbol ?? `slot${l.quoteAsset}`,
+    createdAt: l.createdAt,
+    untrusted_metadata: untrustedMeta({
+      name: (meta as LaunchMetadata).name,
+      symbol: (meta as LaunchMetadata).symbol,
+    }),
+    ...(rt.net.terminalBase ? { terminalUrl: `${rt.net.terminalBase}/t/shroom-curve%3A${l.id}` } : {}),
+  };
+
+  // The launch's own activity — refetched because the profile's created rows
+  // serialise volume and holders as "0" whatever the launch is doing.
+  const full = await rt.pump.getLaunch(l.id).catch(() => null);
+  if (full) {
+    row.activity = {
+      volume24h: q ? formatUnits(BigInt(full.volume24h || "0"), q.decimals) : full.volume24h,
+      holders: full.userHolderCount,
+      lastTradedAt: full.lastTradedAt,
+    };
+  }
+
+  if (!coreDeploymentFor(rt.net, l.core)) {
+    row.note = `lives on LaunchpadCore ${l.core ?? "(unnamed)"}, which this build does not know — upgrade trippy-mcp to read its curve and fee ledger`;
+    return row;
+  }
+  const venue = rt.shroom.forLaunch({ core: l.core });
+  const onchainId = BigInt(l.onchainId ?? l.id);
+
+  const live = await venue.getLaunchView(onchainId).catch(() => null);
+  if (live && q) {
+    row.progress = {
+      raised: `${formatUnits(live.realPair, q.decimals)} ${q.symbol}`,
+      graduationTarget: `${formatUnits(live.graduationPairTarget, q.decimals)} ${q.symbol}`,
+      pct:
+        live.graduationPairTarget > 0n
+          ? Number((live.realPair * 10_000n) / live.graduationPairTarget) / 100
+          : null,
+    };
+    row.devBuyWindow = devBuyWindowSummary(l, live);
+  }
+
+  // The headline: a plain view, so asking costs nothing. It used to be
+  // legible only by broadcasting `claim_fees`.
+  const owed = await venue.creatorFeesOwed(onchainId).catch(() => null);
+  row.fees = {
+    tradeFeeBps: full?.tradeFeeBps ?? live?.tradeFeeBps ?? null,
+    creatorFeeShareBps: full?.creatorFeeShareBps ?? live?.creatorFeeShareBps ?? null,
+    owed: owed === null || !q ? null : `${formatUnits(owed, q.decimals)} ${q.symbol}`,
+    owedUsd: owed === null || !q ? null : await rt.shroom.usdValue(q.slot, owed),
+    ...(owed !== null && owed > 0n ? { claimWith: `claim_fees launchIds:["${l.id}"]` } : {}),
+  };
+
+  if (flow && q) row.myPosition = positionSummary(flow, q, owed);
+  return row;
+}
+
+/**
+ * What the creator's exclusive window actually was.
+ *
+ * `tradingOpensAt` is the only record that a dev-buy window existed at all —
+ * the API serves no field for it — and it is what makes a launch auditable
+ * after the fact: the delay is frozen at createLaunch and the keeper bind eats
+ * an unpredictable 28-65s of it, so the gap between creation and open is the
+ * measurement that tells the next launch what to ask for.
+ */
+function devBuyWindowSummary(l: ApiProfileLaunch, live: LaunchView): Record<string, unknown> | null {
+  const opensAt = Number(live.tradingOpensAt);
+  if (!opensAt) return null;
+  const createdMs = Date.parse(l.createdAt);
+  const seconds = Number.isFinite(createdMs) ? Math.round(opensAt - createdMs / 1000) : null;
+  return {
+    tradingOpenedAt: new Date(opensAt * 1000).toISOString(),
+    exclusiveSecondsAfterCreate: seconds,
+    maxBuyBpsInGuardWindow: live.maxBuyBpsInGuardWindow,
+    open: Date.now() / 1000 >= opensAt,
+  };
+}
+
+/**
+ * This wallet's own stake in a launch it created, valued at the exit.
+ *
+ * `netIfSoldNow` counts the creator's two revenue lines — the bag and the fee
+ * ledger — against what the wallet actually put in. It deliberately excludes
+ * the creation fee (the launch row does not record what it cost, and the
+ * protocol fee is owner-settable, so any figure here would be a guess) and any
+ * fees already claimed, which have left the ledger and landed in the wallet.
+ */
+function positionSummary(
+  flow: ApiProfileHolding,
+  q: QuoteAssetInfo,
+  owed: bigint | null,
+): Record<string, unknown> {
+  const buys = BigInt(flow.sumBuyPair || "0");
+  const sells = BigInt(flow.sumSellPair || "0");
+  const realizable = flow.realizableValuePair === null ? null : BigInt(flow.realizableValuePair);
+  const net = realizable === null ? null : realizable + sells + (owed ?? 0n) - buys;
+  return {
+    tokens: formatUnits(BigInt(flow.currentBalance || "0"), 18),
+    boughtFor: `${formatUnits(buys, q.decimals)} ${q.symbol}`,
+    soldFor: `${formatUnits(sells, q.decimals)} ${q.symbol}`,
+    sellAllValue: realizable === null ? null : `${formatUnits(realizable, q.decimals)} ${q.symbol}`,
+    netIfSoldNow:
+      net === null ? null : `${net >= 0n ? "+" : "-"}${formatUnits(net < 0n ? -net : net, q.decimals)} ${q.symbol}`,
+    note: "counts the bag at its live exit quote plus unclaimed creator fees, against this wallet's own buys — excludes the creation fee and any fees already claimed",
+  };
+}
+
 /**
  * Claim creator fees, referral fees and refunds across EVERY deployed core.
  *
@@ -1280,8 +1520,13 @@ function curveSummary(c: CurvePreset): Record<string, unknown> {
  * refund ledgers, so the superseded core has to be visited even when no launch
  * id names it — otherwise everything owed on it is simply unreachable.
  */
-export async function claimFees(rt: Runtime, args: { launchIds?: string[] }): Promise<unknown> {
-  const rows: ApiLaunch[] = [];
+export async function claimFees(
+  rt: Runtime,
+  args: { launchIds?: string[]; preview?: boolean },
+): Promise<unknown> {
+  const rows: ClaimRow[] = [];
+  const notes = new Set<string>();
+
   for (const raw of args.launchIds ?? []) {
     if (!/^\d+$/.test(raw)) {
       throw new ToolError("bad_input", `launchIds must be numeric, got "${raw}"`);
@@ -1299,10 +1544,36 @@ export async function claimFees(rt: Runtime, args: { launchIds?: string[] }): Pr
     rows.push(row);
   }
 
+  // No ids: claim everything this wallet is owed. Creator fees are per-launch,
+  // so "everything" means every launch it created — which the caller had to
+  // know by heart before, since nothing listed them. Silently doing referral
+  // and refunds only was the old behaviour and it left creator fees behind.
+  const discovered = rows.length === 0;
+  if (discovered) {
+    const created = await rt.pump
+      .profile(rt.signer.address)
+      .then((p) => p.createdLaunches)
+      .catch((e: unknown) => {
+        notes.add(
+          `could not list this wallet's launches (${e instanceof Error ? e.message : String(e)}) — creator fees were NOT checked; pass launchIds to claim them`,
+        );
+        return [] as ApiProfileLaunch[];
+      });
+    for (const l of created) {
+      // A launch on an unknown core is skipped rather than fatal here: the
+      // caller named no ids, so one unreadable launch must not block the
+      // ledgers that ARE reachable.
+      if (!coreDeploymentFor(rt.net, l.core)) {
+        notes.add(`launch #${l.id} is on LaunchpadCore ${l.core ?? "(unnamed)"}, which this build does not know — skipped`);
+        continue;
+      }
+      rows.push(l);
+    }
+  }
+
   const creatorFees: { launchId: string; amount: string }[] = [];
   const referralFees: { pairAsset: string; symbol: string; amount: string }[] = [];
   const txHashes: string[] = [];
-  const notes = new Set<string>();
   let refundBase = 0n;
 
   for (const dep of coreDeployments(rt.net)) {
@@ -1310,10 +1581,32 @@ export async function claimFees(rt: Runtime, args: { launchIds?: string[] }): Pr
       (r) => coreDeploymentFor(rt.net, r.core)?.core.toLowerCase() === dep.core.toLowerCase(),
     );
     const bySurrogate = new Map(mine.map((r) => [String(r.onchainId ?? r.id), r.id]));
-    const res = await rt.shroom
-      .forLaunch({ core: dep.core })
-      .claimAll(mine.map((r) => BigInt(r.onchainId ?? r.id)));
+    const venue = rt.shroom.forLaunch({ core: dep.core });
+    const ids = mine.map((r) => BigInt(r.onchainId ?? r.id));
 
+    // Preview reads the same three ledgers the claim path reads first, and
+    // stops there. Nothing is signed, so this is the safe way to ask what a
+    // launch is owed — previously the only way to find out was to collect it.
+    if (args.preview) {
+      const owed = await venue.claimable(ids);
+      for (const c of owed.creator) {
+        creatorFees.push({
+          launchId: bySurrogate.get(c.launchId.toString()) ?? c.launchId.toString(),
+          amount: `${formatUnits(c.amount, c.quote.decimals)} ${c.quote.symbol}`,
+        });
+      }
+      for (const r of owed.referral) {
+        referralFees.push({
+          pairAsset: r.quote.pairAsset,
+          symbol: r.quote.symbol,
+          amount: formatUnits(r.amount, r.quote.decimals),
+        });
+      }
+      refundBase += owed.refund;
+      continue;
+    }
+
+    const res = await venue.claimAll(ids);
     for (const c of res.creatorFees) {
       creatorFees.push({ launchId: bySurrogate.get(c.onchainId) ?? c.onchainId, amount: c.amount });
     }
@@ -1333,14 +1626,22 @@ export async function claimFees(rt: Runtime, args: { launchIds?: string[] }): Pr
   const refundInj = refundBase > 0n ? formatUnits(refundBase, 18) : null;
   if (creatorFees.length === 0 && referralFees.length === 0 && refundInj === null) {
     notes.add("nothing to claim — every ledger on every deployed core is zero");
+  } else if (args.preview) {
+    notes.add("preview only — nothing was broadcast. Call claim_fees again without `preview` to collect this.");
   }
-  if (!args.launchIds?.length) {
-    notes.add(
-      "creator fees are only checked for launch ids you pass in `launchIds` — referral fees and refunds were checked for the agent wallet",
-    );
+  if (discovered && rows.length > 0) {
+    notes.add(`creator fees were checked for all ${rows.length} launch(es) this wallet created`);
   }
-  return { creatorFees, referralFees, refundInj, txHashes, notes: [...notes] };
+  return { ...(args.preview ? { preview: true } : {}), creatorFees, referralFees, refundInj, txHashes, notes: [...notes] };
 }
+
+/**
+ * The only fields a claim needs off a launch — satisfied by both an
+ * `/launches` row and a profile's created row, which carry different columns.
+ * `id` is the API surrogate and `onchainId` is what the core takes; the two
+ * name different launches and are never interchangeable.
+ */
+type ClaimRow = { id: ApiLaunchId; core?: string; onchainId?: string };
 
 export async function walletStatusTool(rt: Runtime): Promise<unknown> {
   const status = await walletStatus(rt);
