@@ -9,7 +9,7 @@
  *    on SHROOM Pad (EVM), everything else through the Choice aggregator
  */
 
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, parseUnits, type Address } from "viem";
 
 import {
   execute as executeAirdrop,
@@ -1007,6 +1007,81 @@ export interface CreateTokenArgs {
    */
   curve?: string;
   initialBuy?: string;
+  /** Seconds to delay public trading, making `initialBuy` exclusive to the creator. */
+  devBuyDelaySeconds?: number;
+  /** Cap on that pre-open buy, in bps of the raise. Default 2000 (the maximum). */
+  devBuyMaxBps?: number;
+  /** "INJ"/"USDC"/"SAI" or an 0x ERC20 address. */
+  gateToken?: string;
+  gateMinBalance?: string;
+  gateDiscountBps?: number;
+  gateWindowEndsAt?: number;
+}
+
+/** The pad's own default: a 10-minute exclusive window at the 20% cap. */
+const DEFAULT_DEV_BUY_MAX_BPS = 2_000;
+
+/**
+ * Turn the flat gate arguments into the contract's `LaunchGate`.
+ *
+ * `gateToken` takes a quote-asset symbol as well as an address because those
+ * are the tokens a creator actually gates on, and they are the ones the admin
+ * allowlist holds. `minBalance` is human units, so the token's decimals have to
+ * be resolved — from the network config for a known quote asset, from the ERC20
+ * itself otherwise.
+ */
+async function resolveGateArgs(
+  rt: Runtime,
+  args: CreateTokenArgs,
+): Promise<
+  { gateToken: Address; minBalance: bigint; discountBps: number; windowEndsAt: bigint } | undefined
+> {
+  if (!args.gateToken) {
+    if (args.gateMinBalance || args.gateDiscountBps) {
+      throw new ToolError("bad_gate", "gateMinBalance and gateDiscountBps need a gateToken");
+    }
+    return undefined;
+  }
+  const known = rt.net.quoteAssets[args.gateToken.toUpperCase()];
+  let token: Address;
+  let decimals: number;
+  if (known) {
+    token = known.pairAsset as Address;
+    decimals = known.decimals;
+  } else if (/^0x[0-9a-fA-F]{40}$/.test(args.gateToken)) {
+    token = args.gateToken as Address;
+    decimals = await rt.shroom.erc20Decimals(token).catch(() => {
+      throw new ToolError(
+        "bad_gate",
+        `${args.gateToken} does not answer decimals() — it is not an ERC20 this chain knows`,
+        "gate on a quote asset symbol, or check the address",
+      );
+    });
+  } else {
+    throw new ToolError(
+      "bad_gate",
+      `gateToken must be a quote asset symbol (${Object.keys(rt.net.quoteAssets).join("/")}) or an 0x address, got "${args.gateToken}"`,
+    );
+  }
+  if (!args.gateMinBalance) {
+    throw new ToolError("bad_gate", "gateToken needs gateMinBalance — the threshold to qualify on");
+  }
+  const discountBps = args.gateDiscountBps ?? 0;
+  // Only DISCOUNT gates are held to the admin allowlist; checking it up front
+  // turns an opaque `GateTokenNotAllowed` revert into something actionable.
+  if (discountBps > 0 && !(await rt.shroom.isAllowedGateToken(token))) {
+    throw new ToolError(
+      "bad_gate",
+      `${args.gateToken} is not on the launchpad's allowed gate-token list, so it cannot back a fee discount`,
+      "ask an admin to allowlist it, or use gateDiscountBps 0 for a plain access gate (any token works there)",
+    );
+  }
+  return {
+    gateToken: token,
+    minBalance: parseUnits(args.gateMinBalance, decimals),
+    discountBps,
+    windowEndsAt: BigInt(args.gateWindowEndsAt ?? 0),
+  };
 }
 
 export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<unknown> {
@@ -1015,6 +1090,20 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
   }
   const quoteSymbol = args.quoteAsset ?? "INJ";
   const chosen = await resolveCurve(rt, args.curve, quoteSymbol);
+  const gate = await resolveGateArgs(rt, args);
+  if (args.devBuyMaxBps && !args.devBuyDelaySeconds) {
+    throw new ToolError(
+      "bad_dev_buy",
+      "devBuyMaxBps only means anything with devBuyDelaySeconds — without a delay there is no exclusive window to cap",
+    );
+  }
+  if (args.devBuyDelaySeconds && !args.initialBuy) {
+    throw new ToolError(
+      "bad_dev_buy",
+      "devBuyDelaySeconds holds public trading closed so the CREATOR can buy first, but no initialBuy was given",
+      "pass initialBuy, or drop the delay so trading opens immediately",
+    );
+  }
   const image = await resolveImage(rt.pump, args.imageUrl, args.imagePath);
   const created = await rt.shroom.createLaunch({
     meta: {
@@ -1028,6 +1117,15 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
     },
     quoteSymbol,
     curveId: chosen?.curveId,
+    ...(args.devBuyDelaySeconds
+      ? {
+          devBuy: {
+            openDelaySeconds: args.devBuyDelaySeconds,
+            maxBuyBps: args.devBuyMaxBps ?? DEFAULT_DEV_BUY_MAX_BPS,
+          },
+        }
+      : {}),
+    ...(gate ? { gate } : {}),
   });
 
   let initialBuy: unknown = undefined;

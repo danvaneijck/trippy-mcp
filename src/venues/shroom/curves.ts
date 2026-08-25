@@ -114,6 +114,60 @@ export function graduationFdvOfPreset(
   return (totalSupply * raiseOfPreset(p, quoteBaseTarget) * (1 + r) ** 2) / (p.virtualToken * r);
 }
 
+/** Contract-side ceilings on the V-4 dev-buy window. Mirrors LaunchpadCore. */
+export const MAX_DEV_BUY_BPS = 2_000;
+export const MAX_DEV_FLOAT_BPS = 5_000;
+export const MAX_OPEN_DELAY_SECONDS = 24 * 60 * 60;
+/** Contract-side ceiling on the holder discount (100% of the creator's cut). */
+export const MAX_DISCOUNT_BPS = 10_000;
+
+/**
+ * What share of the launch's float a dev buy of `maxBuyBps` would take, in bps.
+ *
+ * Mirrors `_validateDevBuy`. The contract prices the cap against the curve:
+ * `cap = target·m`, `devTokens = cap·vt/(vp+cap)`, `tokensAtGrad =
+ * vt·target/(vp+target)`, and with `vp = target·r` both the target and the
+ * virtual token reserve cancel out of the ratio:
+ *
+ *     floatBps = 1e4 · m(1+r) / (r+m)
+ *
+ * So it depends only on the curve's steepness and the cap — not on the quote
+ * asset, and not on the size of the raise. Which is why the answer differs per
+ * preset: 2000 bps takes 46.67% of the float on the standard curve and 65.71%
+ * on `steep`, and the second one reverts.
+ */
+export function devBuyFloatBps(rBps: number, maxBuyBps: number): number {
+  if (rBps <= 0 || maxBuyBps <= 0) return 0;
+  const r = rBps / 10_000;
+  const m = maxBuyBps / 10_000;
+  return Math.round((10_000 * m * (1 + r)) / (r + m));
+}
+
+/**
+ * The largest `maxBuyBpsInGuardWindow` this curve will accept.
+ *
+ * Invert the above at the ceiling: `1e4·m(1+r)/(r+m) <= MAX_DEV_FLOAT_BPS`
+ * solves to `m <= r/(1+2r)` at a 50% ceiling, then the absolute
+ * `MAX_DEV_BUY_BPS` applies on top. Steeper curves reach the float ceiling
+ * first — `steep` tops out at 1154 bps where every other preset gets the full
+ * 2000 — so a caller that just used the maximum would eat a revert on one
+ * preset out of seven, after paying for it.
+ */
+export function maxDevBuyBpsFor(rBps: number): number {
+  if (rBps <= 0) return 0;
+  const r = rBps / 10_000;
+  const ceiling = MAX_DEV_FLOAT_BPS / 10_000;
+  // m(1+r)/(r+m) <= ceiling  =>  m <= ceiling·r / (1 + r − ceiling)
+  let m = Math.min(MAX_DEV_BUY_BPS, Math.floor(((ceiling * r) / (1 + r - ceiling)) * 10_000));
+  // The closed form is exact in reals; `devBuyFloatBps` rounds. Walk the last
+  // bps or two so this agrees EXACTLY with the check that will refuse the
+  // launch — a hint that suggests 1153 where 1154 is also legal is a hint that
+  // quietly costs the creator part of their window.
+  while (m < MAX_DEV_BUY_BPS && devBuyFloatBps(rBps, m + 1) <= MAX_DEV_FLOAT_BPS) m += 1;
+  while (m > 0 && devBuyFloatBps(rBps, m) > MAX_DEV_FLOAT_BPS) m -= 1;
+  return m;
+}
+
 /**
  * Resolve what an agent asked for — a curveId, or a preset NAME — to a curveId.
  *

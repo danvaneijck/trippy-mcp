@@ -428,6 +428,51 @@ export async function serve(): Promise<void> {
           'bonding-curve preset, by name ("standard", "whale", …) or curveId. Frozen onto the launch and not changeable afterwards. Presets are masked per quote asset, so an illegal pairing is refused with the legal list. Only where the deployment has a CurveRegistry; see explain("shroom_pad_curves"). Default: curveId 0, the standard curve.',
         ),
       initialBuy: z.string().optional().describe("optional first buy in quote-asset human units"),
+      devBuyDelaySeconds: z
+        .number()
+        .int()
+        .min(0)
+        .max(86_400)
+        .optional()
+        .describe(
+          "delay public trading by this many seconds so `initialBuy` is an EXCLUSIVE creator buy instead of a public race. Without it the opening buy is open to anyone the moment the keeper binds. The contract refuses exclusivity without a cap, so `devBuyMaxBps` applies; max 86400 (24h).",
+        ),
+      devBuyMaxBps: z
+        .number()
+        .int()
+        .min(1)
+        .max(2_000)
+        .optional()
+        .describe(
+          "cap on the creator's pre-open buy, in bps of the graduation raise (default 2000 = 20%, the contract maximum). ALSO capped at 50% of the launch's float, which binds sooner on steeper curves — `steep` tops out at 1154 bps. Only meaningful with devBuyDelaySeconds.",
+        ),
+      gateToken: z
+        .string()
+        .optional()
+        .describe(
+          'holder gate token: "INJ" / "USDC" / "SAI", or an 0x ERC20 address. With gateDiscountBps > 0 it is a FEE DISCOUNT for qualifying holders and restricts nobody; with 0 it is a hard ACCESS gate that stops everyone else buying while the window is open.',
+        ),
+      gateMinBalance: z
+        .string()
+        .optional()
+        .describe("how much of gateToken a wallet must hold to qualify, in human units"),
+      gateDiscountBps: z
+        .number()
+        .int()
+        .min(0)
+        .max(10_000)
+        .optional()
+        .describe(
+          "share of the CREATOR's fee cut waived for qualifying holders (10000 = all of it; the platform's leg is never reduced). 0 makes it an access gate instead. Discount gates require an admin-allowlisted gateToken.",
+        ),
+      gateWindowEndsAt: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe(
+          "unix seconds after which the gate stops applying. 0 means it NEVER expires — on an access gate that closes the launch to non-holders permanently.",
+        ),
     },
     (rt2, a: t.CreateTokenArgs) => t.createToken(rt2, a),
   );
