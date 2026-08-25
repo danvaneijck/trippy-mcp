@@ -122,6 +122,34 @@ export const MAX_OPEN_DELAY_SECONDS = 24 * 60 * 60;
 export const MAX_DISCOUNT_BPS = 10_000;
 
 /**
+ * NOT a contract limit — a client-side floor on the dev-buy delay, measured.
+ *
+ * The exclusive window has to contain the keeper bind AND the opening buy, and
+ * the contract has no opinion on whether it does: a window that lapses first
+ * still produces a valid launch, it just produces a PUBLIC opening buy on a
+ * launch that opens at a moment every watcher can predict. That is the whole
+ * thing the delay was asked for, lost silently.
+ *
+ * Measured create -> first-trade over the 8 mainnet launches before BOOTS:
+ * 28s to 65s, median 53s. BOOTS itself ran 52.2s against a 60s window and
+ * cleared it by ~8s. 180s is roughly 3x the observed worst case, which leaves
+ * room for a slow bind without making the launch feel held back.
+ *
+ * Keeper latency is an operational fact, not a protocol one, so this is a soft
+ * floor: `allowShortDevBuyWindow` opts out of it deliberately. Do not clamp to
+ * it — the value is frozen onto the launch, and silently launching with timing
+ * the caller did not choose is worse than refusing.
+ */
+export const MIN_SAFE_OPEN_DELAY_SECONDS = 180;
+
+/**
+ * Below this much daylight between the opening buy landing and public trading,
+ * say so. The window was not lost, but it was closer than the caller can see
+ * from a successful result, and the next launch should get a longer delay.
+ */
+export const THIN_DEV_BUY_MARGIN_SECONDS = 30;
+
+/**
  * What share of the launch's float a dev buy of `maxBuyBps` would take, in bps.
  *
  * Mirrors `_validateDevBuy`. The contract prices the cap against the curve:

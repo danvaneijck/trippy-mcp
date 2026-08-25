@@ -44,6 +44,7 @@ import {
   presetAllowedOnQuote,
   priceRunX,
   resolveCurveChoice,
+  THIN_DEV_BUY_MARGIN_SECONDS,
   type CurvePreset,
 } from "../venues/shroom/curves.js";
 import type { LaunchView } from "../venues/shroom/launchpad.js";
@@ -1011,6 +1012,8 @@ export interface CreateTokenArgs {
   devBuyDelaySeconds?: number;
   /** Cap on that pre-open buy, in bps of the raise. Default 2000 (the maximum). */
   devBuyMaxBps?: number;
+  /** Launch with a delay shorter than the keeper bind reliably fits inside. */
+  allowShortDevBuyWindow?: boolean;
   /** "INJ"/"USDC"/"SAI" or an 0x ERC20 address. */
   gateToken?: string;
   gateMinBalance?: string;
@@ -1094,6 +1097,12 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
       "devBuyMaxBps only means anything with devBuyDelaySeconds — without a delay there is no exclusive window to cap",
     );
   }
+  if (args.allowShortDevBuyWindow && !args.devBuyDelaySeconds) {
+    throw new ToolError(
+      "bad_dev_buy",
+      "allowShortDevBuyWindow waives the floor on devBuyDelaySeconds, and no delay was given",
+    );
+  }
   if (args.devBuyDelaySeconds && !args.initialBuy) {
     throw new ToolError(
       "bad_dev_buy",
@@ -1121,6 +1130,7 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
             // Left undefined on purpose: the venue defaults it to the most
             // THIS curve allows, which differs per preset.
             maxBuyBps: args.devBuyMaxBps,
+            allowShortWindow: args.allowShortDevBuyWindow,
           },
         }
       : {}),
@@ -1141,16 +1151,24 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
     }
   }
 
-  // The exclusive window has to contain the keeper bind AND this buy. Binds run
-  // ~30s and have been seen at 65s, so a short delay can lapse before the buy
-  // lands — the buy still succeeds, it is just a public one, and the launch is
-  // then open at a moment every watcher can predict. Say so: the alternative is
-  // reporting a dev buy that quietly bought nothing it was promised.
+  // What the window actually did, now that the bind and the buy have both
+  // happened. The floor in `resolveLaunchTiming` is a prediction from measured
+  // bind latency; this is the measurement itself, and it is the only place the
+  // caller can learn what the next launch should ask for.
+  //
+  // Report the near miss as well as the miss. A window that held by 8 seconds
+  // reads as a clean success from the result alone, and BOOTS is exactly that
+  // launch — 52.2s of bind against a 60s window. Nothing in the output said so.
   if (created.tradingOpensAt > 0 && initialBuy !== undefined) {
     const openedAt = created.tradingOpensAt * 1000;
-    if (Date.now() >= openedAt) {
+    const spareSeconds = Math.round((openedAt - Date.now()) / 1000);
+    if (spareSeconds <= 0) {
       created.warnings.push(
         `the exclusive window closed at ${new Date(openedAt).toISOString()}, before the opening buy landed — that buy competed with everyone else. Bind latency ate the delay; use a longer devBuyDelaySeconds next time.`,
+      );
+    } else if (spareSeconds < THIN_DEV_BUY_MARGIN_SECONDS) {
+      created.warnings.push(
+        `the opening buy landed with ${spareSeconds}s left of the exclusive window — it held, but barely. Bind latency varies by tens of seconds; use a longer devBuyDelaySeconds next time.`,
       );
     }
   }

@@ -435,7 +435,13 @@ export async function serve(): Promise<void> {
         .max(86_400)
         .optional()
         .describe(
-          "delay public trading by this many seconds so `initialBuy` is an EXCLUSIVE creator buy instead of a public race. Without it the opening buy is open to anyone the moment the keeper binds. The contract refuses exclusivity without a cap, so `devBuyMaxBps` applies; max 86400 (24h).",
+          "delay public trading by this many seconds so `initialBuy` is an EXCLUSIVE creator buy instead of a public race. Without it the opening buy is open to anyone the moment the keeper binds. The window must outlast the keeper bind, which has measured 28-65s on mainnet, so values under 180 are REFUSED before anything is spent (override with allowShortDevBuyWindow). 180 is a good default. The contract refuses exclusivity without a cap, so `devBuyMaxBps` applies; max 86400 (24h). Frozen onto the launch — it cannot be changed afterwards.",
+        ),
+      allowShortDevBuyWindow: z
+        .boolean()
+        .optional()
+        .describe(
+          "launch with a devBuyDelaySeconds under 180 anyway. The window will probably lapse during the keeper bind, which makes the opening buy a public race on a launch that opens at a predictable moment — the exact thing the delay is for. Only pass this deliberately.",
         ),
       devBuyMaxBps: z
         .number()

@@ -37,6 +37,7 @@ import {
   MAX_DISCOUNT_BPS,
   MAX_OPEN_DELAY_SECONDS,
   maxDevBuyBpsFor,
+  MIN_SAFE_OPEN_DELAY_SECONDS,
   SHAPE_FLOAT_BPS,
   SHAPE_LP_BPS,
   type CurvePreset,
@@ -780,7 +781,7 @@ export class ShroomVenue {
    * refusal can name the actual maximum for the curve being launched on.
    */
   private async resolveLaunchTiming(
-    devBuy: { openDelaySeconds: number; maxBuyBps?: number } | undefined,
+    devBuy: { openDelaySeconds: number; maxBuyBps?: number; allowShortWindow?: boolean } | undefined,
     curveId: number,
     quoteSlot: number,
   ): Promise<{ tradingOpensAt: bigint; guardWindowEndsAt: bigint; maxBuyBpsInGuardWindow: number }> {
@@ -794,6 +795,19 @@ export class ShroomVenue {
       throw new ToolError(
         "bad_dev_buy",
         `openDelaySeconds ${devBuy.openDelaySeconds} is over the contract's ceiling of ${MAX_OPEN_DELAY_SECONDS} (24h)`,
+      );
+    }
+    // The contract has no floor: it will take a 1-second window happily, and
+    // the launch that comes out is valid. It just is not the launch that was
+    // asked for, because the window has to outlast the keeper bind and the
+    // bind alone has measured up to 65s. Refuse here, BEFORE the creation fee
+    // and the buy are spent — the same fact after the fact is only a warning
+    // on timing that is already frozen onto the launch.
+    if (!devBuy.allowShortWindow && devBuy.openDelaySeconds < MIN_SAFE_OPEN_DELAY_SECONDS) {
+      throw new ToolError(
+        "dev_buy_window_too_short",
+        `a ${devBuy.openDelaySeconds}s exclusive window will probably lapse before the opening buy lands: it has to contain the keeper bind AND the buy, and the bind alone has measured 28-65s (median 53s) on mainnet. The buy would still succeed, as a PUBLIC one, on a launch opening at a moment every watcher can predict.`,
+        `use devBuyDelaySeconds ${MIN_SAFE_OPEN_DELAY_SECONDS} or more, or pass allowShortDevBuyWindow: true to accept the risk — the timing cannot be changed once the launch exists`,
       );
     }
     if (devBuy.maxBuyBps !== undefined && (devBuy.maxBuyBps <= 0 || devBuy.maxBuyBps > MAX_DEV_BUY_BPS)) {
@@ -917,9 +931,11 @@ export class ShroomVenue {
      * V-4 exclusive pre-open window. `tradingOpensAt` sits `openDelaySeconds`
      * ahead, and the contract lets the CREATOR through early for the first
      * trade only — so the opening buy is theirs rather than a public race.
-     * The contract refuses exclusivity without a cap that binds it.
+     * The contract refuses exclusivity without a cap that binds it, and this
+     * refuses a delay too short to outlast the keeper bind unless
+     * `allowShortWindow` says to launch with it anyway.
      */
-    devBuy?: { openDelaySeconds: number; maxBuyBps?: number };
+    devBuy?: { openDelaySeconds: number; maxBuyBps?: number; allowShortWindow?: boolean };
     /** Holder discount, or a hard access gate when `discountBps` is 0. */
     gate?: {
       gateToken: Address;
@@ -990,8 +1006,23 @@ export class ShroomVenue {
       tradingOpensAt: timing.tradingOpensAt,
       guardWindowEndsAt: timing.guardWindowEndsAt,
       maxBuyBpsInGuardWindow: timing.maxBuyBpsInGuardWindow,
-      bindDeadlineSeconds: 0n, // contract default (1h)
-      poolKind: PoolKind.Clmm, // mainnet only allows CLMM graduation
+      // Both of these are deliberately not exposed as `create_token` params.
+      //
+      // `bindDeadlineSeconds: 0` takes the contract's own default (1h), which
+      // is the window the keeper has to bind the launch before it can be
+      // cancelled. Shortening it only makes a slow bind fatal, and lengthening
+      // it only leaves a stuck launch stuck for longer — there is no value an
+      // agent could pick from a tool call that beats the deployment's own, and
+      // it is frozen onto the launch like everything else here.
+      //
+      // `PoolKind.Clmm` is the only graduation target mainnet accepts, and
+      // every launch this package has made has graduated to a Choice CLMM
+      // pool. Exposing the enum's other member (Xyk) would offer a choice
+      // between one legal value and one that fails at GRADUATION — a whole
+      // raise after the call that picked it, with no way back. If a deployment
+      // ever accepts XYK, this is the line to make configurable.
+      bindDeadlineSeconds: 0n,
+      poolKind: PoolKind.Clmm,
     };
     const cfg = this.v2
       ? {
