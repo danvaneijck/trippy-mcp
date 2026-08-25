@@ -44,6 +44,8 @@ export const LAUNCHPAD_ABI = parseAbi([
   "function referralShareBps() view returns (uint16)",
   "function treasury() view returns (address)",
   "function getLaunchSink(uint256 launchId) view returns (address)",
+  // Only DISCOUNT gates are held to this list; a pure access gate may use any token.
+  "function allowedGateTokens(address) view returns (bool)",
 
   // Writes
   "function createLaunch(LaunchConfig cfg) payable returns (uint256)",

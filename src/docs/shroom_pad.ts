@@ -101,7 +101,9 @@ so holder snapshots taken from either side are complete.
 
 - \`tradingOpensAt\` — a timestamp before which buys revert. Combined with a
   creator-exclusive first buy, this is how a creator takes a dev position
-  without racing bots.
+  without racing bots. The delay has to outlast the KEEPER BIND, not just the
+  buy: create-to-first-trade has measured 28-65s on mainnet, so a 60s window is
+  a coin flip and \`create_token\` refuses anything under 180s by default.
 - guard window (\`guardWindowEndsAt\` + \`maxBuyBpsInGuardWindow\`) — caps
   CUMULATIVE buys per wallet at a fraction of the graduation target while it
   is open. \`quote\` warns when one is active; the cap is per wallet, so

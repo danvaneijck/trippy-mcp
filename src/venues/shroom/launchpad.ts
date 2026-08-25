@@ -29,8 +29,19 @@ import {
   quoteAssetBySlot,
 } from "../../chain/networks.js";
 import { ToolError } from "../../errors.js";
-import { encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
-import type { CurvePreset } from "./curves.js";
+import { assertBrandable, encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
+import {
+  devBuyFloatBps,
+  MAX_DEV_BUY_BPS,
+  MAX_DEV_FLOAT_BPS,
+  MAX_DISCOUNT_BPS,
+  MAX_OPEN_DELAY_SECONDS,
+  maxDevBuyBpsFor,
+  MIN_SAFE_OPEN_DELAY_SECONDS,
+  SHAPE_FLOAT_BPS,
+  SHAPE_LP_BPS,
+  type CurvePreset,
+} from "./curves.js";
 import {
   CURVE_REGISTRY_ABI,
   ERC20_ABI,
@@ -102,7 +113,14 @@ export interface QuoteAssetConfigView {
 export interface TradeResult {
   hash: string | null;
   status: WriteTxResult["status"];
-  launchId: string;
+  /**
+   * The traded launch's id ON ITS OWN CORE. Deliberately not `launchId`: the
+   * tool layer adds that, and it is the API's surrogate — the id every other
+   * surface prints and the only one a caller can look the launch up by. A buy
+   * of surrogate 21 executes against on-chain 2, and reporting "2" back named
+   * a different, real launch on the other core.
+   */
+  onchainId: string;
   side: "buy" | "sell";
   /** Human units of the pair asset that entered/left the curve. */
   pairAmount: string;
@@ -284,10 +302,15 @@ export class ShroomVenue {
       args: [],
     });
 
+    // 🔴 `shapeOf` has FIVE outputs, so it decodes to a positional tuple, not
+    // an object — viem only keys a result by name for a single struct return.
+    // Reading `.floatBps` off it yielded `undefined` -> `NaN` -> `null` on the
+    // wire, and the `shape ? … : 0` guard never fired because an array is
+    // truthy. Indices, and a test that asserts the arity.
     const shapes = await Promise.all(
       raw.map((_, i) =>
         this.signer
-          .readContract<{ floatBps: bigint; lpBps: bigint }>({
+          .readContract<readonly [bigint, bigint, bigint, bigint, bigint]>({
             address: registry,
             abi: CURVE_REGISTRY_ABI,
             functionName: "shapeOf",
@@ -307,8 +330,8 @@ export class ShroomVenue {
         targetMulBps: Number(p.targetMulBps),
         quoteMask: Number(p.quoteMask),
         enabled: Boolean(p.enabled),
-        floatBps: shape ? Number(shape.floatBps) : 0,
-        lpBps: shape ? Number(shape.lpBps) : 0,
+        floatBps: shape ? Number(shape[SHAPE_FLOAT_BPS]) : null,
+        lpBps: shape ? Number(shape[SHAPE_LP_BPS]) : null,
         virtualToken: Number(formatUnits(BigInt(p.virtualToken), 18)),
       };
     });
@@ -422,6 +445,16 @@ export class ShroomVenue {
     return { pairOut, fee };
   }
 
+  async erc20Decimals(token: Address): Promise<number> {
+    const d = await this.signer.readContract<number | bigint>({
+      address: token,
+      abi: ERC20_ABI,
+      functionName: "decimals",
+      args: [],
+    });
+    return Number(d);
+  }
+
   async erc20Balance(token: Address, owner: Address): Promise<bigint> {
     return this.signer.readContract<bigint>({
       address: token,
@@ -494,22 +527,42 @@ export class ShroomVenue {
     const now = BigInt(Math.floor(Date.now() / 1000));
 
     if (side === "buy") {
-      if (launch.tradingOpensAt > now) {
+      // Mirrors `_buy`'s pre-open gate. The creator is let through early for
+      // the genuine FIRST trade only (`tokensSold == 0`) — that exclusive
+      // pre-open buy is the whole point of setting an open delay, so refusing
+      // it here would make the feature unusable through this package while the
+      // contract was happily allowing it.
+      const creatorsFirstBuy =
+        launch.creator.toLowerCase() === this.signer.address.toLowerCase() &&
+        launch.tokensSold === 0n;
+      if (launch.tradingOpensAt > now && !creatorsFirstBuy) {
         throw new ToolError(
           "not_open",
           `trading opens at ${new Date(Number(launch.tradingOpensAt) * 1000).toISOString()}`,
+          launch.creator.toLowerCase() === this.signer.address.toLowerCase()
+            ? "the creator's exclusive pre-open buy is the first trade only, and this launch has already sold tokens"
+            : undefined,
         );
       }
+      if (creatorsFirstBuy && launch.tradingOpensAt > now) {
+        warnings.push(
+          `pre-open creator buy: public trading opens at ${new Date(Number(launch.tradingOpensAt) * 1000).toISOString()}, and this exclusivity applies to this first trade only`,
+        );
+      }
+      // Mirrors `_checkGate`. Two rules that the previous version had wrong and
+      // that now matter, because `create_token` can set these: a gate with a
+      // DISCOUNT (discountBps != 0) restricts nobody, and `windowEndsAt == 0`
+      // means the access gate never expires rather than that it has expired.
       const gateActive =
         launch.gate.gateToken !== zeroAddress &&
-        launch.gate.minBalance > 0n &&
-        launch.gate.windowEndsAt > now;
+        launch.gate.discountBps === 0 &&
+        (launch.gate.windowEndsAt === 0n || now < launch.gate.windowEndsAt);
       if (gateActive) {
         const bal = await this.erc20Balance(launch.gate.gateToken, this.signer.address);
         if (bal < launch.gate.minBalance) {
           throw new ToolError(
             "gated",
-            `launch #${launchId} is gate-restricted until ${new Date(Number(launch.gate.windowEndsAt) * 1000).toISOString()} — the agent wallet does not hold enough of the gate token ${launch.gate.gateToken}`,
+            `launch #${launchId} is gate-restricted ${launch.gate.windowEndsAt === 0n ? "with no expiry" : `until ${new Date(Number(launch.gate.windowEndsAt) * 1000).toISOString()}`} — the agent wallet does not hold enough of the gate token ${launch.gate.gateToken}`,
           );
         }
       }
@@ -565,6 +618,22 @@ export class ShroomVenue {
     const q = this.quoteInfo(launch.quoteAsset);
     const pairIn = parseUnits(amountHuman, q.decimals);
     if (pairIn <= 0n) throw new ToolError("bad_amount", "amount must be positive");
+
+    // The guard-window cap is charged on the GROSS in, and `_accrueGuardWindow`
+    // reverts the whole buy when the running total crosses it. Catching it here
+    // turns an opaque `GuardWindowExceeded` into the number to use instead —
+    // and this is exactly the path a creator's own dev buy takes.
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    if (launch.guardWindowEndsAt > now && launch.maxBuyBpsInGuardWindow > 0) {
+      const cap = (launch.graduationPairTarget * BigInt(launch.maxBuyBpsInGuardWindow)) / 10_000n;
+      if (pairIn > cap) {
+        throw new ToolError(
+          "guard_window",
+          `guard window caps each wallet at ${formatUnits(cap, q.decimals)} ${q.symbol} until ${new Date(Number(launch.guardWindowEndsAt) * 1000).toISOString()}, and this buy is ${amountHuman}`,
+          "buy up to the cap now and the rest once the window closes",
+        );
+      }
+    }
 
     const quote = await this.quoteBuy(launchId, pairIn, this.signer.address);
     if (quote.tokenOut <= 0n) {
@@ -682,7 +751,7 @@ export class ShroomVenue {
     return {
       hash: res.hash,
       status: res.status,
-      launchId: launchId.toString(),
+      onchainId: launchId.toString(),
       side,
       pairAmount: formatUnits(pairWei, q.decimals),
       tokenAmount: formatUnits(tokenWei, 18),
@@ -695,13 +764,196 @@ export class ShroomVenue {
 
   // ---- launch creation -----------------------------------------------------
 
+  /**
+   * Turn a dev-buy request into the three timing fields, refusing anything
+   * `_validateDevBuy` would revert on.
+   *
+   * The contract's rule is that exclusivity has to come WITH a cap: a pre-open
+   * window where the creator is the only permitted buyer and nothing bounds the
+   * buy lets them take the entire curve in one uncontested transaction. So an
+   * uncapped or unbounded request is refused rather than sent — a revert here
+   * costs the gas and says `DevBuyUncapped(0, 2000)`, which is not something an
+   * agent can act on.
+   *
+   * The float ceiling is the interesting one, because it is per CURVE. A 2000
+   * bps cap is 46.67% of the float on the standard curve and 65.71% on `steep`,
+   * and only the second one reverts. `maxDevBuyBpsFor` inverts that so the
+   * refusal can name the actual maximum for the curve being launched on.
+   */
+  private async resolveLaunchTiming(
+    devBuy: { openDelaySeconds: number; maxBuyBps?: number; allowShortWindow?: boolean } | undefined,
+    curveId: number,
+    quoteSlot: number,
+  ): Promise<{ tradingOpensAt: bigint; guardWindowEndsAt: bigint; maxBuyBpsInGuardWindow: number }> {
+    const off = { tradingOpensAt: 0n, guardWindowEndsAt: 0n, maxBuyBpsInGuardWindow: 0 };
+    if (!devBuy) return off;
+    // An immediate open is deliberately unconstrained by the contract: there is
+    // no exclusive period to abuse and the first buy is a fair race.
+    if (devBuy.openDelaySeconds <= 0) return off;
+
+    if (devBuy.openDelaySeconds > MAX_OPEN_DELAY_SECONDS) {
+      throw new ToolError(
+        "bad_dev_buy",
+        `openDelaySeconds ${devBuy.openDelaySeconds} is over the contract's ceiling of ${MAX_OPEN_DELAY_SECONDS} (24h)`,
+      );
+    }
+    // The contract has no floor: it will take a 1-second window happily, and
+    // the launch that comes out is valid. It just is not the launch that was
+    // asked for, because the window has to outlast the keeper bind and the
+    // bind alone has measured up to 65s. Refuse here, BEFORE the creation fee
+    // and the buy are spent — the same fact after the fact is only a warning
+    // on timing that is already frozen onto the launch.
+    if (!devBuy.allowShortWindow && devBuy.openDelaySeconds < MIN_SAFE_OPEN_DELAY_SECONDS) {
+      throw new ToolError(
+        "dev_buy_window_too_short",
+        `a ${devBuy.openDelaySeconds}s exclusive window will probably lapse before the opening buy lands: it has to contain the keeper bind AND the buy, and the bind alone has measured 28-65s (median 53s) on mainnet. The buy would still succeed, as a PUBLIC one, on a launch opening at a moment every watcher can predict.`,
+        `use devBuyDelaySeconds ${MIN_SAFE_OPEN_DELAY_SECONDS} or more, or pass allowShortDevBuyWindow: true to accept the risk — the timing cannot be changed once the launch exists`,
+      );
+    }
+    if (devBuy.maxBuyBps !== undefined && (devBuy.maxBuyBps <= 0 || devBuy.maxBuyBps > MAX_DEV_BUY_BPS)) {
+      throw new ToolError(
+        "bad_dev_buy",
+        `maxBuyBps must be between 1 and ${MAX_DEV_BUY_BPS} — the contract refuses a pre-open window without a cap that binds it`,
+      );
+    }
+
+    // Price the cap against THIS launch's curve, exactly as the contract does.
+    const preset = this.curvesSelectable
+      ? (await this.curvePresets())?.find((p) => p.id === curveId)
+      : null;
+
+    // No cap named: take the most this CURVE allows rather than the absolute
+    // maximum. They are the same on six of seven presets, and on `steep` the
+    // absolute maximum reverts — refusing a launch over a default the caller
+    // never chose is a bad trade for one line of arithmetic. An explicit
+    // over-cap value is still refused: silently changing what was asked for is
+    // the one thing that must not happen to a parameter frozen at creation.
+    const maxBuyBps =
+      devBuy.maxBuyBps ??
+      (preset ? Math.min(MAX_DEV_BUY_BPS, maxDevBuyBpsFor(preset.rBps)) : MAX_DEV_BUY_BPS);
+
+    if (preset) {
+      const floatBps = devBuyFloatBps(preset.rBps, maxBuyBps);
+      if (floatBps > MAX_DEV_FLOAT_BPS) {
+        const max = maxDevBuyBpsFor(preset.rBps);
+        throw new ToolError(
+          "bad_dev_buy",
+          `a ${maxBuyBps} bps dev buy takes ${(floatBps / 100).toFixed(2)}% of the float on the "${preset.name}" curve, over the contract's ${MAX_DEV_FLOAT_BPS / 100}% ceiling`,
+          `the most this curve allows is ${max} bps (${(devBuyFloatBps(preset.rBps, max) / 100).toFixed(2)}% of float) — steeper curves hit the ceiling sooner`,
+        );
+      }
+    }
+    void quoteSlot; // the float ratio is quote-invariant; the slot is not needed
+
+    const opensAt = BigInt(Math.floor(Date.now() / 1000) + devBuy.openDelaySeconds);
+    return {
+      tradingOpensAt: opensAt,
+      // Ends exactly when public trading opens, so the cap covers the whole
+      // creator-only window. A window that lapsed first would leave a stretch
+      // where the creator is the only permitted buyer and uncapped, which the
+      // contract rejects as the same hole by another route.
+      guardWindowEndsAt: opensAt,
+      maxBuyBpsInGuardWindow: maxBuyBps,
+    };
+  }
+
+  /**
+   * Normalise a gate, refusing what `_validateGate` would revert on.
+   *
+   * The two modes are distinguished by `discountBps`, and they are not variants
+   * of one feature: non-zero is a fee DISCOUNT for qualifying holders and
+   * restricts nobody, zero is a hard ACCESS gate that stops everyone else from
+   * buying at all. Getting that backwards closes a launch to the public by
+   * accident, so the caller states it and this refuses the malformed shapes.
+   */
+  private resolveGate(
+    gate:
+      | { gateToken: Address; minBalance: bigint; discountBps: number; windowEndsAt: bigint }
+      | undefined,
+  ): { gateToken: Address; minBalance: bigint; windowEndsAt: bigint; discountBps: number } {
+    const off = {
+      gateToken: zeroAddress as Address,
+      minBalance: 0n,
+      windowEndsAt: 0n,
+      discountBps: 0,
+    };
+    if (!gate || gate.gateToken === zeroAddress) {
+      if (gate && (gate.discountBps !== 0 || gate.minBalance !== 0n)) {
+        throw new ToolError(
+          "bad_gate",
+          "a discount or a holder threshold needs a gate token — the contract rejects one without the other",
+        );
+      }
+      return off;
+    }
+    if (gate.discountBps < 0 || gate.discountBps > MAX_DISCOUNT_BPS) {
+      throw new ToolError(
+        "bad_gate",
+        `discountBps must be between 0 and ${MAX_DISCOUNT_BPS} (100% of the creator's cut — the platform's leg is never reduced)`,
+      );
+    }
+    if (gate.discountBps > 0 && gate.minBalance <= 0n) {
+      throw new ToolError("bad_gate", "a holder discount needs a non-zero minBalance to qualify on");
+    }
+    if (gate.discountBps === 0 && gate.minBalance <= 0n) {
+      throw new ToolError(
+        "bad_gate",
+        "an access gate with a zero threshold admits everyone and blocks nobody",
+        "set minBalance, or drop the gate entirely",
+      );
+    }
+    return {
+      gateToken: gate.gateToken,
+      minBalance: gate.minBalance,
+      windowEndsAt: gate.windowEndsAt,
+      discountBps: gate.discountBps,
+    };
+  }
+
+  /** `allowedGateTokens` — only enforced by the contract for DISCOUNT gates. */
+  async isAllowedGateToken(token: Address): Promise<boolean> {
+    return this.signer
+      .readContract<boolean>({
+        address: this.core,
+        abi: LAUNCHPAD_ABI,
+        functionName: "allowedGateTokens",
+        args: [token],
+      })
+      .catch(() => false);
+  }
+
   async createLaunch(opts: {
     meta: LaunchMetadata;
     quoteSymbol: "INJ" | "USDC" | "SAI";
     /** CurveRegistry preset (v2 only). Omitted / 0 = the standard curve. */
     curveId?: number;
+    /**
+     * V-4 exclusive pre-open window. `tradingOpensAt` sits `openDelaySeconds`
+     * ahead, and the contract lets the CREATOR through early for the first
+     * trade only — so the opening buy is theirs rather than a public race.
+     * The contract refuses exclusivity without a cap that binds it, and this
+     * refuses a delay too short to outlast the keeper bind unless
+     * `allowShortWindow` says to launch with it anyway.
+     */
+    devBuy?: { openDelaySeconds: number; maxBuyBps?: number; allowShortWindow?: boolean };
+    /** Holder discount, or a hard access gate when `discountBps` is 0. */
+    gate?: {
+      gateToken: Address;
+      minBalance: bigint;
+      discountBps: number;
+      windowEndsAt: bigint;
+    };
   }): Promise<{
-    launchId: string;
+    /**
+     * The new launch's id ON THE CORE THAT ISSUED IT. Deliberately not called
+     * `launchId`: every user-facing surface prints the API's surrogate under
+     * that name, and the two are different numbers. Chain calls take this one.
+     */
+    onchainId: string;
+    /** The core it was created on, so the id above can be resolved later. */
+    core: string;
+    /** Unix seconds public trading opens; 0 = immediately. */
+    tradingOpensAt: number;
     token: string | null;
     state: string;
     hash: string | null;
@@ -712,6 +964,12 @@ export class ShroomVenue {
     if (await this.isPaused()) {
       throw new ToolError("paused", "the launchpad is paused — launches are temporarily disabled");
     }
+    // Before anything is spent. The chain takes name/symbol once, at
+    // MsgCreateDenom, and DROPS whatever it will not accept rather than
+    // truncating it — so this is the last point at which a bad name is still
+    // fixable instead of permanent.
+    assertBrandable("name", opts.meta.name);
+    assertBrandable("symbol", opts.meta.symbol);
     const q = this.net.quoteAssets[opts.quoteSymbol];
     if (!q) throw new ToolError("bad_quote", `unknown quote asset ${opts.quoteSymbol}`);
 
@@ -736,19 +994,36 @@ export class ShroomVenue {
     // misbehaving quietly. curveId 0 is the standard preset, which reproduces
     // the v1 curve exactly — so an agent that expresses no curve preference
     // gets the same launch on both networks.
+    const curveId = opts.curveId ?? 0;
+    const timing = await this.resolveLaunchTiming(opts.devBuy, curveId, q.slot);
+    const gate = this.resolveGate(opts.gate);
     const base = {
       name: opts.meta.name,
       symbol: opts.meta.symbol,
       metadataURI: encodeMetadataUri(opts.meta),
       quoteAsset: q.slot,
-      gate: { gateToken: zeroAddress, minBalance: 0n, windowEndsAt: 0n, discountBps: 0 },
-      tradingOpensAt: 0n,
-      guardWindowEndsAt: 0n,
-      maxBuyBpsInGuardWindow: 0,
-      bindDeadlineSeconds: 0n, // contract default (1h)
-      poolKind: PoolKind.Clmm, // mainnet only allows CLMM graduation
+      gate,
+      tradingOpensAt: timing.tradingOpensAt,
+      guardWindowEndsAt: timing.guardWindowEndsAt,
+      maxBuyBpsInGuardWindow: timing.maxBuyBpsInGuardWindow,
+      // Both of these are deliberately not exposed as `create_token` params.
+      //
+      // `bindDeadlineSeconds: 0` takes the contract's own default (1h), which
+      // is the window the keeper has to bind the launch before it can be
+      // cancelled. Shortening it only makes a slow bind fatal, and lengthening
+      // it only leaves a stuck launch stuck for longer — there is no value an
+      // agent could pick from a tool call that beats the deployment's own, and
+      // it is frozen onto the launch like everything else here.
+      //
+      // `PoolKind.Clmm` is the only graduation target mainnet accepts, and
+      // every launch this package has made has graduated to a Choice CLMM
+      // pool. Exposing the enum's other member (Xyk) would offer a choice
+      // between one legal value and one that fails at GRADUATION — a whole
+      // raise after the call that picked it, with no way back. If a deployment
+      // ever accepts XYK, this is the line to make configurable.
+      bindDeadlineSeconds: 0n,
+      poolKind: PoolKind.Clmm,
     };
-    const curveId = opts.curveId ?? 0;
     const cfg = this.v2
       ? {
           name: base.name,
@@ -801,7 +1076,9 @@ export class ShroomVenue {
 
     if (res.status === "dry-run") {
       return {
-        launchId: predictedId.toString(),
+        onchainId: predictedId.toString(),
+        core: this.core,
+        tradingOpensAt: Number(timing.tradingOpensAt),
         token: null,
         state: "dry-run",
         hash: null,
@@ -849,7 +1126,9 @@ export class ShroomVenue {
     }
 
     return {
-      launchId: launchId.toString(),
+      onchainId: launchId.toString(),
+      core: this.core,
+      tradingOpensAt: Number(timing.tradingOpensAt),
       token,
       state: LAUNCH_STATE_LABEL[state] ?? String(state),
       hash: res.hash,
@@ -861,8 +1140,17 @@ export class ShroomVenue {
 
   // ---- claims --------------------------------------------------------------
 
+  /**
+   * Claim everything this wallet is owed ON THIS VENUE'S CORE.
+   *
+   * `launchIds` are on-chain ids and must belong to the bound core — creator
+   * fees are a per-launch ledger, and the same id names a different launch on
+   * every other core. Referral fees and refunds are per-WALLET ledgers, but
+   * each core keeps its own, so a caller with several cores has to run this
+   * against each of them; `claim_fees` does.
+   */
   async claimAll(launchIds: bigint[]): Promise<{
-    creatorFees: { launchId: string; amount: string }[];
+    creatorFees: { onchainId: string; amount: string }[];
     referralFees: { pairAsset: string; symbol: string; amount: string }[];
     refundInj: string | null;
     txHashes: string[];
@@ -952,7 +1240,7 @@ export class ShroomVenue {
 
     return {
       creatorFees: creatorOwed.map((c) => ({
-        launchId: c.launchId.toString(),
+        onchainId: c.launchId.toString(),
         amount: `${formatUnits(c.amount, c.q.decimals)} ${c.q.symbol}`,
       })),
       referralFees: referral,

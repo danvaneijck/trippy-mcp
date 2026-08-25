@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ApiLaunch } from "../src/api/pump.js";
 import {
@@ -11,15 +11,84 @@ import {
 import { effectiveNetwork, type Runtime } from "../src/runtime.js";
 import { NETWORKS } from "../src/chain/networks.js";
 import { isCw20Id } from "../src/api/cw20.js";
+import { evmToInj } from "../src/keystore.js";
 
 const ISSUER = "inj13j2rpnlwl30c02d4pzukykwfeyyhelvry9cqte";
+const CORE_V2 = "0xd948740da926E8908A08414879490d0D8F96D463";
+const CORE_V1 = "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227";
 
-function rt(opts: { launches?: Record<string, ApiLaunch>; issuer?: string } = {}): Runtime {
+/** sink address -> the denom that sink's launch actually minted. */
+const sinkDenoms = new Map<string, string>();
+// Intercept ONLY the sink lookup — `smartQuery` is also how CW20 balances are
+// read, and stubbing the whole module blanks every CW20 holding in this file.
+vi.mock("../src/airdrops/wasm.js", async (orig) => {
+  const real = await orig<typeof import("../src/airdrops/wasm.js")>();
   return {
-    net: { launchDenomIssuer: opts.issuer ?? ISSUER },
+    ...real,
+    smartQuery: async (lcd: string, contract: string, query: object, opts?: unknown) => {
+      if (query && typeof query === "object" && "sink_config" in query) {
+        return { token_denom: sinkDenoms.get(contract.toLowerCase()) ?? null };
+      }
+      return real.smartQuery(lcd, contract, query, opts as never);
+    },
+  };
+});
+
+interface ChainLaunch {
+  core: string;
+  onchainId: string;
+  token: string;
+  sink?: string;
+}
+
+/**
+ * A runtime with TWO deployed cores, because one core cannot reproduce any of
+ * this: the id in a subdenom is per core, and both cores mint under the same
+ * tokenfactory issuer.
+ */
+function rt(
+  opts: {
+    issuer?: string;
+    chain?: ChainLaunch[];
+    rows?: ApiLaunch[];
+    /** What the `/launches` listing serves — the index is built from this. */
+    index?: ApiLaunch[];
+    onChainRead?: () => void;
+  } = {},
+): Runtime {
+  const chain = opts.chain ?? [];
+  const rows = opts.rows ?? [];
+  const index = opts.index ?? [];
+  const key = (core: string, id: string) => `${core.toLowerCase()}:${id}`;
+  const byKey = new Map(chain.map((c) => [key(c.core, c.onchainId), c]));
+
+  return {
+    net: {
+      launchDenomIssuer: opts.issuer ?? ISSUER,
+      lcdUrl: "https://lcd.test",
+      addresses: { launchpadCore: CORE_V2, launchpadViews: CORE_V2, curveRegistry: CORE_V2 },
+      legacyCores: [{ core: CORE_V1, views: CORE_V1, hasCurveId: false, legacy: true }],
+    },
+    shroom: {
+      forLaunch: (l: { core?: string | null }) => {
+        const core = l.core ?? CORE_V2;
+        return {
+          getLaunchView: async (id: bigint) => {
+            opts.onChainRead?.();
+            const hit = byKey.get(key(core, id.toString()));
+            if (!hit) throw new Error("no such launch on this core");
+            return { token: hit.token, sink: hit.sink ?? `0x${"ee".repeat(20)}` };
+          },
+        };
+      },
+    },
     pump: {
+      listLaunches: async ({ q }: { q?: string }) =>
+        q === undefined
+          ? { items: index } // the index build asks for everything
+          : { items: rows.filter((r) => r.token.toLowerCase() === q.toLowerCase()) },
       getLaunch: async (id: string) => {
-        const hit = (opts.launches ?? {})[String(id)];
+        const hit = rows.find((r) => r.id === id);
         if (!hit) throw new Error("not found");
         return hit;
       },
@@ -27,49 +96,155 @@ function rt(opts: { launches?: Record<string, ApiLaunch>; issuer?: string } = {}
   } as unknown as Runtime;
 }
 
-const launch = (id: string) => ({ id }) as ApiLaunch;
+const TOK_EGG = `0x${"a1".repeat(20)}`;
+const TOK_PEDRO = `0x${"b2".repeat(20)}`;
+
+const row = (o: Partial<ApiLaunch> & { id: string; token?: string }) =>
+  ({ onchainId: o.id, core: CORE_V2, token: TOK_EGG, ...o }) as ApiLaunch;
+
 
 describe("launchFromDenom", () => {
-  it("maps a launch token's bank denom back to its launch", async () => {
-    // Launch tokens ride `factory/<issuer>/…`, never `erc20:0x…` — whose bank
-    // supply for a launch token is 0. Matching only the erc20 form meant no
-    // holding ever resolved to a launch, so curve positions fell through to the
-    // Choice pricer (which cannot price a pre-graduation token) and the
-    // dedicated curve pricer never ran.
+  afterEach(() => sinkDenoms.clear());
+
+  it("reads the subdenom's id as an ON-CHAIN id, not as an API launch id", async () => {
+    // The regression. `shroom_108_…` is INJEGG, whose API id is 234; API launch
+    // 108 is an unrelated coin that also exists. Feeding the subdenom's id
+    // straight to the API resolved the wrong launch every time, and then priced
+    // the holding off its trades and labelled it with its name.
     const found = await launchFromDenom(
-      rt({ launches: { "8": launch("8") } }),
-      `factory/${ISSUER}/shroom_8_be9bddf36b94db69`,
+      rt({
+        chain: [{ core: CORE_V2, onchainId: "108", token: TOK_EGG }],
+        rows: [
+          row({ id: "234", onchainId: "108", token: TOK_EGG }),
+          row({ id: "108", onchainId: "46", token: TOK_PEDRO }),
+        ],
+      }),
+      `factory/${ISSUER}/shroom_108_179b58245e1c88ae`,
     );
-    expect(found?.id).toBe("8");
+    expect(found?.id).toBe("234");
+  });
+
+  it("finds a launch that lives on the superseded core", async () => {
+    const found = await launchFromDenom(
+      rt({
+        chain: [{ core: CORE_V1, onchainId: "3", token: TOK_EGG }],
+        rows: [row({ id: "3", onchainId: "3", token: TOK_EGG, core: CORE_V1 })],
+      }),
+      `factory/${ISSUER}/shroom_3_0181da33a45490e9`,
+    );
+    expect(found?.id).toBe("3");
+  });
+
+  it("asks the sink which core minted it when both cores share the id", async () => {
+    // Mainnet's two cores collide on ids 0..15 outright: `shroom_9_31dcaf…` and
+    // `shroom_9_f28bdc…` are different tokens under one issuer. Nothing but the
+    // salt separates them, and only the sink knows it.
+    const denom = `factory/${ISSUER}/shroom_9_f28bdc6d70eab504`;
+    const SINK_V1 = `0x${"c3".repeat(20)}`;
+    const SINK_V2 = `0x${"d4".repeat(20)}`;
+    sinkDenoms.set(evmToInj(SINK_V2 as `0x${string}`).toLowerCase(), denom);
+    sinkDenoms.set(
+      evmToInj(SINK_V1 as `0x${string}`).toLowerCase(),
+      `factory/${ISSUER}/shroom_9_31dcaf8cb918ef5c`,
+    );
+
+    const found = await launchFromDenom(
+      rt({
+        chain: [
+          { core: CORE_V1, onchainId: "9", token: TOK_PEDRO, sink: SINK_V1 },
+          { core: CORE_V2, onchainId: "9", token: TOK_EGG, sink: SINK_V2 },
+        ],
+        rows: [
+          row({ id: "9", onchainId: "9", token: TOK_PEDRO, core: CORE_V1 }),
+          row({ id: "225", onchainId: "9", token: TOK_EGG, core: CORE_V2 }),
+        ],
+      }),
+      denom,
+    );
+    expect(found?.id).toBe("225");
   });
 
   it("handles the testnet subdenom prefix", async () => {
     const found = await launchFromDenom(
-      rt({ launches: { "3": launch("3") } }),
+      rt({
+        chain: [{ core: CORE_V2, onchainId: "3", token: TOK_EGG }],
+        rows: [row({ id: "19", onchainId: "3", token: TOK_EGG })],
+      }),
       `factory/${ISSUER}/shroom_t_3_0181da33a45490e9`,
     );
-    expect(found?.id).toBe("3");
+    expect(found?.id).toBe("19");
   });
 
   it("ignores a denom minted by anyone other than the launchpad issuer", async () => {
     // Tokenfactory namespaces a denom under its creator, so this is the whole
     // spoof check: an impostor cannot mint into the issuer's prefix.
     const found = await launchFromDenom(
-      rt({ launches: { "8": launch("8") } }),
+      rt({
+        chain: [{ core: CORE_V2, onchainId: "8", token: TOK_EGG }],
+        rows: [row({ id: "8", token: TOK_EGG })],
+      }),
       "factory/inj1impostorimpostorimpostorimpostorimposto/shroom_8_be9bddf36b94db69",
     );
     expect(found).toBeNull();
   });
 
   it("ignores the issuer's non-launch denoms and other denom families", async () => {
-    const r = rt({ launches: { "8": launch("8") } });
+    const r = rt({
+      chain: [{ core: CORE_V2, onchainId: "8", token: TOK_EGG }],
+      rows: [row({ id: "8", token: TOK_EGG })],
+    });
     expect(await launchFromDenom(r, `factory/${ISSUER}/SAI`)).toBeNull();
     expect(await launchFromDenom(r, "inj")).toBeNull();
     expect(await launchFromDenom(r, "peggy0xdAC17F958D2ee523a2206206994597C13D831ec7")).toBeNull();
   });
 
-  it("returns null rather than throwing when the launch is unknown", async () => {
+  it("returns null rather than throwing when no core has that launch", async () => {
     expect(await launchFromDenom(rt({}), `factory/${ISSUER}/shroom_42_deadbeefdeadbeef`)).toBeNull();
+  });
+
+  it("answers from the listing index without touching the chain at all", async () => {
+    // `portfolio` resolves one of these per launch-token holding. Doing it with
+    // a chain read each tripled a real wallet's portfolio call to 76s; the
+    // listing already carries core, onchainId and sinkAddr on every row.
+    let chainReads = 0;
+    const r = rt({
+      chain: [{ core: CORE_V2, onchainId: "108", token: TOK_EGG }],
+      rows: [row({ id: "234", onchainId: "108", token: TOK_EGG })],
+      index: [row({ id: "234", onchainId: "108", token: TOK_EGG })],
+      onChainRead: () => chainReads++,
+    });
+    const found = await launchFromDenom(r, `factory/${ISSUER}/shroom_108_179b58245e1c88ae`);
+    expect(found?.id).toBe("234");
+    expect(chainReads).toBe(0);
+  });
+
+  it("separates a collision from the index using each candidate's sinkAddr", async () => {
+    const denom = `factory/${ISSUER}/shroom_9_f28bdc6d70eab504`;
+    sinkDenoms.set("inj1sinkv2", denom);
+    sinkDenoms.set("inj1sinkv1", `factory/${ISSUER}/shroom_9_31dcaf8cb918ef5c`);
+    let chainReads = 0;
+    const r = rt({
+      index: [
+        row({ id: "9", onchainId: "9", token: TOK_PEDRO, core: CORE_V1, sinkAddr: "inj1sinkv1" }),
+        row({ id: "34", onchainId: "9", token: TOK_EGG, core: CORE_V2, sinkAddr: "inj1sinkv2" }),
+      ],
+      onChainRead: () => chainReads++,
+    });
+    expect((await launchFromDenom(r, denom))?.id).toBe("34");
+    expect(chainReads).toBe(0);
+  });
+
+  it("refuses a row that disagrees with the chain about its core or on-chain id", async () => {
+    // The token address is the handle that crosses the two namespaces, so a row
+    // that does not agree about both is not the launch this denom names.
+    const found = await launchFromDenom(
+      rt({
+        chain: [{ core: CORE_V2, onchainId: "108", token: TOK_EGG }],
+        rows: [row({ id: "234", onchainId: "77", token: TOK_EGG })],
+      }),
+      `factory/${ISSUER}/shroom_108_179b58245e1c88ae`,
+    );
+    expect(found).toBeNull();
   });
 });
 

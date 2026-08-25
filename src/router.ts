@@ -9,7 +9,7 @@
  *  - anything else                     → Choice resolve
  */
 
-import type { ApiLaunch } from "./api/pump.js";
+import { asApiLaunchId, type ApiLaunch } from "./api/pump.js";
 import { ToolError } from "./errors.js";
 import { decodeMetadataUri } from "./metadata.js";
 import type { Runtime } from "./runtime.js";
@@ -37,7 +37,9 @@ export async function resolveToken(rt: Runtime, query: string): Promise<Resolved
 
   // Numeric → launch id.
   if (/^\d+$/.test(q)) {
-    const launch = await rt.pump.getLaunch(q).catch(() => null);
+    // A bare number from a caller means the id the tools report, which is the
+    // surrogate — the only launch id any user-facing surface ever prints.
+    const launch = await rt.pump.getLaunch(asApiLaunchId(q)).catch(() => null);
     if (!launch) throw new ToolError("not_found", `no SHROOM launch #${q}`);
     return routeLaunch(launch);
   }

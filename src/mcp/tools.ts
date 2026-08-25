@@ -9,7 +9,7 @@
  *    on SHROOM Pad (EVM), everything else through the Choice aggregator
  */
 
-import { formatUnits } from "viem";
+import { formatUnits, parseUnits, type Address } from "viem";
 
 import {
   execute as executeAirdrop,
@@ -19,8 +19,15 @@ import {
 } from "../airdrops/campaign.js";
 import { manage as manageAirdrop, type ManageArgs } from "../airdrops/manage.js";
 import { cw20Balance, cw20TokenInfo, isCw20Id } from "../api/cw20.js";
-import type { ApiCandle, ApiLaunch, ApiTrade } from "../api/pump.js";
-import { quoteAssetBySlot, type QuoteAssetInfo } from "../chain/networks.js";
+import { asApiLaunchId, type ApiCandle, type ApiLaunch, type ApiLaunchId, type ApiTrade } from "../api/pump.js";
+import {
+  coreDeploymentFor,
+  coreDeployments,
+  quoteAssetBySlot,
+  type QuoteAssetInfo,
+} from "../chain/networks.js";
+import { smartQuery } from "../airdrops/wasm.js";
+import { evmToInj } from "../keystore.js";
 import { explain as explainTopic } from "../docs/index.js";
 import { ToolError } from "../errors.js";
 import { IdentityRegistry } from "../identity/registry.js";
@@ -37,6 +44,7 @@ import {
   presetAllowedOnQuote,
   priceRunX,
   resolveCurveChoice,
+  THIN_DEV_BUY_MARGIN_SECONDS,
   type CurvePreset,
 } from "../venues/shroom/curves.js";
 import type { LaunchView } from "../venues/shroom/launchpad.js";
@@ -95,7 +103,7 @@ function rememberQuoteAsset(rt: Runtime, launch: ApiLaunch): void {
   quoteAssetMemo(rt).set(launch.id, quoteAssetBySlot(rt.net, launch.quoteAsset) ?? null);
 }
 
-async function quoteAssetForLaunch(rt: Runtime, launchId: string): Promise<QuoteAssetInfo | null> {
+async function quoteAssetForLaunch(rt: Runtime, launchId: ApiLaunchId): Promise<QuoteAssetInfo | null> {
   const memo = quoteAssetMemo(rt);
   const hit = memo.get(launchId);
   if (hit !== undefined) return hit;
@@ -370,7 +378,9 @@ export async function recentTrades(
     const target = await routed(rt, args.query);
     if (target.venue === "curve") {
       rememberQuoteAsset(rt, target.launch);
-      const { items } = await rt.pump.getTrades(target.launchId, limit);
+      // The API is keyed by the SURROGATE id; `target.launchId` is the
+      // on-chain one and fetches a different launch's tape.
+      const { items } = await rt.pump.getTrades(target.launch.id, limit);
       return { trades: await tradeSummaries(rt, items) };
     }
     // A graduated launch IS a SHROOM launch — saying otherwise sends the reader
@@ -502,7 +512,9 @@ export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> 
 
   if (target.venue === "curve") {
     const q = rt.shroom.quoteInfo(target.launch.quoteAsset);
-    const res = await rt.pump.getCandles(target.launchId, { interval, limit });
+    // Surrogate id — see `getTrades` above. This one was the worse of the two:
+    // the payload is labelled with the id the caller asked for.
+    const res = await rt.pump.getCandles(target.launch.id, { interval, limit });
     const rows = shapeCurveCandles(res.items, q.decimals);
     return {
       venue: "curve",
@@ -954,7 +966,8 @@ export async function buy(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<u
   const slippageBps = rt.policy.clampSlippageBps(args.slippageBps);
   const target = await routed(rt, args.query);
   if (target.venue === "curve") {
-    return rt.shroom.forLaunch(target.launch).buy(target.launchId, args.amount, slippageBps);
+    const res = await rt.shroom.forLaunch(target.launch).buy(target.launchId, args.amount, slippageBps);
+    return { ...res, launchId: target.launch.id };
   }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   return rt.choice.swap(counter, target.tokenId, args.amount, slippageBps / 100);
@@ -964,9 +977,10 @@ export async function sell(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<
   const slippageBps = rt.policy.clampSlippageBps(args.slippageBps);
   const target = await routed(rt, args.query);
   if (target.venue === "curve") {
-    return rt.shroom
+    const res = await rt.shroom
       .forLaunch(target.launch)
       .sell(target.launchId, args.amount === "all" ? "all" : args.amount, slippageBps);
+    return { ...res, launchId: target.launch.id };
   }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   // Same sizing `quote` reports, so the preview and the broadcast agree.
@@ -994,6 +1008,80 @@ export interface CreateTokenArgs {
    */
   curve?: string;
   initialBuy?: string;
+  /** Seconds to delay public trading, making `initialBuy` exclusive to the creator. */
+  devBuyDelaySeconds?: number;
+  /** Cap on that pre-open buy, in bps of the raise. Default 2000 (the maximum). */
+  devBuyMaxBps?: number;
+  /** Launch with a delay shorter than the keeper bind reliably fits inside. */
+  allowShortDevBuyWindow?: boolean;
+  /** "INJ"/"USDC"/"SAI" or an 0x ERC20 address. */
+  gateToken?: string;
+  gateMinBalance?: string;
+  gateDiscountBps?: number;
+  gateWindowEndsAt?: number;
+}
+
+/**
+ * Turn the flat gate arguments into the contract's `LaunchGate`.
+ *
+ * `gateToken` takes a quote-asset symbol as well as an address because those
+ * are the tokens a creator actually gates on, and they are the ones the admin
+ * allowlist holds. `minBalance` is human units, so the token's decimals have to
+ * be resolved — from the network config for a known quote asset, from the ERC20
+ * itself otherwise.
+ */
+async function resolveGateArgs(
+  rt: Runtime,
+  args: CreateTokenArgs,
+): Promise<
+  { gateToken: Address; minBalance: bigint; discountBps: number; windowEndsAt: bigint } | undefined
+> {
+  if (!args.gateToken) {
+    if (args.gateMinBalance || args.gateDiscountBps) {
+      throw new ToolError("bad_gate", "gateMinBalance and gateDiscountBps need a gateToken");
+    }
+    return undefined;
+  }
+  const known = rt.net.quoteAssets[args.gateToken.toUpperCase()];
+  let token: Address;
+  let decimals: number;
+  if (known) {
+    token = known.pairAsset as Address;
+    decimals = known.decimals;
+  } else if (/^0x[0-9a-fA-F]{40}$/.test(args.gateToken)) {
+    token = args.gateToken as Address;
+    decimals = await rt.shroom.erc20Decimals(token).catch(() => {
+      throw new ToolError(
+        "bad_gate",
+        `${args.gateToken} does not answer decimals() — it is not an ERC20 this chain knows`,
+        "gate on a quote asset symbol, or check the address",
+      );
+    });
+  } else {
+    throw new ToolError(
+      "bad_gate",
+      `gateToken must be a quote asset symbol (${Object.keys(rt.net.quoteAssets).join("/")}) or an 0x address, got "${args.gateToken}"`,
+    );
+  }
+  if (!args.gateMinBalance) {
+    throw new ToolError("bad_gate", "gateToken needs gateMinBalance — the threshold to qualify on");
+  }
+  const discountBps = args.gateDiscountBps ?? 0;
+  // Only DISCOUNT gates are held to the admin allowlist; checking it up front
+  // turns an opaque `GateTokenNotAllowed` revert into something actionable.
+  if (discountBps > 0 && !(await rt.shroom.isAllowedGateToken(token))) {
+    throw new ToolError(
+      "bad_gate",
+      `${args.gateToken} is not on the launchpad's allowed gate-token list, so it cannot back a fee discount`,
+      "ask an admin to allowlist it, or use gateDiscountBps 0 for a plain access gate (any token works there)",
+    );
+  }
+  return {
+    gateToken: token,
+    minBalance: parseUnits(args.gateMinBalance, decimals),
+    discountBps,
+    windowEndsAt: BigInt(args.gateWindowEndsAt ?? 0),
+  };
 }
 
 export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<unknown> {
@@ -1002,6 +1090,26 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
   }
   const quoteSymbol = args.quoteAsset ?? "INJ";
   const chosen = await resolveCurve(rt, args.curve, quoteSymbol);
+  const gate = await resolveGateArgs(rt, args);
+  if (args.devBuyMaxBps && !args.devBuyDelaySeconds) {
+    throw new ToolError(
+      "bad_dev_buy",
+      "devBuyMaxBps only means anything with devBuyDelaySeconds — without a delay there is no exclusive window to cap",
+    );
+  }
+  if (args.allowShortDevBuyWindow && !args.devBuyDelaySeconds) {
+    throw new ToolError(
+      "bad_dev_buy",
+      "allowShortDevBuyWindow waives the floor on devBuyDelaySeconds, and no delay was given",
+    );
+  }
+  if (args.devBuyDelaySeconds && !args.initialBuy) {
+    throw new ToolError(
+      "bad_dev_buy",
+      "devBuyDelaySeconds holds public trading closed so the CREATOR can buy first, but no initialBuy was given",
+      "pass initialBuy, or drop the delay so trading opens immediately",
+    );
+  }
   const image = await resolveImage(rt.pump, args.imageUrl, args.imagePath);
   const created = await rt.shroom.createLaunch({
     meta: {
@@ -1015,13 +1123,26 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
     },
     quoteSymbol,
     curveId: chosen?.curveId,
+    ...(args.devBuyDelaySeconds
+      ? {
+          devBuy: {
+            openDelaySeconds: args.devBuyDelaySeconds,
+            // Left undefined on purpose: the venue defaults it to the most
+            // THIS curve allows, which differs per preset.
+            maxBuyBps: args.devBuyMaxBps,
+            allowShortWindow: args.allowShortDevBuyWindow,
+          },
+        }
+      : {}),
+    ...(gate ? { gate } : {}),
   });
 
   let initialBuy: unknown = undefined;
   if (args.initialBuy && created.state === "Trading") {
     try {
+      // On-chain id, on the core we just created against — the chain's namespace.
       initialBuy = await rt.shroom.buy(
-        BigInt(created.launchId),
+        BigInt(created.onchainId),
         args.initialBuy,
         rt.policy.clampSlippageBps(undefined),
       );
@@ -1030,13 +1151,60 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
     }
   }
 
+  // What the window actually did, now that the bind and the buy have both
+  // happened. The floor in `resolveLaunchTiming` is a prediction from measured
+  // bind latency; this is the measurement itself, and it is the only place the
+  // caller can learn what the next launch should ask for.
+  //
+  // Report the near miss as well as the miss. A window that held by 8 seconds
+  // reads as a clean success from the result alone, and BOOTS is exactly that
+  // launch — 52.2s of bind against a 60s window. Nothing in the output said so.
+  if (created.tradingOpensAt > 0 && initialBuy !== undefined) {
+    const openedAt = created.tradingOpensAt * 1000;
+    const spareSeconds = Math.round((openedAt - Date.now()) / 1000);
+    if (spareSeconds <= 0) {
+      created.warnings.push(
+        `the exclusive window closed at ${new Date(openedAt).toISOString()}, before the opening buy landed — that buy competed with everyone else. Bind latency ate the delay; use a longer devBuyDelaySeconds next time.`,
+      );
+    } else if (spareSeconds < THIN_DEV_BUY_MARGIN_SECONDS) {
+      created.warnings.push(
+        `the opening buy landed with ${spareSeconds}s left of the exclusive window — it held, but barely. Bind latency varies by tens of seconds; use a longer devBuyDelaySeconds next time.`,
+      );
+    }
+  }
+
+  // Everything the caller does next — token_info, quote, the Terminal link —
+  // speaks the API's surrogate id, and it is NOT the id the chain just assigned
+  // (the next launch is on-chain 114, which is an unrelated existing coin as a
+  // surrogate). The token address is the only handle that crosses, so resolve
+  // through it rather than printing an id that names someone else's launch.
+  // The indexer trails the chain by a moment, and this runs right after the
+  // keeper bind — a couple of short retries is the difference between handing
+  // back a usable id and handing back null on a launch that worked.
+  let row: ApiLaunch | null = null;
+  for (let attempt = 0; created.token && !row && attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
+    row = await findLaunchByToken(rt, created.token);
+  }
+  const warnings = [...created.warnings];
+  if (created.status !== "dry-run" && !row) {
+    warnings.push(
+      "the pad API has not indexed this launch yet, so it has no launch id to quote at — look it up by its token address in a moment",
+    );
+  }
+
   return {
     ...created,
-    ...(chosen ? { curve: curveSummary(chosen.preset) } : {}),
-    ...(initialBuy !== undefined ? { initialBuy } : {}),
-    ...(rt.net.terminalBase
-      ? { terminalUrl: `${rt.net.terminalBase}/t/shroom-curve%3A${created.launchId}` }
+    launchId: row?.id ?? null,
+    ...(initialBuy && typeof initialBuy === "object" && "onchainId" in initialBuy
+      ? { initialBuy: { ...initialBuy, launchId: row?.id ?? null } }
       : {}),
+    ...(chosen ? { curve: curveSummary(chosen.preset) } : {}),
+    ...(rt.net.terminalBase && row
+      ? { terminalUrl: `${rt.net.terminalBase}/t/shroom-curve%3A${row.id}` }
+      : {}),
+    warnings,
+    note: "`launchId` is the id every other tool takes; `onchainId` is this launch's id on its own core and is only for raw chain calls",
   };
 }
 
@@ -1095,25 +1263,83 @@ function curveSummary(c: CurvePreset): Record<string, unknown> {
   return {
     curveId: c.id,
     name: c.name,
-    floatPct: c.floatBps / 100,
-    poolLiquidityPct: c.lpBps / 100,
+    floatPct: c.floatBps === null ? null : c.floatBps / 100,
+    poolLiquidityPct: c.lpBps === null ? null : c.lpBps / 100,
     priceRunX: Number(priceRunX(c.rBps).toFixed(2)),
     raiseMultiplier: c.targetMulBps / 10_000,
   };
 }
 
+/**
+ * Claim creator fees, referral fees and refunds across EVERY deployed core.
+ *
+ * Two things this has to get right, both of which broke when a second core
+ * deployed. The ids a caller passes are the surrogates every other tool prints,
+ * so they are resolved through the API rather than handed to the chain, where
+ * they would name a different launch. And each core keeps its OWN referral and
+ * refund ledgers, so the superseded core has to be visited even when no launch
+ * id names it — otherwise everything owed on it is simply unreachable.
+ */
 export async function claimFees(rt: Runtime, args: { launchIds?: string[] }): Promise<unknown> {
-  const ids = (args.launchIds ?? []).map((s) => {
-    if (!/^\d+$/.test(s)) throw new ToolError("bad_input", `launchIds must be numeric, got "${s}"`);
-    return BigInt(s);
-  });
-  const res = await rt.shroom.claimAll(ids);
+  const rows: ApiLaunch[] = [];
+  for (const raw of args.launchIds ?? []) {
+    if (!/^\d+$/.test(raw)) {
+      throw new ToolError("bad_input", `launchIds must be numeric, got "${raw}"`);
+    }
+    const row = await rt.pump.getLaunch(asApiLaunchId(raw)).catch(() => null);
+    if (!row) throw new ToolError("not_found", `no SHROOM launch #${raw}`);
+    // Refuse a core this build cannot name rather than dropping the launch out
+    // of every per-core batch below and reporting "nothing to claim".
+    if (!coreDeploymentFor(rt.net, row.core)) {
+      throw new ToolError(
+        "unknown_core",
+        `launch #${raw} lives on LaunchpadCore ${row.core ?? "(unnamed)"}, which this build does not know. Upgrade trippy-mcp.`,
+      );
+    }
+    rows.push(row);
+  }
+
+  const creatorFees: { launchId: string; amount: string }[] = [];
+  const referralFees: { pairAsset: string; symbol: string; amount: string }[] = [];
+  const txHashes: string[] = [];
+  const notes = new Set<string>();
+  let refundBase = 0n;
+
+  for (const dep of coreDeployments(rt.net)) {
+    const mine = rows.filter(
+      (r) => coreDeploymentFor(rt.net, r.core)?.core.toLowerCase() === dep.core.toLowerCase(),
+    );
+    const bySurrogate = new Map(mine.map((r) => [String(r.onchainId ?? r.id), r.id]));
+    const res = await rt.shroom
+      .forLaunch({ core: dep.core })
+      .claimAll(mine.map((r) => BigInt(r.onchainId ?? r.id)));
+
+    for (const c of res.creatorFees) {
+      creatorFees.push({ launchId: bySurrogate.get(c.onchainId) ?? c.onchainId, amount: c.amount });
+    }
+    referralFees.push(...res.referralFees);
+    txHashes.push(...res.txHashes);
+    for (const n of res.notes) {
+      // "nothing to claim" is only worth saying once, about all cores at once.
+      if (!n.startsWith("nothing to claim")) notes.add(n);
+    }
+    if (res.refundInj) {
+      // Base units, not floats: this is a token amount, and two cores can both
+      // owe one (a cancelled launch refunds on the core it was created on).
+      refundBase += parseUnits(res.refundInj, 18);
+    }
+  }
+
+  const refundInj = refundBase > 0n ? formatUnits(refundBase, 18) : null;
+  if (creatorFees.length === 0 && referralFees.length === 0 && refundInj === null) {
+    notes.add("nothing to claim — every ledger on every deployed core is zero");
+  }
   if (!args.launchIds?.length) {
-    res.notes.push(
+    notes.add(
       "creator fees are only checked for launch ids you pass in `launchIds` — referral fees and refunds were checked for the agent wallet",
     );
   }
-  return res;
+  return { creatorFees, referralFees, refundInj, txHashes, notes: [...notes] };
 }
 
 export async function walletStatusTool(rt: Runtime): Promise<unknown> {
@@ -1277,18 +1503,167 @@ export async function portfolio(rt: Runtime): Promise<unknown> {
  * `curveHoldingRow` — written for exactly this case — never ran.
  *
  * The issuer prefix is the check. Tokenfactory only lets an address mint under
- * its own namespace, so a denom under the launchpad's issuer cannot be spoofed
- * and the launch id it carries can be trusted without a second lookup.
+ * its own namespace, so a denom under the launchpad's issuer cannot be spoofed.
+ *
+ * 🔴 The id it carries is the launch's id ON ITS OWN CORE, and every core mints
+ * under the SAME issuer — so it is neither unique nor in the API's namespace.
+ * Mainnet's two cores collide outright on ids 0..15 (`shroom_9_31dcaf…` and
+ * `shroom_9_f28bdc…` are different tokens), and handing that id to the API
+ * resolves a real but unrelated launch: `shroom_108_…` is INJEGG, while API
+ * launch 108 is PEDRO. So the id is resolved against each core in turn, and the
+ * salt in the subdenom breaks a tie.
  */
 export async function launchFromDenom(rt: Runtime, denom: string): Promise<ApiLaunch | null> {
   const issuer = rt.net.launchDenomIssuer;
   if (!issuer || !denom.startsWith(`factory/${issuer}/`)) return null;
   const subdenom = denom.slice(`factory/${issuer}/`.length);
-  // `<prefix>_<launchId>_<hash>` — the prefix is a deploy-time setting
+  // `<prefix>_<onchainId>_<salt>` — the prefix is a deploy-time setting
   // ("shroom" on mainnet, "shroom_t" on testnet), so anchor on the tail.
-  const id = /^[A-Za-z][A-Za-z_]*_(\d+)_[0-9a-fA-F]+$/.exec(subdenom)?.[1];
-  if (!id) return null;
-  return rt.pump.getLaunch(id).catch(() => null);
+  const onchainId = /^[A-Za-z][A-Za-z_]*_(\d+)_[0-9a-fA-F]+$/.exec(subdenom)?.[1];
+  if (!onchainId) return null;
+
+  // Index first. `portfolio` resolves one of these per launch-token holding, so
+  // a per-denom chain read is paid ~40 times on a real wallet — the listing
+  // already carries `core`, `onchainId` and `sinkAddr` on every row, and one
+  // pass over it answers the unambiguous majority for free.
+  const byId = (await launchIndex(rt)).get(onchainId) ?? [];
+  if (byId.length === 1) return byId[0]!;
+  if (byId.length > 1) return disambiguateBySink(rt, byId, denom);
+
+  // Index miss: the listing omits some launches (hidden, and everything the
+  // backend filters), so a held token can be absent from it. Fall back to
+  // asking each core directly rather than reporting the holding as unknown.
+  const hits: ApiLaunch[] = [];
+  for (const dep of coreDeployments(rt.net)) {
+    const live = await rt.shroom
+      .forLaunch({ core: dep.core })
+      .getLaunchView(BigInt(onchainId))
+      .catch(() => null);
+    if (!live) continue;
+    // The token address is the launch's identity across both namespaces: the
+    // chain gave it to us for (core, onchainId), and the API row it resolves to
+    // has to agree about both before it names the same launch.
+    const row = await findLaunchByToken(rt, live.token);
+    if (!row) continue;
+    if (row.core && row.core.toLowerCase() !== dep.core.toLowerCase()) continue;
+    if (String(row.onchainId ?? row.id) !== onchainId) continue;
+    hits.push({ ...row, sinkAddr: row.sinkAddr ?? evmToInj(live.sink) });
+  }
+  if (hits.length <= 1) return hits[0] ?? null;
+  return disambiguateBySink(rt, hits, denom);
+}
+
+/**
+ * Which of several same-id launches minted `denom`.
+ *
+ * Both mainnet cores mint under one tokenfactory issuer and both numbered their
+ * launches from 0, so ids 0..15 name two different tokens. Nothing on a launch
+ * derives the subdenom's salt — it is not a hash of the token, the sink, the
+ * creator or the metadata — so the sink is asked what it actually minted.
+ * Guessing the newer core instead would mislabel and misprice a holding in the
+ * caller's own wallet, silently.
+ *
+ * Answered from a map built for EVERY colliding launch at once, because
+ * `portfolio` hits this per holding: on a real wallet that was a dozen
+ * sequential round trips, against one parallel batch here.
+ */
+async function disambiguateBySink(
+  rt: Runtime,
+  candidates: ApiLaunch[],
+  denom: string,
+): Promise<ApiLaunch | null> {
+  const known = (await collidingDenoms(rt)).get(denom);
+  if (known) return known;
+  // Not in the batch (its sink would not answer, or the launch came from the
+  // chain fallback rather than the listing) — ask this launch's own sinks.
+  const answers = await Promise.all(
+    candidates.map(async (row) => {
+      if (!row.sinkAddr) return null;
+      const minted = await sinkDenom(rt, row.sinkAddr);
+      return minted === denom ? row : null;
+    }),
+  );
+  return answers.find((r): r is ApiLaunch => r !== null) ?? null;
+}
+
+function sinkDenom(rt: Runtime, sink: string): Promise<string | null> {
+  return smartQuery<{ token_denom?: string }>(rt.net.lcdUrl, sink, { sink_config: {} })
+    .then((c) => c.token_denom ?? null)
+    .catch(() => null);
+}
+
+const collidingDenomCache = new WeakMap<Runtime, { at: number; byDenom: Map<string, ApiLaunch> }>();
+
+/**
+ * `token_denom` -> launch, for every launch whose on-chain id is shared with a
+ * launch on another core.
+ *
+ * Only the colliding ids are worth asking about: an id that exists on exactly
+ * one core is already answered by the index for free. Mainnet's superseded core
+ * is closed at 16 launches, so this is a bounded, one-shot batch.
+ */
+async function collidingDenoms(rt: Runtime): Promise<Map<string, ApiLaunch>> {
+  const hit = collidingDenomCache.get(rt);
+  if (hit && Date.now() - hit.at < LAUNCH_INDEX_TTL_MS) return hit.byDenom;
+
+  const contested = [...(await launchIndex(rt)).values()]
+    .filter((rows) => rows.length > 1)
+    .flat()
+    .filter((row) => row.sinkAddr);
+  const resolved = await Promise.all(
+    contested.map(async (row) => [await sinkDenom(rt, row.sinkAddr!), row] as const),
+  );
+  const byDenom = new Map<string, ApiLaunch>();
+  for (const [minted, row] of resolved) if (minted) byDenom.set(minted, row);
+
+  collidingDenomCache.set(rt, { at: Date.now(), byDenom });
+  return byDenom;
+}
+
+/** How many listing pages to walk before giving up and using the chain path. */
+const LAUNCH_INDEX_MAX_PAGES = 20;
+const LAUNCH_INDEX_PAGE = 50;
+const LAUNCH_INDEX_TTL_MS = 60_000;
+
+const launchIndexCache = new WeakMap<
+  Runtime,
+  { at: number; byOnchainId: Map<string, ApiLaunch[]> }
+>();
+
+/**
+ * Every listed launch, grouped by its ON-CHAIN id across all cores.
+ *
+ * Grouped by on-chain id and not by surrogate because that is the only id a
+ * bank denom carries, and the point of the index is to answer "which launch is
+ * this denom" without a chain read per holding. A group of more than one is a
+ * cross-core collision, not an error.
+ */
+async function launchIndex(rt: Runtime): Promise<Map<string, ApiLaunch[]>> {
+  const hit = launchIndexCache.get(rt);
+  if (hit && Date.now() - hit.at < LAUNCH_INDEX_TTL_MS) return hit.byOnchainId;
+
+  const byOnchainId = new Map<string, ApiLaunch[]>();
+  try {
+    let cursor: number | undefined = 0;
+    for (let page = 0; page < LAUNCH_INDEX_MAX_PAGES; page++) {
+      const res: { items: ApiLaunch[]; cursor?: number } = await rt.pump.listLaunches({
+        limit: LAUNCH_INDEX_PAGE,
+        cursor,
+      });
+      for (const row of res.items) {
+        const key = String(row.onchainId ?? row.id);
+        const bucket = byOnchainId.get(key);
+        if (bucket) bucket.push(row);
+        else byOnchainId.set(key, [row]);
+      }
+      if (res.items.length < LAUNCH_INDEX_PAGE || res.cursor === undefined) break;
+      cursor = res.cursor;
+    }
+  } catch {
+    // A partial or empty index is fine — every miss falls through to the chain.
+  }
+  launchIndexCache.set(rt, { at: Date.now(), byOnchainId });
+  return byOnchainId;
 }
 
 async function findLaunchByToken(rt: Runtime, token: string): Promise<ApiLaunch | null> {

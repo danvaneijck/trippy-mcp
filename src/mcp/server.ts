@@ -114,7 +114,7 @@ function registerAirdropTools(server: McpServer): void {
         .describe(
           "token_holders only: that denom's exponent, when the chain does not publish one. It sets what minWeight counts in, so a wrong value moves every holder across the threshold.",
         ),
-      launchId: z.string().optional().describe("launch_holders only: the SHROOM Pad launch id"),
+      launchId: z.string().optional().describe("launch_holders only: the SHROOM Pad launch id, as token_info and portfolio report it"),
       collection: z
         .string()
         .optional()
@@ -400,10 +400,20 @@ export async function serve(): Promise<void> {
   register(
     server,
     "create_token",
-    'Launch a new token on SHROOM Pad (bonding curve, graduates to a Choice CLMM pool). Costs the on-chain creation fee (~0.2 INJ) plus optional initialBuy. The launch binds via the keeper within ~a minute — the tool waits and reports the tradable state. Where the deployment offers a curve menu, `curve` picks the shape of the raise and is FROZEN onto the launch forever — read explain("shroom_pad_curves") before choosing one; omitting it uses the standard curve.',
+    'Launch a new token on SHROOM Pad (bonding curve, graduates to a Choice CLMM pool). Costs the on-chain creation fee (read it live with explain("shroom_pad_fees") — it is owner-settable and has changed on mainnet) plus optional initialBuy. The launch binds via the keeper within ~a minute — the tool waits and reports the tradable state. Where the deployment offers a curve menu, `curve` picks the shape of the raise and is FROZEN onto the launch forever — read explain("shroom_pad_curves") before choosing one; omitting it uses the standard curve.',
     {
-      name: z.string().min(1).max(48),
-      symbol: z.string().min(1).max(12),
+      name: z
+        .string()
+        .min(1)
+        .max(64)
+        .describe(
+          "display name. The chain's limit is 64 UTF-8 BYTES, not characters — accents, CJK and emoji each cost several, and an over-long name is DROPPED at creation, leaving the token named after its raw denom forever.",
+        ),
+      symbol: z
+        .string()
+        .min(1)
+        .max(32)
+        .describe("ticker, uppercased. Limit is 32 UTF-8 bytes, and it is permanent."),
       description: z.string().max(500).optional(),
       imageUrl: z.string().optional().describe("https URL of the token image"),
       imagePath: z.string().optional().describe("local file path — uploaded to IPFS via the SHROOM API"),
@@ -418,6 +428,57 @@ export async function serve(): Promise<void> {
           'bonding-curve preset, by name ("standard", "whale", …) or curveId. Frozen onto the launch and not changeable afterwards. Presets are masked per quote asset, so an illegal pairing is refused with the legal list. Only where the deployment has a CurveRegistry; see explain("shroom_pad_curves"). Default: curveId 0, the standard curve.',
         ),
       initialBuy: z.string().optional().describe("optional first buy in quote-asset human units"),
+      devBuyDelaySeconds: z
+        .number()
+        .int()
+        .min(0)
+        .max(86_400)
+        .optional()
+        .describe(
+          "delay public trading by this many seconds so `initialBuy` is an EXCLUSIVE creator buy instead of a public race. Without it the opening buy is open to anyone the moment the keeper binds. The window must outlast the keeper bind, which has measured 28-65s on mainnet, so values under 180 are REFUSED before anything is spent (override with allowShortDevBuyWindow). 180 is a good default. The contract refuses exclusivity without a cap, so `devBuyMaxBps` applies; max 86400 (24h). Frozen onto the launch — it cannot be changed afterwards.",
+        ),
+      allowShortDevBuyWindow: z
+        .boolean()
+        .optional()
+        .describe(
+          "launch with a devBuyDelaySeconds under 180 anyway. The window will probably lapse during the keeper bind, which makes the opening buy a public race on a launch that opens at a predictable moment — the exact thing the delay is for. Only pass this deliberately.",
+        ),
+      devBuyMaxBps: z
+        .number()
+        .int()
+        .min(1)
+        .max(2_000)
+        .optional()
+        .describe(
+          "cap on the creator's pre-open buy, in bps of the graduation raise. Omit it to take the most THIS curve allows: the contract also holds the cap to 50% of the launch's float, which binds sooner on steeper curves, so the ceiling is 2000 on most presets and 1154 on `steep`. An explicit value over that is refused rather than clamped. Only meaningful with devBuyDelaySeconds.",
+        ),
+      gateToken: z
+        .string()
+        .optional()
+        .describe(
+          'holder gate token: "INJ" / "USDC" / "SAI", or an 0x ERC20 address. With gateDiscountBps > 0 it is a FEE DISCOUNT for qualifying holders and restricts nobody; with 0 it is a hard ACCESS gate that stops everyone else buying while the window is open.',
+        ),
+      gateMinBalance: z
+        .string()
+        .optional()
+        .describe("how much of gateToken a wallet must hold to qualify, in human units"),
+      gateDiscountBps: z
+        .number()
+        .int()
+        .min(0)
+        .max(10_000)
+        .optional()
+        .describe(
+          "share of the CREATOR's fee cut waived for qualifying holders (10000 = all of it; the platform's leg is never reduced). 0 makes it an access gate instead. Discount gates require an admin-allowlisted gateToken.",
+        ),
+      gateWindowEndsAt: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe(
+          "unix seconds after which the gate stops applying. 0 means it NEVER expires — on an access gate that closes the launch to non-holders permanently.",
+        ),
     },
     (rt2, a: t.CreateTokenArgs) => t.createToken(rt2, a),
   );
@@ -425,7 +486,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "claim_fees",
-    "Claim everything claimable from SHROOM Pad: creator fees for the given launchIds, referral fees, and cancelled-launch refunds. Reads the ledgers first and only claims non-zero balances.",
+    "Claim everything claimable from SHROOM Pad: creator fees for the given launchIds, referral fees, and cancelled-launch refunds. `launchIds` are the ids token_info and portfolio report. Every deployed launchpad core is checked, because each keeps its own ledgers. Reads the ledgers first and only claims non-zero balances.",
     { launchIds: z.array(z.string()).optional() },
     (rt2, a: { launchIds?: string[] }) => t.claimFees(rt2, a),
   );

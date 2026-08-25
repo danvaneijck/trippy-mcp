@@ -10,6 +10,13 @@
  * Pure types and arithmetic live here; the chain reads are on `ShroomVenue`.
  */
 
+/**
+ * Positions of `floatBps` / `lpBps` in `CurveRegistry.shapeOf`'s return tuple
+ * `(tokensAtGrad, lpTokens, totalSupply, floatBps, lpBps)`.
+ */
+export const SHAPE_FLOAT_BPS = 3;
+export const SHAPE_LP_BPS = 4;
+
 /** One entry of the menu, as an agent sees it. */
 export interface CurvePreset {
   /**
@@ -33,10 +40,16 @@ export interface CurvePreset {
   /** Bit `q` set => legal on quote slot `q`. See `presetAllowedOnQuote`. */
   quoteMask: number;
   enabled: boolean;
-  /** Share of total supply reaching the market through the curve, in bps. */
-  floatBps: number;
-  /** Share held back to seed the graduation pool, in bps. */
-  lpBps: number;
+  /**
+   * Share of total supply reaching the market through the curve, in bps.
+   *
+   * Null when the registry's `shapeOf` would not read. Nullable rather than 0
+   * on purpose: a zero float is a claim about the launch, and the wrong one —
+   * an absent number has to render as absent everywhere it is shown.
+   */
+  floatBps: number | null;
+  /** Share held back to seed the graduation pool, in bps. Null: see `floatBps`. */
+  lpBps: number | null;
   /** Virtual token reserve, whole tokens (launch tokens are 18-decimal). */
   virtualToken: number;
 }
@@ -99,6 +112,88 @@ export function graduationFdvOfPreset(
   const r = p.rBps / 10_000;
   if (r <= 0 || p.virtualToken <= 0) return 0;
   return (totalSupply * raiseOfPreset(p, quoteBaseTarget) * (1 + r) ** 2) / (p.virtualToken * r);
+}
+
+/** Contract-side ceilings on the V-4 dev-buy window. Mirrors LaunchpadCore. */
+export const MAX_DEV_BUY_BPS = 2_000;
+export const MAX_DEV_FLOAT_BPS = 5_000;
+export const MAX_OPEN_DELAY_SECONDS = 24 * 60 * 60;
+/** Contract-side ceiling on the holder discount (100% of the creator's cut). */
+export const MAX_DISCOUNT_BPS = 10_000;
+
+/**
+ * NOT a contract limit — a client-side floor on the dev-buy delay, measured.
+ *
+ * The exclusive window has to contain the keeper bind AND the opening buy, and
+ * the contract has no opinion on whether it does: a window that lapses first
+ * still produces a valid launch, it just produces a PUBLIC opening buy on a
+ * launch that opens at a moment every watcher can predict. That is the whole
+ * thing the delay was asked for, lost silently.
+ *
+ * Measured create -> first-trade over the 8 mainnet launches before BOOTS:
+ * 28s to 65s, median 53s. BOOTS itself ran 52.2s against a 60s window and
+ * cleared it by ~8s. 180s is roughly 3x the observed worst case, which leaves
+ * room for a slow bind without making the launch feel held back.
+ *
+ * Keeper latency is an operational fact, not a protocol one, so this is a soft
+ * floor: `allowShortDevBuyWindow` opts out of it deliberately. Do not clamp to
+ * it — the value is frozen onto the launch, and silently launching with timing
+ * the caller did not choose is worse than refusing.
+ */
+export const MIN_SAFE_OPEN_DELAY_SECONDS = 180;
+
+/**
+ * Below this much daylight between the opening buy landing and public trading,
+ * say so. The window was not lost, but it was closer than the caller can see
+ * from a successful result, and the next launch should get a longer delay.
+ */
+export const THIN_DEV_BUY_MARGIN_SECONDS = 30;
+
+/**
+ * What share of the launch's float a dev buy of `maxBuyBps` would take, in bps.
+ *
+ * Mirrors `_validateDevBuy`. The contract prices the cap against the curve:
+ * `cap = target·m`, `devTokens = cap·vt/(vp+cap)`, `tokensAtGrad =
+ * vt·target/(vp+target)`, and with `vp = target·r` both the target and the
+ * virtual token reserve cancel out of the ratio:
+ *
+ *     floatBps = 1e4 · m(1+r) / (r+m)
+ *
+ * So it depends only on the curve's steepness and the cap — not on the quote
+ * asset, and not on the size of the raise. Which is why the answer differs per
+ * preset: 2000 bps takes 46.67% of the float on the standard curve and 65.71%
+ * on `steep`, and the second one reverts.
+ */
+export function devBuyFloatBps(rBps: number, maxBuyBps: number): number {
+  if (rBps <= 0 || maxBuyBps <= 0) return 0;
+  const r = rBps / 10_000;
+  const m = maxBuyBps / 10_000;
+  return Math.round((10_000 * m * (1 + r)) / (r + m));
+}
+
+/**
+ * The largest `maxBuyBpsInGuardWindow` this curve will accept.
+ *
+ * Invert the above at the ceiling: `1e4·m(1+r)/(r+m) <= MAX_DEV_FLOAT_BPS`
+ * solves to `m <= r/(1+2r)` at a 50% ceiling, then the absolute
+ * `MAX_DEV_BUY_BPS` applies on top. Steeper curves reach the float ceiling
+ * first — `steep` tops out at 1154 bps where every other preset gets the full
+ * 2000 — so a caller that just used the maximum would eat a revert on one
+ * preset out of seven, after paying for it.
+ */
+export function maxDevBuyBpsFor(rBps: number): number {
+  if (rBps <= 0) return 0;
+  const r = rBps / 10_000;
+  const ceiling = MAX_DEV_FLOAT_BPS / 10_000;
+  // m(1+r)/(r+m) <= ceiling  =>  m <= ceiling·r / (1 + r − ceiling)
+  let m = Math.min(MAX_DEV_BUY_BPS, Math.floor(((ceiling * r) / (1 + r - ceiling)) * 10_000));
+  // The closed form is exact in reals; `devBuyFloatBps` rounds. Walk the last
+  // bps or two so this agrees EXACTLY with the check that will refuse the
+  // launch — a hint that suggests 1153 where 1154 is also legal is a hint that
+  // quietly costs the creator part of their window.
+  while (m < MAX_DEV_BUY_BPS && devBuyFloatBps(rBps, m + 1) <= MAX_DEV_FLOAT_BPS) m += 1;
+  while (m > 0 && devBuyFloatBps(rBps, m) > MAX_DEV_FLOAT_BPS) m -= 1;
+  return m;
 }
 
 /**
