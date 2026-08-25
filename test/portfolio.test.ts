@@ -46,9 +46,19 @@ interface ChainLaunch {
  * this: the id in a subdenom is per core, and both cores mint under the same
  * tokenfactory issuer.
  */
-function rt(opts: { issuer?: string; chain?: ChainLaunch[]; rows?: ApiLaunch[] } = {}): Runtime {
+function rt(
+  opts: {
+    issuer?: string;
+    chain?: ChainLaunch[];
+    rows?: ApiLaunch[];
+    /** What the `/launches` listing serves — the index is built from this. */
+    index?: ApiLaunch[];
+    onChainRead?: () => void;
+  } = {},
+): Runtime {
   const chain = opts.chain ?? [];
   const rows = opts.rows ?? [];
+  const index = opts.index ?? [];
   const key = (core: string, id: string) => `${core.toLowerCase()}:${id}`;
   const byKey = new Map(chain.map((c) => [key(c.core, c.onchainId), c]));
 
@@ -64,6 +74,7 @@ function rt(opts: { issuer?: string; chain?: ChainLaunch[]; rows?: ApiLaunch[] }
         const core = l.core ?? CORE_V2;
         return {
           getLaunchView: async (id: bigint) => {
+            opts.onChainRead?.();
             const hit = byKey.get(key(core, id.toString()));
             if (!hit) throw new Error("no such launch on this core");
             return { token: hit.token, sink: hit.sink ?? `0x${"ee".repeat(20)}` };
@@ -72,9 +83,10 @@ function rt(opts: { issuer?: string; chain?: ChainLaunch[]; rows?: ApiLaunch[] }
       },
     },
     pump: {
-      listLaunches: async ({ q }: { q?: string }) => ({
-        items: rows.filter((r) => r.token.toLowerCase() === String(q).toLowerCase()),
-      }),
+      listLaunches: async ({ q }: { q?: string }) =>
+        q === undefined
+          ? { items: index } // the index build asks for everything
+          : { items: rows.filter((r) => r.token.toLowerCase() === q.toLowerCase()) },
       getLaunch: async (id: string) => {
         const hit = rows.find((r) => r.id === id);
         if (!hit) throw new Error("not found");
@@ -84,11 +96,12 @@ function rt(opts: { issuer?: string; chain?: ChainLaunch[]; rows?: ApiLaunch[] }
   } as unknown as Runtime;
 }
 
-const row = (o: Partial<ApiLaunch> & { id: string; token: string }) =>
-  ({ onchainId: o.id, core: CORE_V2, ...o }) as ApiLaunch;
-
 const TOK_EGG = `0x${"a1".repeat(20)}`;
 const TOK_PEDRO = `0x${"b2".repeat(20)}`;
+
+const row = (o: Partial<ApiLaunch> & { id: string; token?: string }) =>
+  ({ onchainId: o.id, core: CORE_V2, token: TOK_EGG, ...o }) as ApiLaunch;
+
 
 describe("launchFromDenom", () => {
   afterEach(() => sinkDenoms.clear());
@@ -187,6 +200,38 @@ describe("launchFromDenom", () => {
 
   it("returns null rather than throwing when no core has that launch", async () => {
     expect(await launchFromDenom(rt({}), `factory/${ISSUER}/shroom_42_deadbeefdeadbeef`)).toBeNull();
+  });
+
+  it("answers from the listing index without touching the chain at all", async () => {
+    // `portfolio` resolves one of these per launch-token holding. Doing it with
+    // a chain read each tripled a real wallet's portfolio call to 76s; the
+    // listing already carries core, onchainId and sinkAddr on every row.
+    let chainReads = 0;
+    const r = rt({
+      chain: [{ core: CORE_V2, onchainId: "108", token: TOK_EGG }],
+      rows: [row({ id: "234", onchainId: "108", token: TOK_EGG })],
+      index: [row({ id: "234", onchainId: "108", token: TOK_EGG })],
+      onChainRead: () => chainReads++,
+    });
+    const found = await launchFromDenom(r, `factory/${ISSUER}/shroom_108_179b58245e1c88ae`);
+    expect(found?.id).toBe("234");
+    expect(chainReads).toBe(0);
+  });
+
+  it("separates a collision from the index using each candidate's sinkAddr", async () => {
+    const denom = `factory/${ISSUER}/shroom_9_f28bdc6d70eab504`;
+    sinkDenoms.set("inj1sinkv2", denom);
+    sinkDenoms.set("inj1sinkv1", `factory/${ISSUER}/shroom_9_31dcaf8cb918ef5c`);
+    let chainReads = 0;
+    const r = rt({
+      index: [
+        row({ id: "9", onchainId: "9", token: TOK_PEDRO, core: CORE_V1, sinkAddr: "inj1sinkv1" }),
+        row({ id: "34", onchainId: "9", token: TOK_EGG, core: CORE_V2, sinkAddr: "inj1sinkv2" }),
+      ],
+      onChainRead: () => chainReads++,
+    });
+    expect((await launchFromDenom(r, denom))?.id).toBe("34");
+    expect(chainReads).toBe(0);
   });
 
   it("refuses a row that disagrees with the chain about its core or on-chain id", async () => {

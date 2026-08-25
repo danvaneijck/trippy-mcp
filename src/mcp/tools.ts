@@ -1382,6 +1382,17 @@ export async function launchFromDenom(rt: Runtime, denom: string): Promise<ApiLa
   const onchainId = /^[A-Za-z][A-Za-z_]*_(\d+)_[0-9a-fA-F]+$/.exec(subdenom)?.[1];
   if (!onchainId) return null;
 
+  // Index first. `portfolio` resolves one of these per launch-token holding, so
+  // a per-denom chain read is paid ~40 times on a real wallet — the listing
+  // already carries `core`, `onchainId` and `sinkAddr` on every row, and one
+  // pass over it answers the unambiguous majority for free.
+  const byId = (await launchIndex(rt)).get(onchainId) ?? [];
+  if (byId.length === 1) return byId[0]!;
+  if (byId.length > 1) return disambiguateBySink(rt, byId, denom);
+
+  // Index miss: the listing omits some launches (hidden, and everything the
+  // backend filters), so a held token can be absent from it. Fall back to
+  // asking each core directly rather than reporting the holding as unknown.
   const hits: ApiLaunch[] = [];
   for (const dep of coreDeployments(rt.net)) {
     const live = await rt.shroom
@@ -1396,28 +1407,123 @@ export async function launchFromDenom(rt: Runtime, denom: string): Promise<ApiLa
     if (!row) continue;
     if (row.core && row.core.toLowerCase() !== dep.core.toLowerCase()) continue;
     if (String(row.onchainId ?? row.id) !== onchainId) continue;
-    hits.push(row);
+    hits.push({ ...row, sinkAddr: row.sinkAddr ?? evmToInj(live.sink) });
   }
   if (hits.length <= 1) return hits[0] ?? null;
+  return disambiguateBySink(rt, hits, denom);
+}
 
-  // Two cores both issued a launch at this id. Only the sink knows which of
-  // them minted THIS denom, so ask it rather than picking the newer core —
-  // guessing here mislabels and misprices a holding in the caller's own wallet.
-  for (const row of hits) {
-    const sink = await rt.shroom
-      .forLaunch(row)
-      .getLaunchView(BigInt(row.onchainId ?? row.id))
-      .then((l) => evmToInj(l.sink))
-      .catch(() => null);
-    if (!sink) continue;
-    const cfg = await smartQuery<{ token_denom?: string }>(
-      rt.net.lcdUrl,
-      sink,
-      { sink_config: {} },
-    ).catch(() => null);
-    if (cfg?.token_denom === denom) return row;
+/**
+ * Which of several same-id launches minted `denom`.
+ *
+ * Both mainnet cores mint under one tokenfactory issuer and both numbered their
+ * launches from 0, so ids 0..15 name two different tokens. Nothing on a launch
+ * derives the subdenom's salt — it is not a hash of the token, the sink, the
+ * creator or the metadata — so the sink is asked what it actually minted.
+ * Guessing the newer core instead would mislabel and misprice a holding in the
+ * caller's own wallet, silently.
+ *
+ * Answered from a map built for EVERY colliding launch at once, because
+ * `portfolio` hits this per holding: on a real wallet that was a dozen
+ * sequential round trips, against one parallel batch here.
+ */
+async function disambiguateBySink(
+  rt: Runtime,
+  candidates: ApiLaunch[],
+  denom: string,
+): Promise<ApiLaunch | null> {
+  const known = (await collidingDenoms(rt)).get(denom);
+  if (known) return known;
+  // Not in the batch (its sink would not answer, or the launch came from the
+  // chain fallback rather than the listing) — ask this launch's own sinks.
+  const answers = await Promise.all(
+    candidates.map(async (row) => {
+      if (!row.sinkAddr) return null;
+      const minted = await sinkDenom(rt, row.sinkAddr);
+      return minted === denom ? row : null;
+    }),
+  );
+  return answers.find((r): r is ApiLaunch => r !== null) ?? null;
+}
+
+function sinkDenom(rt: Runtime, sink: string): Promise<string | null> {
+  return smartQuery<{ token_denom?: string }>(rt.net.lcdUrl, sink, { sink_config: {} })
+    .then((c) => c.token_denom ?? null)
+    .catch(() => null);
+}
+
+const collidingDenomCache = new WeakMap<Runtime, { at: number; byDenom: Map<string, ApiLaunch> }>();
+
+/**
+ * `token_denom` -> launch, for every launch whose on-chain id is shared with a
+ * launch on another core.
+ *
+ * Only the colliding ids are worth asking about: an id that exists on exactly
+ * one core is already answered by the index for free. Mainnet's superseded core
+ * is closed at 16 launches, so this is a bounded, one-shot batch.
+ */
+async function collidingDenoms(rt: Runtime): Promise<Map<string, ApiLaunch>> {
+  const hit = collidingDenomCache.get(rt);
+  if (hit && Date.now() - hit.at < LAUNCH_INDEX_TTL_MS) return hit.byDenom;
+
+  const contested = [...(await launchIndex(rt)).values()]
+    .filter((rows) => rows.length > 1)
+    .flat()
+    .filter((row) => row.sinkAddr);
+  const resolved = await Promise.all(
+    contested.map(async (row) => [await sinkDenom(rt, row.sinkAddr!), row] as const),
+  );
+  const byDenom = new Map<string, ApiLaunch>();
+  for (const [minted, row] of resolved) if (minted) byDenom.set(minted, row);
+
+  collidingDenomCache.set(rt, { at: Date.now(), byDenom });
+  return byDenom;
+}
+
+/** How many listing pages to walk before giving up and using the chain path. */
+const LAUNCH_INDEX_MAX_PAGES = 20;
+const LAUNCH_INDEX_PAGE = 50;
+const LAUNCH_INDEX_TTL_MS = 60_000;
+
+const launchIndexCache = new WeakMap<
+  Runtime,
+  { at: number; byOnchainId: Map<string, ApiLaunch[]> }
+>();
+
+/**
+ * Every listed launch, grouped by its ON-CHAIN id across all cores.
+ *
+ * Grouped by on-chain id and not by surrogate because that is the only id a
+ * bank denom carries, and the point of the index is to answer "which launch is
+ * this denom" without a chain read per holding. A group of more than one is a
+ * cross-core collision, not an error.
+ */
+async function launchIndex(rt: Runtime): Promise<Map<string, ApiLaunch[]>> {
+  const hit = launchIndexCache.get(rt);
+  if (hit && Date.now() - hit.at < LAUNCH_INDEX_TTL_MS) return hit.byOnchainId;
+
+  const byOnchainId = new Map<string, ApiLaunch[]>();
+  try {
+    let cursor: number | undefined = 0;
+    for (let page = 0; page < LAUNCH_INDEX_MAX_PAGES; page++) {
+      const res: { items: ApiLaunch[]; cursor?: number } = await rt.pump.listLaunches({
+        limit: LAUNCH_INDEX_PAGE,
+        cursor,
+      });
+      for (const row of res.items) {
+        const key = String(row.onchainId ?? row.id);
+        const bucket = byOnchainId.get(key);
+        if (bucket) bucket.push(row);
+        else byOnchainId.set(key, [row]);
+      }
+      if (res.items.length < LAUNCH_INDEX_PAGE || res.cursor === undefined) break;
+      cursor = res.cursor;
+    }
+  } catch {
+    // A partial or empty index is fine — every miss falls through to the chain.
   }
-  return null;
+  launchIndexCache.set(rt, { at: Date.now(), byOnchainId });
+  return byOnchainId;
 }
 
 async function findLaunchByToken(rt: Runtime, token: string): Promise<ApiLaunch | null> {

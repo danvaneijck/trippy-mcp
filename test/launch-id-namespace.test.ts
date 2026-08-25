@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { asApiLaunchId, type ApiLaunch } from "../src/api/pump.js";
 import { candles, claimFees, createToken, recentTrades } from "../src/mcp/tools.js";
 import { ShroomVenue } from "../src/venues/shroom/launchpad.js";
-import type { Runtime } from "../src/runtime.js";
-import { NETWORKS, quoteAssetBySlot } from "../src/chain/networks.js";
+import { allowedTargetsFor, type Runtime } from "../src/runtime.js";
+import { NETWORKS, coreDeployments, quoteAssetBySlot } from "../src/chain/networks.js";
 
 /**
  * The v2 launchpad gave every launch TWO ids and the package crossed them.
@@ -218,6 +218,24 @@ describe("create_token", () => {
     expect(res.launchId).toBeNull();
     expect(res.terminalUrl).toBeUndefined();
     expect(res.warnings.join(" ")).toMatch(/has not indexed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// the policy allowlist is per deployment, not per network
+// ---------------------------------------------------------------------------
+
+describe("contract allowlist", () => {
+  it("admits every deployed core, not only the current one", () => {
+    // A superseded core keeps trading and paying out what is already on it.
+    // Naming only the current core refused every write against the old one
+    // inside the signer, which reads as policy working rather than as a
+    // missing address — and there is no way for a caller to tell them apart.
+    const allowed = allowedTargetsFor(NETWORKS.mainnet);
+    for (const dep of coreDeployments(NETWORKS.mainnet)) {
+      expect(allowed).toContain(dep.core.toLowerCase());
+    }
+    expect(coreDeployments(NETWORKS.mainnet).length).toBeGreaterThan(1);
   });
 });
 

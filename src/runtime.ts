@@ -8,7 +8,7 @@ import { ChoiceApi } from "./api/choice.js";
 import { PumpApi } from "./api/pump.js";
 import { BANK_MULTISEND_TARGET, CosmosSigner } from "./chain/cosmos.js";
 import { EvmSigner } from "./chain/evm.js";
-import { getNetwork, makeChain, type NetworkDef } from "./chain/networks.js";
+import { coreDeployments, getNetwork, makeChain, type NetworkDef } from "./chain/networks.js";
 import { makeTransport } from "./chain/transport.js";
 import { homeDir as defaultHomeDir, loadConfig, type Config } from "./config.js";
 import { evmToInj, loadKeystore, unlockKeystore } from "./keystore.js";
@@ -59,7 +59,13 @@ export function effectiveNetwork(cfg: Config): NetworkDef {
 export function allowedTargetsFor(net: NetworkDef): Set<string> {
   return new Set(
     [
-      net.addresses.launchpadCore,
+      // EVERY deployed core, not just the current one. A superseded core keeps
+      // trading, graduating and paying out the launches already on it — eight
+      // of mainnet's sixteen v1 launches were still in Trading when the v2 core
+      // went live, and four were Cancelled with a refund owed. Listing only the
+      // current core refused all of that inside the signer, which reads as the
+      // policy engine working rather than as a missing address.
+      ...coreDeployments(net).map((d) => d.core),
       net.addresses.winj9,
       ...Object.values(net.quoteAssets).map((q) => q.pairAsset),
       net.choiceAggregator,

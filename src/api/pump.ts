@@ -61,6 +61,13 @@ export interface ApiLaunch {
    */
   core?: string;
   /**
+   * This launch's sink contract, bech32. The sink is the only thing that knows
+   * which bank denom the launch actually minted — the subdenom's salt is not
+   * derivable from any launch field — so it is what separates two launches that
+   * share an on-chain id across cores.
+   */
+  sinkAddr?: string;
+  /**
    * This launch's id ON ITS OWN CORE — what every chain call takes.
    *
    * 🔴 NOT `id`. `id` is the API's surrogate, unique across cores; the on-chain
@@ -191,13 +198,16 @@ export class PumpApi {
     state?: number;
     quote?: string;
     limit?: number;
-  }): Promise<{ items: ApiLaunch[] }> {
+    /** Offset cursor; the response carries the next one under `cursor`. */
+    cursor?: number;
+  }): Promise<{ items: ApiLaunch[]; cursor?: number }> {
     return this.get("/launches", {
       q: opts.q,
       sort: opts.sort,
       state: opts.state,
       quote: opts.quote,
       limit: opts.limit ?? 20,
+      cursor: opts.cursor,
     });
   }
 
