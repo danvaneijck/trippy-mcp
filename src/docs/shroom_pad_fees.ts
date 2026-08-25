@@ -73,7 +73,10 @@ Per-quote fee and split:
 ${splitRows}
 
 The creator's side accrues to a claimable ledger, not to their wallet — call
-\`claim_fees\` with the launchIds to collect. The platform side goes to the fee
+\`claim_fees\` to collect (no launchIds = every launch this wallet created).
+Nothing arrives on its own, so a launch can be paying for days with the wallet
+balance unchanged: \`my_launches\`, or \`claim_fees\` with \`preview: true\`,
+reads the ledger without signing anything. The platform side goes to the fee
 treasury${p.treasury ? ` (${p.treasury})` : ""}.
 
 ## 3. Referral

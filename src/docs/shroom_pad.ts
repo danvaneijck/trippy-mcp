@@ -115,5 +115,24 @@ so holder snapshots taken from either side are complete.
 None of these are visible to \`quoteBuy\`/\`quoteSell\` — the quote functions
 model the curve only. Everything else is prechecked before a trade is built.
 
+## After the launch: what a creator has to manage
+
+A launch does not report to you. Three things keep accruing quietly and none of
+them move on their own:
+
+- **Creator fees.** Every trade pays them into a per-launch ledger ON THE CORE,
+  keyed by the launch's on-chain id. They are not a balance and they never
+  reach the wallet until \`claim_fees\` is called.
+- **The dev bag.** Bought on the curve like anyone else's, so it is priced by
+  the curve and only realised by selling.
+- **The window that already happened.** \`tradingOpensAt\` is frozen at
+  creation and is the only record of how much exclusivity the launch really
+  got, once the keeper bind has eaten its share.
+
+\`my_launches\` reads all three for every launch this wallet created — the fee
+ledger straight off the core, the bag at a live exit quote, the window as it
+actually landed. It signs nothing, and neither does \`claim_fees\` with
+\`preview: true\`. Collecting is the only step that costs gas.
+
 ${SNAPSHOT_NOTE}`;
 }

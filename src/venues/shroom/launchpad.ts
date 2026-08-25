@@ -83,6 +83,22 @@ export interface LaunchView {
 }
 
 /**
+ * Everything one core owes a wallet, read-only.
+ *
+ * Creator fees are per (launch, core): the same on-chain id names a different
+ * launch on every other core, so the ids here are only meaningful next to the
+ * venue they were read from. Referral fees and refunds are per WALLET, but
+ * each core keeps its own copy of those ledgers too — a wallet with history on
+ * a superseded core is owed on both.
+ */
+export interface ClaimableLedgers {
+  creator: { launchId: bigint; amount: bigint; quote: QuoteAssetInfo }[];
+  referral: { quote: QuoteAssetInfo; amount: bigint }[];
+  /** Cancelled-launch creation-fee refunds, in INJ base units. */
+  refund: bigint;
+}
+
+/**
  * The live per-quote terms a NEW launch would get. LaunchpadCore copies this
  * whole struct onto a launch at createLaunch, so an existing launch keeps the
  * config it launched with — these are the terms on offer today, not the terms
@@ -1149,6 +1165,61 @@ export class ShroomVenue {
    * each core keeps its own, so a caller with several cores has to run this
    * against each of them; `claim_fees` does.
    */
+  /**
+   * What THIS launch owes its creator, unclaimed, in the launch's quote asset.
+   *
+   * A plain view — reading it costs nothing and broadcasts nothing, which is
+   * the whole point: the ledger used to be legible only by claiming it.
+   * `launchId` is the ON-CHAIN id on this venue's core.
+   */
+  async creatorFeesOwed(launchId: bigint): Promise<bigint> {
+    return this.signer.readContract<bigint>({
+      address: this.core,
+      abi: LAUNCHPAD_ABI,
+      functionName: "creatorFeesOwed",
+      args: [launchId],
+    });
+  }
+
+  /**
+   * Every ledger this wallet can draw on THIS core, read and nothing else.
+   *
+   * Split out of `claimAll` so the same reads answer "what am I owed?" without
+   * a transaction. `claimAll` still calls it first, because every claim
+   * function reverts `NothingToClaim()` on a zero balance and the reads are
+   * what keep it from spending gas to find that out.
+   */
+  async claimable(launchIds: bigint[]): Promise<ClaimableLedgers> {
+    const creator: ClaimableLedgers["creator"] = [];
+    for (const id of launchIds) {
+      const amount = await this.creatorFeesOwed(id);
+      if (amount > 0n) {
+        const launch = await this.getLaunchView(id);
+        creator.push({ launchId: id, amount, quote: this.quoteInfo(launch.quoteAsset) });
+      }
+    }
+
+    const referral: ClaimableLedgers["referral"] = [];
+    for (const q of Object.values(this.net.quoteAssets)) {
+      const amount = await this.signer.readContract<bigint>({
+        address: this.core,
+        abi: LAUNCHPAD_ABI,
+        functionName: "referralFeesOwed",
+        args: [this.signer.address, q.pairAsset],
+      });
+      if (amount > 0n) referral.push({ quote: q, amount });
+    }
+
+    const refund = await this.signer.readContract<bigint>({
+      address: this.core,
+      abi: LAUNCHPAD_ABI,
+      functionName: "refundsOwed",
+      args: [this.signer.address],
+    });
+
+    return { creator, referral, refund };
+  }
+
   async claimAll(launchIds: bigint[]): Promise<{
     creatorFees: { onchainId: string; amount: string }[];
     referralFees: { pairAsset: string; symbol: string; amount: string }[];
@@ -1156,24 +1227,11 @@ export class ShroomVenue {
     txHashes: string[];
     notes: string[];
   }> {
-    const me = this.signer.address;
     const txHashes: string[] = [];
     const notes: string[] = [];
 
-    // Reads first — every claim fn reverts NothingToClaim() on zero.
-    const creatorOwed: { launchId: bigint; amount: bigint; q: QuoteAssetInfo }[] = [];
-    for (const id of launchIds) {
-      const owed = await this.signer.readContract<bigint>({
-        address: this.core,
-        abi: LAUNCHPAD_ABI,
-        functionName: "creatorFeesOwed",
-        args: [id],
-      });
-      if (owed > 0n) {
-        const launch = await this.getLaunchView(id);
-        creatorOwed.push({ launchId: id, amount: owed, q: this.quoteInfo(launch.quoteAsset) });
-      }
-    }
+    const owed = await this.claimable(launchIds);
+    const creatorOwed = owed.creator.map((c) => ({ launchId: c.launchId, amount: c.amount, q: c.quote }));
     if (creatorOwed.length === 1) {
       const r = await this.signer.writeTx({
         address: this.core,
@@ -1195,33 +1253,20 @@ export class ShroomVenue {
     }
 
     const referral: { pairAsset: string; symbol: string; amount: string }[] = [];
-    for (const q of Object.values(this.net.quoteAssets)) {
-      const owed = await this.signer.readContract<bigint>({
+    for (const { quote: q, amount } of owed.referral) {
+      const r = await this.signer.writeTx({
         address: this.core,
         abi: LAUNCHPAD_ABI,
-        functionName: "referralFeesOwed",
-        args: [me, q.pairAsset],
+        functionName: "claimReferralFees",
+        args: [q.pairAsset],
+        intent: { kind: "claim", target: this.core, detail: `claimReferralFees ${q.symbol}` },
       });
-      if (owed > 0n) {
-        const r = await this.signer.writeTx({
-          address: this.core,
-          abi: LAUNCHPAD_ABI,
-          functionName: "claimReferralFees",
-          args: [q.pairAsset],
-          intent: { kind: "claim", target: this.core, detail: `claimReferralFees ${q.symbol}` },
-        });
-        if (r.hash) txHashes.push(r.hash);
-        referral.push({ pairAsset: q.pairAsset, symbol: q.symbol, amount: formatUnits(owed, q.decimals) });
-      }
+      if (r.hash) txHashes.push(r.hash);
+      referral.push({ pairAsset: q.pairAsset, symbol: q.symbol, amount: formatUnits(amount, q.decimals) });
     }
 
     let refundInj: string | null = null;
-    const refundOwed = await this.signer.readContract<bigint>({
-      address: this.core,
-      abi: LAUNCHPAD_ABI,
-      functionName: "refundsOwed",
-      args: [me],
-    });
+    const refundOwed = owed.refund;
     if (refundOwed > 0n) {
       const r = await this.signer.writeTx({
         address: this.core,
