@@ -114,7 +114,7 @@ function registerAirdropTools(server: McpServer): void {
         .describe(
           "token_holders only: that denom's exponent, when the chain does not publish one. It sets what minWeight counts in, so a wrong value moves every holder across the threshold.",
         ),
-      launchId: z.string().optional().describe("launch_holders only: the SHROOM Pad launch id"),
+      launchId: z.string().optional().describe("launch_holders only: the SHROOM Pad launch id, as token_info and portfolio report it"),
       collection: z
         .string()
         .optional()
@@ -400,7 +400,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "create_token",
-    'Launch a new token on SHROOM Pad (bonding curve, graduates to a Choice CLMM pool). Costs the on-chain creation fee (~0.2 INJ) plus optional initialBuy. The launch binds via the keeper within ~a minute — the tool waits and reports the tradable state. Where the deployment offers a curve menu, `curve` picks the shape of the raise and is FROZEN onto the launch forever — read explain("shroom_pad_curves") before choosing one; omitting it uses the standard curve.',
+    'Launch a new token on SHROOM Pad (bonding curve, graduates to a Choice CLMM pool). Costs the on-chain creation fee (read it live with explain("shroom_pad_fees") — it is owner-settable and has changed on mainnet) plus optional initialBuy. The launch binds via the keeper within ~a minute — the tool waits and reports the tradable state. Where the deployment offers a curve menu, `curve` picks the shape of the raise and is FROZEN onto the launch forever — read explain("shroom_pad_curves") before choosing one; omitting it uses the standard curve.',
     {
       name: z.string().min(1).max(48),
       symbol: z.string().min(1).max(12),
@@ -425,7 +425,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "claim_fees",
-    "Claim everything claimable from SHROOM Pad: creator fees for the given launchIds, referral fees, and cancelled-launch refunds. Reads the ledgers first and only claims non-zero balances.",
+    "Claim everything claimable from SHROOM Pad: creator fees for the given launchIds, referral fees, and cancelled-launch refunds. `launchIds` are the ids token_info and portfolio report. Every deployed launchpad core is checked, because each keeps its own ledgers. Reads the ledgers first and only claims non-zero balances.",
     { launchIds: z.array(z.string()).optional() },
     (rt2, a: { launchIds?: string[] }) => t.claimFees(rt2, a),
   );

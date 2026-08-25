@@ -1047,7 +1047,14 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
   // (the next launch is on-chain 114, which is an unrelated existing coin as a
   // surrogate). The token address is the only handle that crosses, so resolve
   // through it rather than printing an id that names someone else's launch.
-  const row = created.token ? await findLaunchByToken(rt, created.token) : null;
+  // The indexer trails the chain by a moment, and this runs right after the
+  // keeper bind — a couple of short retries is the difference between handing
+  // back a usable id and handing back null on a launch that worked.
+  let row: ApiLaunch | null = null;
+  for (let attempt = 0; created.token && !row && attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 2000));
+    row = await findLaunchByToken(rt, created.token);
+  }
   const warnings = [...created.warnings];
   if (created.status !== "dry-run" && !row) {
     warnings.push(
