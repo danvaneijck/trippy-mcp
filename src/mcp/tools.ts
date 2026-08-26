@@ -34,6 +34,7 @@ import {
   quoteAssetBySlot,
   type QuoteAssetInfo,
 } from "../chain/networks.js";
+import { isWinjDenom, unwrapWinj, winjBalance } from "../chain/winj.js";
 import { smartQuery } from "../airdrops/wasm.js";
 import { evmToInj } from "../keystore.js";
 import { explain as explainTopic } from "../docs/index.js";
@@ -1727,9 +1728,72 @@ function positionSummary(
  * throws into it: a locker that will not answer must not lose a core claim
  * that already broadcast.
  */
+/**
+ * Convert the claim's WINJ leg back to spendable INJ.
+ *
+ * LaunchpadCore pays the curve creator fee in the quote's ERC20 pair asset.
+ * For USDC and SAI that IS the bank denom and there is nothing to do — but
+ * INJ's pair asset is WINJ9, so an INJ-quoted launch pays wrapped INJ that
+ * cannot buy anything here and cannot pay gas. Claiming was the only thing
+ * that ever created that balance, so unwinding it belongs in the same call
+ * rather than in a tool the model has to remember to reach for.
+ *
+ * It sweeps the WHOLE balance, not just this claim's share: nothing in this
+ * package holds WINJ on purpose, the conversion is 1:1 into the same wallet,
+ * and going by balance rather than by a per-launch sum means a claim that
+ * lands wrapped for any other reason self-heals on the next one. That is what
+ * clears residue left by every claim made before this shipped.
+ */
+async function settleWinj(
+  rt: Runtime,
+  preview: boolean,
+  enabled: boolean,
+): Promise<{ unwrappedInj: string | null; txHashes: string[]; notes: string[] }> {
+  const none = { unwrappedInj: null, txHashes: [] as string[], notes: [] as string[] };
+  if (!enabled) return none;
+
+  const balance = await winjBalance(rt.signer, rt.net).catch(() => null);
+  if (balance === null) {
+    // Never fatal: the claim itself already landed, and reporting it as failed
+    // because a follow-up read flaked would be the worse lie.
+    return { ...none, notes: ["could not read the WINJ balance — any wrapped INJ was left wrapped"] };
+  }
+  if (balance <= 0n) return none;
+
+  const human = formatUnits(balance, 18);
+  if (preview) {
+    return {
+      unwrappedInj: human,
+      txHashes: [],
+      notes: [
+        `${human} WINJ (wrapped INJ, from the curve creator-fee rail) would be unwrapped to native INJ — pass unwrap:false to keep it wrapped`,
+      ],
+    };
+  }
+
+  try {
+    const res = await unwrapWinj(rt.signer, rt.net, balance);
+    return {
+      unwrappedInj: human,
+      txHashes: res.hash ? [res.hash] : [],
+      notes:
+        res.status === "reverted"
+          ? [`the WINJ unwrap reverted — ${human} WINJ is still wrapped and claimable with claim_fees again`]
+          : [],
+    };
+  } catch (e) {
+    return {
+      ...none,
+      notes: [
+        `claimed, but unwrapping ${human} WINJ to INJ failed (${e instanceof Error ? e.message : String(e)}) — the fees ARE in the wallet, as wrapped INJ`,
+      ],
+    };
+  }
+}
+
 export async function claimFees(
   rt: Runtime,
-  args: { launchIds?: string[]; preview?: boolean },
+  args: { launchIds?: string[]; preview?: boolean; unwrap?: boolean },
 ): Promise<unknown> {
   const rows: ClaimRow[] = [];
   const notes = new Set<string>();
@@ -1834,12 +1898,19 @@ export async function claimFees(
   txHashes.push(...pool.txHashes);
   for (const n of pool.notes) notes.add(n);
 
+  // After both rails: the core ledger is what pays in WINJ, so this has to see
+  // the balance the claim above just produced.
+  const winj = await settleWinj(rt, args.preview === true, args.unwrap !== false);
+  txHashes.push(...winj.txHashes);
+  for (const n of winj.notes) notes.add(n);
+
   const refundInj = refundBase > 0n ? formatUnits(refundBase, 18) : null;
   const nothing =
     creatorFees.length === 0 &&
     referralFees.length === 0 &&
     refundInj === null &&
-    pool.poolFees.length === 0;
+    pool.poolFees.length === 0 &&
+    winj.unwrappedInj === null;
   if (nothing) {
     notes.add("nothing to claim — every core ledger and every graduated pool is zero");
   } else if (args.preview) {
@@ -1854,6 +1925,7 @@ export async function claimFees(
     referralFees,
     poolFees: pool.poolFees,
     refundInj,
+    ...(winj.unwrappedInj !== null ? { unwrappedInj: winj.unwrappedInj } : {}),
     txHashes,
     notes: [...notes],
   };
@@ -1903,6 +1975,9 @@ export interface PortfolioRow {
    *  volume: the mark is not something anyone traded, so it is left out of
    *  `valueUsd`/`totalUsd` rather than presented as real money. */
   staleMark?: true;
+  /** WINJ. Worth the same as INJ and counted in `totalUsd`, but it cannot pay
+   *  gas or fund `buyNative` until `claim_fees` unwraps it. */
+  wrappedInj?: true;
   untrusted_metadata?: Record<string, string>;
 }
 
@@ -1971,6 +2046,30 @@ export async function portfolio(rt: Runtime): Promise<unknown> {
   for (const b of all) {
     const raw = BigInt(b.amount);
     if (raw <= 0n) continue;
+
+    // WINJ before the quote-asset lookup, because it will never hit it: INJ's
+    // `bankDenom` is "inj", so its pair asset is not in `quoteByDenom` and this
+    // row used to fall all the way through to the Choice pricer, which does not
+    // know it — leaving the curve creator-fee payout `unpriced` and therefore
+    // MISSING from `totalUsd`. It is INJ, 1:1 and 18 decimals, so it prices off
+    // the INJ quote rate; only the symbol distinguishes it.
+    if (isWinjDenom(rt.net, b.denom)) {
+      const inj = rt.net.quoteAssets.INJ;
+      const amount = Number(formatUnits(raw, 18));
+      // No INJ quote slot on this network means no rate to price against — the
+      // row is still reported, just without a mark, rather than dropped.
+      const valueUsd = inj ? await rt.shroom.usdValue(inj.slot, raw) : null;
+      rows.push({
+        denom: b.denom,
+        symbol: "WINJ",
+        amount,
+        priceUsd: valueUsd !== null && amount > 0 ? valueUsd / amount : null,
+        valueUsd,
+        pricedVia: valueUsd !== null ? "quote-rate" : "unpriced",
+        wrappedInj: true,
+      });
+      continue;
+    }
 
     const q = quoteByDenom.get(b.denom);
     if (q) {

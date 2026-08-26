@@ -486,15 +486,21 @@ export async function serve(): Promise<void> {
   register(
     server,
     "claim_fees",
-    "Claim everything a launch pays this wallet: curve creator fees per launch, referral fees, cancelled-launch refunds, AND the swap fees a graduated launch earns on its Choice pool. That last one lives in a per-launch locker contract with no link to the launchpad core — it is invisible to every other tool here, it accrues uncollected until collected, and on a busy pool it can dwarf the curve ledger, so a graduated launch is never fully read from the core alone. With no `launchIds` it covers EVERY launch this wallet created (plus the wallet-level referral and refund ledgers); pass `launchIds` — the ids token_info, my_launches and portfolio report — to narrow it. `preview: true` reads every ledger and broadcasts nothing, which is how to ask what a launch is owed without spending gas. Pool fees pay out partly in the launch's own token, and only non-zero balances are ever claimed.",
+    "Claim everything a launch pays this wallet: curve creator fees per launch, referral fees, cancelled-launch refunds, AND the swap fees a graduated launch earns on its Choice pool. That last one lives in a per-launch locker contract with no link to the launchpad core — it is invisible to every other tool here, it accrues uncollected until collected, and on a busy pool it can dwarf the curve ledger, so a graduated launch is never fully read from the core alone. With no `launchIds` it covers EVERY launch this wallet created (plus the wallet-level referral and refund ledgers); pass `launchIds` — the ids token_info, my_launches and portfolio report — to narrow it. `preview: true` reads every ledger and broadcasts nothing, which is how to ask what a launch is owed without spending gas. Pool fees pay out partly in the launch's own token, and only non-zero balances are ever claimed. On an INJ-quoted launch the core settles the curve fee in WINJ (wrapped INJ, INJ's ERC20 pair asset) rather than the native coin, so this unwraps it 1:1 afterwards and reports the amount as `unwrappedInj` — without that the payout cannot pay gas or fund a buy.",
     {
       launchIds: z.array(z.string()).optional(),
       preview: z
         .boolean()
         .optional()
         .describe("read the ledgers and report what is owed WITHOUT signing or broadcasting anything"),
+      unwrap: z
+        .boolean()
+        .optional()
+        .describe(
+          "convert the wallet's WINJ back to native INJ after claiming (default true). false leaves the curve fee wrapped, which is almost never what you want.",
+        ),
     },
-    (rt2, a: { launchIds?: string[]; preview?: boolean }) => t.claimFees(rt2, a),
+    (rt2, a: { launchIds?: string[]; preview?: boolean; unwrap?: boolean }) => t.claimFees(rt2, a),
   );
 
   register(

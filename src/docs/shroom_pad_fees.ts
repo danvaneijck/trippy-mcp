@@ -79,6 +79,16 @@ balance unchanged: \`my_launches\`, or \`claim_fees\` with \`preview: true\`,
 reads the ledger without signing anything. The platform side goes to the fee
 treasury${p.treasury ? ` (${p.treasury})` : ""}.
 
+A ledger pays in the quote's **ERC20 pair asset**, which for USDC and SAI is
+the denom you already hold — but INJ's pair asset is WINJ9, so an INJ-quoted
+launch settles the creator fee in **wrapped INJ**. That is not spendable as
+INJ: it pays no gas and \`buyNative\` cannot send it. \`claim_fees\` therefore
+unwraps it 1:1 straight after claiming and reports the amount as
+\`unwrappedInj\` (pass \`unwrap: false\` to keep it wrapped). A WINJ balance
+that is already sitting in the wallet shows in \`portfolio\` as symbol
+\`WINJ\` with \`wrappedInj: true\`, priced at the INJ rate, and the next
+\`claim_fees\` sweeps it up.
+
 ## 3. Referral
 
 \`referralShareBps\` = ${bps(p.referralShareBps)} of the **creator's cut** — not
