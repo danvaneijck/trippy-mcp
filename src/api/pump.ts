@@ -46,6 +46,17 @@ export interface ApiLaunch {
   graduationTarget: number;
   graduatedPoolAddress: string | null;
   graduatedPoolDenom: string | null;
+  /**
+   * The launch's post-graduation fee locker, bech32 — the CosmWasm contract
+   * that HOLDS the graduated pool's LP position NFT and splits its swap fees
+   * between the creator and the treasury.
+   *
+   * 🔴 The creator's fees do NOT all live on the core. This address is the
+   * only route to the second rail, and it is null until the launch graduates
+   * (and on XYK graduations, which mint no position NFT). See
+   * `venues/shroom/locker.ts`.
+   */
+  lockerAddr?: string | null;
   volume24h: string;
   lastTradedAt: string | null;
   holderCount: string;

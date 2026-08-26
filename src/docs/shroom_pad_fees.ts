@@ -119,12 +119,32 @@ an \`account\` argument and apply that account's discount, so a quote is
 bit-exact for the wallet that will actually trade. \`token_info\` reports both
 the gate and whether this agent currently qualifies.
 
-## 5. Graduation
+## 5. Graduation — the SECOND fee rail
 
 No graduation fee. Liquidity moves into a Choice CLMM pool at the 0.30% tier
 and the position is locked permanently. Pool fees stream to the creator and the
 platform on the SAME split the curve used, so a launch keeps paying its creator
 after it stops trading on the curve.
+
+That second rail shares NOTHING with the first. The position NFT is held by a
+per-launch **locker** contract (CosmWasm, the launch's \`lockerAddr\`), not by
+the core and not by the creator, and its fees sit **uncollected inside the
+position** until someone calls the locker's permissionless \`collect_fees\`,
+which sweeps them out and splits every denom between the treasury and creator
+legs on the spot. So:
+
+- \`my_launches\` reports it per launch under \`poolFees\` — \`pending\` is
+  GROSS, before the split, and \`pendingYoursUsd\` is this wallet's cut.
+- \`claim_fees\` collects it alongside the core ledgers; \`preview: true\` reads
+  it without signing. Nothing else in this package can reach it.
+- It pays out **partly in the launch's own token**, because a pool earns fees
+  on both sides. The curve rail only ever pays the quote asset.
+- Sizes are not comparable to the curve ledger. A busy pool can out-earn the
+  whole curve within a day of graduating, and reading the core ledger alone
+  under-reports a graduated launch by however much its pool has done since.
+
+XYK graduations have no locker (they lock LP instead of a position NFT), so
+their \`lockerAddr\` is null and there is nothing to collect.
 
 ${SNAPSHOT_NOTE}`;
 }

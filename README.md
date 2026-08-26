@@ -34,7 +34,7 @@ Writes are merge-then-rename with a `.trippy-bak` copy kept behind, so nothing e
 The key never leaves your machine, and four independent layers stand between a misbehaving (or prompt-injected) model and your funds:
 
 1. **Budgeted burner** — the wallet only ever holds what you send it. Your main wallet is never touched.
-2. **Policy engine in the signer** (not in the tools, not in the model): per-tx USD cap, rolling 24h budget, slippage ceiling, and a hard contract allowlist (LaunchpadCore, its quote assets, the Choice aggregator, the claim-drops contract — nothing else). Configured in `~/.trippy-mcp/config.json`; changing it is a human action.
+2. **Policy engine in the signer** (not in the tools, not in the model): per-tx USD cap, rolling 24h budget, slippage ceiling, and a hard contract allowlist (LaunchpadCore, its quote assets, the Choice aggregator, the claim-drops contract — nothing else). The one address admitted at runtime is a launch's fee locker, and only after the chain confirms it pays this wallet, and only for fee collection. Configured in `~/.trippy-mcp/config.json`; changing it is a human action.
 3. **Sweep is one-way home** — `sweep` takes no destination. Funds can only go to the owner address you fixed at `init`. Airdrops are the one exception that sends value to addresses you did not name, so they carry their own ceiling (`airdropCapUsd`, separate from the trade cap), are never allowed to skip USD valuation, and require a previewed plan id rather than raw criteria.
 4. **Untrusted-data discipline** — token names/descriptions are attacker-controlled internet text; tools sanitize them and fence them under `untrusted_metadata` so your agent treats them as data, not instructions.
 
@@ -52,8 +52,8 @@ Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit lo
 | `quote` | preview a buy/sell — auto-routes curve vs Choice |
 | `buy` / `sell` | execute — curve trades on SHROOM Pad, everything else via the Choice aggregator |
 | `create_token` | launch on the bonding curve (image upload → IPFS, ~0.2 INJ creation fee, optional initial buy) |
-| `my_launches` | the creator's view: every launch this wallet made, with curve progress, 24h volume and holders, the dev-buy window it actually got, the bag at a live exit quote, and the unclaimed creator fees each one owes — read off the core, no transaction |
-| `claim_fees` | creator fees, referral fees, cancelled-launch refunds. No ids = every launch this wallet created; `preview: true` reports what is owed without signing anything |
+| `my_launches` | the creator's view: every launch this wallet made, with curve progress, 24h volume and holders, the dev-buy window it actually got, the bag at a live exit quote, and BOTH fee rails — the curve's creator ledger on the core and the graduated pool's uncollected fees in its locker — read on-chain, no transaction |
+| `claim_fees` | curve creator fees, referral fees, cancelled-launch refunds, and a graduated launch's Choice pool fees (held in a per-launch locker, invisible to every other tool, paid partly in the launch's own token). No ids = every launch this wallet created; `preview: true` reports what is owed without signing anything |
 | `wallet_status` / `sweep` | balances + policy budget; send funds home |
 | `portfolio` | every holding valued in USD (quote-rate feed / last curve trade / Choice stats) |
 | `agent_info` | identity + how to claim the agent to your Terminal profile |

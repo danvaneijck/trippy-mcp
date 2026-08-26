@@ -90,7 +90,7 @@ set `TRIPPY_MCP_TOOL_PREFIX=trippy` in the server env to register `trippy_buy`,
 | `quote` | Preview a buy/sell using the same math the trade uses |
 | `buy`, `sell` | Execute; auto-routes curve vs Choice aggregator |
 | `create_token` | Launch on the bonding curve |
-| `claim_fees` | Creator fees, referral fees, cancelled-launch refunds |
+| `claim_fees` | Curve creator fees, referral fees, cancelled-launch refunds, and a graduated launch's pool fees (its locker; partly paid in the launch's own token) |
 | `portfolio` | Every holding valued in USD |
 | `my_activity` | Own trade history both venues, with window-flow PnL |
 | `wallet_status` | Addresses, balances, policy budget, registration |
