@@ -82,6 +82,27 @@ export class PolicyEngine {
     private readonly ledger: SpendLedger,
   ) {}
 
+  /**
+   * Fee lockers the chain has confirmed pay THIS wallet, lowercased.
+   *
+   * These cannot live in `allowedTargets`: a locker's bech32 is minted per
+   * launch at graduation, so the set is not knowable when the runtime is
+   * built. The substitute for a static entry is a check with more force than
+   * one — the address is admitted only after `locker_config` names this wallet
+   * as an immutable payout leg — plus the narrowest possible grant: `claim`
+   * only, which moves no value out of the wallet and is never spend-bearing.
+   *
+   * 🔴 `venues/shroom/locker.ts#prepareCollect` is the ONLY permitted caller of
+   * `allowPayoutLocker`, and it registers in the same breath as the check.
+   * Anything else calling it is a hole in the allowlist, not a convenience.
+   */
+  private readonly payoutLockers = new Set<string>();
+
+  /** See `payoutLockers`. Call only from `prepareCollect`, after verifying. */
+  allowPayoutLocker(addr: string): void {
+    this.payoutLockers.add(addr.toLowerCase());
+  }
+
   /** Throws PolicyError when the intent is not permitted. */
   enforce(intent: WriteIntent): void {
     const target = intent.target.toLowerCase();
@@ -96,10 +117,16 @@ export class PolicyEngine {
       return; // sweeps are never capped — getting funds home is always allowed
     }
 
-    if (!this.allowedTargets.has(target)) {
+    // A verified fee locker is a `claim` target and nothing else — it never
+    // widens trade/swap/launch/approve, which is what makes admitting an
+    // address discovered at runtime safe.
+    const allowed =
+      this.allowedTargets.has(target) ||
+      (intent.kind === "claim" && this.payoutLockers.has(target));
+    if (!allowed) {
       throw new PolicyError(
         `target ${intent.target} is not on the contract allowlist`,
-        "writes are restricted to the LaunchpadCore, its quote assets and the Choice aggregator",
+        "writes are restricted to the LaunchpadCore, its quote assets, the Choice aggregator and verified fee lockers",
       );
     }
 

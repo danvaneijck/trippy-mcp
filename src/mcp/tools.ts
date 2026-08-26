@@ -56,6 +56,7 @@ import {
   type CurvePreset,
 } from "../venues/shroom/curves.js";
 import type { LaunchView } from "../venues/shroom/launchpad.js";
+import { legBpsFor, lockerPending, prepareCollect, shareOf } from "../venues/shroom/locker.js";
 import { sweep as walletSweep, walletStatus } from "../wallet.js";
 import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
 
@@ -1455,8 +1456,205 @@ async function createdLaunchRow(
     ...(owed !== null && owed > 0n ? { claimWith: `claim_fees launchIds:["${l.id}"]` } : {}),
   };
 
+  // Rail 2. A graduated launch keeps earning on its Choice pool, and that fee
+  // is nowhere near the core — see venues/shroom/locker.ts. Reported alongside
+  // `fees` rather than folded into it: the two accrue in different places, pay
+  // out through different chains, and the pool leg arrives partly in the
+  // launch's own token rather than in the quote asset.
+  const pool = await poolFeesSummary(rt, l);
+  if (pool) row.poolFees = pool;
+
   if (flow && q) row.myPosition = positionSummary(flow, q, owed);
   return row;
+}
+
+// ---------------------------------------------------------------------------
+// graduated-pool fees — the locker rail
+// ---------------------------------------------------------------------------
+
+/** Enough of a launch row to find and value its locker. Both sources carry it. */
+type LockerRow = {
+  id: ApiLaunchId;
+  quoteAsset: number;
+  /**
+   * The LAUNCH TOKEN's bank denom.
+   *
+   * 🔴 NOT `bankDenom`, which on a launch row is the QUOTE denom — "inj" on an
+   * INJ-quoted launch, not the coin the launch minted. Labelling the pool's
+   * two fee legs off `bankDenom` silently files the token leg under "other",
+   * which is what it did before this comment existed.
+   */
+  graduatedPoolDenom?: string | null;
+  lockerAddr?: string | null;
+};
+
+/**
+ * USD value of a raw amount of one bank denom.
+ *
+ * The quote leg goes through the pad's own quote-price feed (the same rate
+ * every other USD figure in this package uses); the token leg has no such feed
+ * and is priced off Choice, which is where a graduated launch trades anyway.
+ */
+async function denomUsd(rt: Runtime, denom: string, raw: bigint, q: QuoteAssetInfo | undefined): Promise<number | null> {
+  if (q && denom === q.bankDenom) return rt.shroom.usdValue(q.slot, raw);
+  const overview = await rt.choiceApi.token(denom).catch(() => null);
+  const price = overview ? extractUsdPrice(overview) : null;
+  if (price === null) return null;
+  // Launch denoms are 18-decimal by construction; anything else has to say so,
+  // and an unknown exponent leaves the row unpriced rather than off by 1e12.
+  const decimals = denom.startsWith(`factory/${rt.net.launchDenomIssuer}/`)
+    ? 18
+    : await denomDecimals(rt.net.lcdUrl, denom);
+  if (decimals === null) return null;
+  return Number(formatUnits(raw, decimals)) * price;
+}
+
+/**
+ * What this launch's graduated pool has accrued and not yet paid out.
+ *
+ * Null when the launch has no locker — which is every launch that has not
+ * graduated, and every XYK graduation (those mint no position NFT and lock
+ * their LP instead, so there is nothing to collect). A locker that will not
+ * answer returns a row saying so rather than nothing: silence here reads as
+ * "no pool fees", which is the exact under-report this whole rail exists to
+ * fix.
+ */
+async function poolFeesSummary(rt: Runtime, l: LockerRow): Promise<Record<string, unknown> | null> {
+  const locker = l.lockerAddr;
+  if (!locker) return null;
+
+  const pending = await lockerPending(rt.net.lcdUrl, locker).catch((e: unknown) => {
+    return e instanceof Error ? e.message : String(e);
+  });
+  if (typeof pending === "string") {
+    return {
+      locker,
+      pending: null,
+      note: `could not read the fee locker (${pending}) — pool fees are UNKNOWN, not zero`,
+    };
+  }
+
+  const q = quoteAssetBySlot(rt.net, l.quoteAsset);
+  const yourShareBps = legBpsFor(pending.config, rt.injAddress);
+  const rows: Record<string, unknown>[] = [];
+  let grossUsd: number | null = 0;
+
+  for (const o of pending.owed) {
+    const usd = await denomUsd(rt, o.denom, o.gross, q);
+    if (usd === null) grossUsd = null;
+    else if (grossUsd !== null) grossUsd += usd;
+    const decimals = q && o.denom === q.bankDenom ? q.decimals : 18;
+    rows.push({
+      denom: o.denom,
+      // Which side of the pool this is, named without trusting any metadata:
+      // the quote asset is pinned in the network def and the launch names its
+      // own bank denom.
+      leg:
+        q && o.denom === q.bankDenom
+          ? q.symbol
+          : o.denom === l.graduatedPoolDenom
+            ? "launch token"
+            : "other",
+      gross: formatUnits(o.gross, decimals),
+      yours: formatUnits(shareOf(o.gross, pending.config, rt.injAddress), decimals),
+    });
+  }
+
+  const yoursUsd = grossUsd === null ? null : (grossUsd * yourShareBps) / 10_000;
+  return {
+    locker,
+    positionTokenIds: pending.tokenIds,
+    yourShareBps,
+    // Uncollected fees sitting in the position, GROSS of the split.
+    pending: rows,
+    pendingGrossUsd: grossUsd,
+    pendingYoursUsd: yoursUsd,
+    ...(yourShareBps === 0
+      ? { note: "this wallet is neither leg of this locker's split — it earns nothing here" }
+      : rows.length > 0
+        ? { collectWith: `claim_fees launchIds:["${l.id}"]` }
+        : {}),
+  };
+}
+
+/** Most lockers one `claim_fees` call will collect. Each is its own cosmos tx. */
+const MAX_LOCKER_COLLECTS = 10;
+
+/**
+ * Read — and unless previewing, collect — the pool-fee rail for these launches.
+ *
+ * Every collect is a separate CosmWasm execute, so this reads first and skips
+ * the lockers with nothing in them: `collect_fees` on an empty position still
+ * costs gas and still succeeds, which is the worst combination for a tool that
+ * runs with no id and covers everything a wallet created.
+ */
+async function collectPoolFees(
+  rt: Runtime,
+  rows: LockerRow[],
+  preview: boolean,
+): Promise<{ poolFees: Record<string, unknown>[]; txHashes: string[]; notes: string[] }> {
+  const poolFees: Record<string, unknown>[] = [];
+  const txHashes: string[] = [];
+  const notes: string[] = [];
+  const withLocker = rows.filter((r) => r.lockerAddr);
+  let collects = 0;
+
+  for (const l of withLocker) {
+    const summary = await poolFeesSummary(rt, l);
+    if (!summary) continue;
+    const pending = summary.pending as Record<string, unknown>[] | null;
+    // Unreadable, empty, or not ours: report it and never sign for it.
+    if (pending === null || pending.length === 0 || summary.yourShareBps === 0) {
+      if (pending === null) poolFees.push({ launchId: l.id, ...summary });
+      continue;
+    }
+    if (preview) {
+      poolFees.push({ launchId: l.id, ...summary });
+      continue;
+    }
+    if (collects >= MAX_LOCKER_COLLECTS) {
+      notes.push(
+        `stopped after ${MAX_LOCKER_COLLECTS} pool-fee collects — each is its own transaction; call again to collect the rest`,
+      );
+      break;
+    }
+    collects += 1;
+    try {
+      const msg = await prepareCollect(
+        { lcdUrl: rt.net.lcdUrl, injAddress: rt.injAddress, policy: rt.policy },
+        l.lockerAddr!,
+      );
+      const res = await rt.cosmos.execute([msg], {
+        intent: { kind: "claim", target: l.lockerAddr!, detail: `collect_fees launch #${l.id}` },
+        memo: "",
+      });
+      if (res.txHash) txHashes.push(res.txHash);
+      poolFees.push({
+        launchId: l.id,
+        ...summary,
+        collected: res.status === "dry-run" ? "dry-run" : true,
+        txHash: res.txHash,
+      });
+    } catch (e) {
+      // One locker failing must not lose the core-side claim that already
+      // broadcast, or the other launches behind it in the loop.
+      poolFees.push({
+        launchId: l.id,
+        ...summary,
+        collected: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  if (poolFees.length > 0) {
+    notes.push(
+      preview
+        ? "pool fees are GROSS in `pending` — `yours` is this wallet's cut, and it pays out partly in the launch's own token"
+        : "collecting a pool splits it on-chain: this wallet gets its leg, the treasury gets the rest — partly in the launch's own token",
+    );
+  }
+  return { poolFees, txHashes, notes };
 }
 
 /**
@@ -1511,14 +1709,23 @@ function positionSummary(
 }
 
 /**
- * Claim creator fees, referral fees and refunds across EVERY deployed core.
+ * Claim EVERYTHING a launch pays out: creator fees, referral fees and refunds
+ * across every deployed core, plus the graduated pool's own swap fees.
  *
- * Two things this has to get right, both of which broke when a second core
- * deployed. The ids a caller passes are the surrogates every other tool prints,
- * so they are resolved through the API rather than handed to the chain, where
- * they would name a different launch. And each core keeps its OWN referral and
+ * Three things this has to get right. Two broke when a second core deployed:
+ * the ids a caller passes are the surrogates every other tool prints, so they
+ * are resolved through the API rather than handed to the chain, where they
+ * would name a different launch; and each core keeps its OWN referral and
  * refund ledgers, so the superseded core has to be visited even when no launch
  * id names it — otherwise everything owed on it is simply unreachable.
+ *
+ * The third is that a launch does not stop paying when it graduates. Its pool
+ * fees accrue in a CosmWasm locker with no connection to the core, on the other
+ * chain half, and were unreachable from this package entirely until 0.13.0 —
+ * so "claim everything" quietly meant "claim the curve". See
+ * venues/shroom/locker.ts. The pool leg runs AFTER the core loop and never
+ * throws into it: a locker that will not answer must not lose a core claim
+ * that already broadcast.
  */
 export async function claimFees(
   rt: Runtime,
@@ -1623,16 +1830,33 @@ export async function claimFees(
     }
   }
 
+  const pool = await collectPoolFees(rt, rows, args.preview === true);
+  txHashes.push(...pool.txHashes);
+  for (const n of pool.notes) notes.add(n);
+
   const refundInj = refundBase > 0n ? formatUnits(refundBase, 18) : null;
-  if (creatorFees.length === 0 && referralFees.length === 0 && refundInj === null) {
-    notes.add("nothing to claim — every ledger on every deployed core is zero");
+  const nothing =
+    creatorFees.length === 0 &&
+    referralFees.length === 0 &&
+    refundInj === null &&
+    pool.poolFees.length === 0;
+  if (nothing) {
+    notes.add("nothing to claim — every core ledger and every graduated pool is zero");
   } else if (args.preview) {
     notes.add("preview only — nothing was broadcast. Call claim_fees again without `preview` to collect this.");
   }
   if (discovered && rows.length > 0) {
     notes.add(`creator fees were checked for all ${rows.length} launch(es) this wallet created`);
   }
-  return { ...(args.preview ? { preview: true } : {}), creatorFees, referralFees, refundInj, txHashes, notes: [...notes] };
+  return {
+    ...(args.preview ? { preview: true } : {}),
+    creatorFees,
+    referralFees,
+    poolFees: pool.poolFees,
+    refundInj,
+    txHashes,
+    notes: [...notes],
+  };
 }
 
 /**
@@ -1641,7 +1865,16 @@ export async function claimFees(
  * `id` is the API surrogate and `onchainId` is what the core takes; the two
  * name different launches and are never interchangeable.
  */
-type ClaimRow = { id: ApiLaunchId; core?: string; onchainId?: string };
+type ClaimRow = {
+  id: ApiLaunchId;
+  core?: string;
+  onchainId?: string;
+  /** Quote slot + the launch token's denom, so the pool rail can name its legs. */
+  quoteAsset: number;
+  graduatedPoolDenom?: string | null;
+  /** The post-graduation fee locker — null until the launch graduates. */
+  lockerAddr?: string | null;
+};
 
 export async function walletStatusTool(rt: Runtime): Promise<unknown> {
   const status = await walletStatus(rt);
