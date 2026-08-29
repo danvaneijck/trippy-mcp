@@ -498,11 +498,25 @@ export interface CandlesArgs {
 export const CURVE_CANDLE_COLUMNS = ["t", "o", "h", "l", "c", "v", "n", "rateUsd", "cUsd", "vUsd"];
 export const CHOICE_CANDLE_COLUMNS = ["t", "o", "h", "l", "c", "v"];
 
-/** Significant digits kept per field — enough for sub-satoshi curve prices. */
+/** Significant digits kept per PRICE/VOLUME field — enough for sub-satoshi curve prices. */
 const sig = (n: number): string => (Number.isFinite(n) ? String(Number(n.toPrecision(8))) : "");
 
-const csvRow = (cells: (number | string | null)[]): string =>
-  cells.map((c) => (c === null || c === "" ? "" : typeof c === "number" ? sig(c) : c)).join(",");
+/**
+ * The bucket timestamp goes out VERBATIM, and takes its own parameter so it can
+ * never be fed through `sig()` again.
+ *
+ * `sig()` is a significant-FIGURE round and a unix second is 10 digits, so at 8
+ * s.f. a timestamp snaps to the nearest 100 seconds. 1m buckets are 60s apart,
+ * so four in every five landed on a neighbour's value — 1787945760 and
+ * 1787945820 both emitted as 1787945800 — and the series came back with
+ * duplicate `t`s and buckets that appeared to jump 100s at a time. Every
+ * coarser interval (300s, 900s, 3600s, ...) is a multiple of 100 and was
+ * therefore untouched, which is exactly why only 1m read wrong.
+ */
+const timeCell = (t: number): string => (Number.isFinite(t) ? String(Math.trunc(t)) : "");
+
+const csvRow = (t: number, cells: (number | string | null)[]): string =>
+  [timeCell(t), ...cells.map((c) => (c === null || c === "" ? "" : typeof c === "number" ? sig(c) : c))].join(",");
 
 /**
  * Curve candles arrive as NORMALISED spot_price_wad values: display-quote per
@@ -525,8 +539,7 @@ export function shapeCurveCandles(items: ApiCandle[], pairDecimals: number): str
     const vol = Number(cd.v) / 10 ** pairDecimals;
     const rate = cd.rateUsd == null ? null : Number(cd.rateUsd);
     const hasRate = rate !== null && Number.isFinite(rate) && rate > 0;
-    return csvRow([
-      cd.t,
+    return csvRow(cd.t, [
       px(cd.o),
       px(cd.h),
       px(cd.l),
@@ -548,7 +561,7 @@ export function shapeChoiceCandles(raw: unknown): string[] {
     if (!Array.isArray(row) || row.length < 6) continue;
     const [t, o, h, l, c, v] = row.map((x) => Number(x));
     if (!Number.isFinite(t as number)) continue;
-    out.push(csvRow([t as number, o as number, h as number, l as number, c as number, v as number]));
+    out.push(csvRow(t as number, [o as number, h as number, l as number, c as number, v as number]));
   }
   return out;
 }
