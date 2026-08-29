@@ -84,6 +84,18 @@ describe("shapeCurveCandles", () => {
     expect(unpriced.cUsd).toBe("");
   });
 
+  it("emits 1m bucket timestamps verbatim, not rounded to significant figures", () => {
+    // Regression: `sig()` was applied to EVERY cell including `t`. A unix second
+    // is 10 digits, so 8 s.f. snapped it to the nearest 100 — and 1m buckets are
+    // 60s apart, so four in five collided with a neighbour. Every fixture here
+    // used 1_700_000_000, a multiple of 100, which is why nothing caught it.
+    const grid = [1_787_945_700, 1_787_945_760, 1_787_945_820, 1_787_945_880, 1_787_945_940];
+    const rows = shapeCurveCandles(grid.map((t) => candle({ t })), 18);
+    const times = rows.map((r) => cells(r, CURVE_CANDLE_COLUMNS).t);
+    expect(times).toEqual(grid.map(String));
+    expect(new Set(times).size).toBe(grid.length); // no collisions
+  });
+
   it("emits one line per bucket, which is what keeps a 500-candle pull readable", () => {
     const rows = shapeCurveCandles(Array.from({ length: 500 }, () => candle({ rateUsd: "2.5" })), 18);
     expect(rows).toHaveLength(500);
@@ -112,6 +124,15 @@ describe("shapeChoiceCandles", () => {
       c: "1.5",
       v: "100",
     });
+  });
+
+  it("emits 1m bucket timestamps verbatim, not rounded to significant figures", () => {
+    // Same regression as the curve series — the Choice path shares `csvRow`.
+    const grid = [1_787_945_700, 1_787_945_760, 1_787_945_820, 1_787_945_880, 1_787_945_940];
+    const rows = shapeChoiceCandles(grid.map((t) => [t, 1, 2, 0.5, 1.5, 100]));
+    const times = rows.map((r) => cells(r, CHOICE_CANDLE_COLUMNS).t);
+    expect(times).toEqual(grid.map(String));
+    expect(new Set(times).size).toBe(grid.length);
   });
 
   it("returns [] for a non-array payload", () => {
