@@ -283,10 +283,65 @@ const TESTNET: NetworkDef = {
   choiceApiBase: "",
   terminalBase: "",
   addresses: {
-    launchpadCore: "0x82ff4f7c7b4a4fe77a47d71c7700d17873a0d63f",
+    // The ATOMIC core, live 2026-09-11 at block 139711517. `createLaunch` issues
+    // the token through the core's own `LaunchTokenFactory` and binds it in the
+    // SAME transaction, so a launch is Trading the moment its create lands:
+    // there is no keeper bind, no 10-minute dev-buy window and no CosmWasm sink.
+    // `msg.value` must be EXACTLY `denomCreationFeeInj()` (plus the opening buy
+    // on a wINJ quote) — an overshoot reverts `InsufficientLaunchFee`.
+    // 🔴 It numbers its launches from FIRST_LAUNCH_ID = 1000, so a testnet launch
+    // id here is four digits and never collides with an older core's.
+    launchpadCore: "0x54a9bC5300b483eD202333Cd1bDa1f886CdB10C0",
+    // Pinned to the core above: a views satellite carries its core as an
+    // immutable and reads that ONE core's storage layout. Never carry one across
+    // a redeploy — it does not revert, it mis-reads.
+    launchpadViews: "0xAbD7196c1E2D00607872c411e1cbEfDD32A74D29",
+    // This core's own registry, read back preset-by-preset against the previous
+    // core's: identical. Registries are NOT shared between cores — one serving
+    // two makes a mask change for the current core silently a change for the
+    // superseded one.
+    curveRegistry: "0x6ef5FEa791C681DEb8203656f2296E73C4F190b7",
     winj9: "0x0000000088827d2d103ee2d9A6b781773AE03FfB",
     feeTreasury: "0xBf08c09Fe227ada4A86d279e98E695344848d33D",
   },
+  // Testnet serves FOUR cores. Each numbers its own launches, so a bare id does
+  // not identify a launch — every read must resolve its core first. Mirrors the
+  // pad's `TESTNET_CORES` (frontend/src/chain/addresses.ts) and the backend's
+  // index-aligned `LAUNCHPAD_CORES` / `LAUNCHPAD_VIEWS` env pair; all addresses
+  // below were read off chain 1439 on 2026-09-11.
+  legacyCores: [
+    // The 2026-09-08 core. NOT dead: it holds launches 0-3, among them launch 2,
+    // the SPROUT whose buyback-burn sink is the pad treasury. Pre-atomic — the
+    // keeper still binds on it — and it keeps its own Phase3Settler.
+    {
+      core: "0xE7f90bF233e817a157acBc9BEac99926d7c5a679",
+      views: "0xA8a5Fce6D07B458659A526a626dF739fdf8dbb56",
+      curveRegistry: "0xE3F3022B012e8A0742A59811BaE3A64083a07027",
+      hasCurveId: true,
+      legacy: true,
+    },
+    // Launches 13-20, including every Choice v2 graduate before the 09-08
+    // cutover (the cutover added a core beside this one, it did not wipe it).
+    {
+      core: "0xb03fb1c05f7853601ae05ba7e3700a59dc14a71d",
+      views: "0x60e12ebaf2d3f8a6249a934d44f502708dcb156d",
+      curveRegistry: "0x490dF58B46F3eb585A2c87Bb209a81fD4907d571",
+      hasCurveId: true,
+      legacy: true,
+    },
+    // The original testnet core, launches 0-8. Pre-`curveId`: it has no views
+    // satellite and no curve registry (`curveRegistry()` reverts), and serves
+    // `getLaunch` from itself with the SHORTER `Launch` tuple. 🔴 `hasCurveId`
+    // is what picks that tuple — the selector is identical on both shapes, so a
+    // wrong pick does not revert, it silently shifts every field from `curveId`
+    // onward and returns binary garbage for `bankDenom` and `metadataURI`.
+    {
+      core: "0x82ff4f7c7b4a4fe77a47d71c7700d17873a0d63f",
+      views: "0x82ff4f7c7b4a4fe77a47d71c7700d17873a0d63f",
+      hasCurveId: false,
+      legacy: true,
+    },
+  ],
   // `cwAddresses.issuer` in shroom_launchpad contracts/deployments/injective_testnet.json
   launchDenomIssuer: "inj1wjshrwrmt03v5eywfpuce6sg08h3gfnrcahqgj",
   choiceAggregator: "",

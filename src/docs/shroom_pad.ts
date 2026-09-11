@@ -44,6 +44,22 @@ tradable token.** It returns a launchId in state Reserved. Trading only opens
 when the keeper flips it to Trading, usually within seconds. \`create_token\`
 polls for this and tells you the state it ended on.
 
+🔴 **An ATOMIC core skips all of that.** Testnet's core since 2026-09-11 issues
+the token through its own \`LaunchTokenFactory\`, binds it and opens the curve
+INSIDE \`createLaunch\`, in the creator's own transaction — so a launch is
+Trading the moment the create lands, there is no Reserved state to poll, no
+keeper, no bind deadline and therefore no Cancelled-on-missed-bind exit. It also
+numbers its launches from 1000 rather than 0. Two consequences an agent will hit:
+
+- \`msg.value\` must be EXACTLY the creation fee (plus the opening buy on a wINJ
+  quote); an overshoot reverts rather than refunding.
+- The exclusive pre-open window works differently. \`buy()\` there has NO creator
+  exemption — the creator's one exclusive buy is the opening buy carried inside
+  \`createLaunchWithOptions\`, in the same transaction. A delayed open plus a
+  separate buy, which is what the window meant on every earlier core, would lock
+  the creator out of their own window. \`create_token\` refuses
+  \`devBuyDelaySeconds\` on such a core rather than sell you one.
+
 ## Curve math
 
 Constant product (xy=k) over VIRTUAL reserves, so the curve has a finite,
@@ -71,7 +87,9 @@ ${
 
 Unsold curve supply lives in the launch's own sink contract, not with the
 creator. Supply admin is renounced when the keeper binds, so nobody can mint
-more afterwards.
+more afterwards. (On an atomic core there is no sink and no keeper: unsold
+supply sits on the core itself, and the token's owner is renounced by the
+factory at issue — inside the create transaction.)
 
 ## Graduation
 
@@ -127,7 +145,9 @@ them move on their own:
   the curve and only realised by selling.
 - **The window that already happened.** \`tradingOpensAt\` is frozen at
   creation and is the only record of how much exclusivity the launch really
-  got, once the keeper bind has eaten its share.
+  got, once the keeper bind has eaten its share. On an atomic core nothing eats
+  it: the opening buy is in the create transaction, and \`tradingOpensAt\` is
+  the next second.
 
 \`my_launches\` reads all three for every launch this wallet created — the fee
 ledger straight off the core, the bag at a live exit quote, the window as it

@@ -43,6 +43,12 @@ export const LAUNCHPAD_ABI = parseAbi([
   "function getQuoteAssetConfig(uint8 q) view returns (QuoteAssetConfig)",
   "function referralShareBps() view returns (uint16)",
   "function treasury() view returns (address)",
+  // 🔑 THE ATOMIC-CORE DISCRIMINATOR. Non-zero on a core that issues, binds and
+  // opens each launch inside `createLaunch`; ABSENT on every earlier core, where
+  // the call REVERTS. It is a property of the deployed bytecode, so a core can
+  // never change kind over its life — which is why this is probed and not
+  // configured. See `ShroomVenue.isAtomicCore`.
+  "function launchTokenFactory() view returns (address)",
   "function getLaunchSink(uint256 launchId) view returns (address)",
   // Only DISCOUNT gates are held to this list; a pure access gate may use any token.
   "function allowedGateTokens(address) view returns (bool)",
