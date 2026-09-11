@@ -435,7 +435,7 @@ export async function serve(): Promise<void> {
         .max(86_400)
         .optional()
         .describe(
-          "delay public trading by this many seconds so `initialBuy` is an EXCLUSIVE creator buy instead of a public race. Without it the opening buy is open to anyone the moment the keeper binds. The window must outlast the keeper bind, which has measured 28-65s on mainnet, so values under 180 are REFUSED before anything is spent (override with allowShortDevBuyWindow). 180 is a good default. The contract refuses exclusivity without a cap, so `devBuyMaxBps` applies; max 86400 (24h). Frozen onto the launch — it cannot be changed afterwards.",
+          "delay public trading by this many seconds so `initialBuy` is an EXCLUSIVE creator buy instead of a public race. Without it the opening buy is open to anyone the moment the keeper binds. The window must outlast the keeper bind, which has measured 28-65s on mainnet, so values under 180 are REFUSED before anything is spent (override with allowShortDevBuyWindow). 180 is a good default. The contract refuses exclusivity without a cap, so `devBuyMaxBps` applies; max 86400 (24h). Frozen onto the launch — it cannot be changed afterwards. 🔴 REFUSED OUTRIGHT on an ATOMIC core (testnet since 2026-09-11): there `buy()` has no creator exemption, so a delayed open would lock the creator out of their own window and hand the first buy to the public at a predictable moment. On that core an immediate `initialBuy` is already the first buy in the ordinary race.",
         ),
       allowShortDevBuyWindow: z
         .boolean()

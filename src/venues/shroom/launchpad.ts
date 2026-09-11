@@ -278,6 +278,44 @@ export class ShroomVenue {
     return Number(v);
   }
 
+  /**
+   * Is this core ATOMIC — does it issue, bind and open a launch inside
+   * `createLaunch`?
+   *
+   * 🔑 PROBED, never configured. `launchTokenFactory()` returns a non-zero
+   * address on an atomic core and REVERTS on every earlier one (the selector
+   * does not exist), and it is a property of the deployed bytecode, so a core
+   * cannot change kind over its life. Only a revert reads as "pre-atomic": an
+   * RPC failure must not be mistaken for an answer, so it propagates.
+   *
+   * Cached per instance — a venue is bound to one core.
+   */
+  private atomicProbe: Promise<boolean> | null = null;
+  async isAtomicCore(): Promise<boolean> {
+    if (!this.atomicProbe) {
+      this.atomicProbe = (async () => {
+        try {
+          const a = await this.signer.readContract<Address>({
+            address: this.core,
+            abi: LAUNCHPAD_ABI,
+            functionName: "launchTokenFactory",
+            args: [],
+          });
+          return !!a && !/^0x0{40}$/i.test(a);
+        } catch {
+          // An unanswerable probe reads as PRE-ATOMIC, which is exactly the
+          // behaviour every caller had before this existed. Refusing instead
+          // would turn a transient RPC blip into a blocked launch on the live
+          // pre-atomic core — trading a real regression for a hypothetical one.
+          // Anything this gates is a pre-flight check on a path that is about to
+          // spend the chain anyway, so a chain it cannot read fails a moment later.
+          return false;
+        }
+      })();
+    }
+    return this.atomicProbe;
+  }
+
   /** Platform fee treasury — also the default curve-buy referrer. */
   async treasury(): Promise<Address> {
     return this.signer.readContract<Address>({
@@ -830,6 +868,35 @@ export class ShroomVenue {
       throw new ToolError(
         "bad_dev_buy",
         `maxBuyBps must be between 1 and ${MAX_DEV_BUY_BPS} — the contract refuses a pre-open window without a cap that binds it`,
+      );
+    }
+
+    // 🔴 THE WHOLE FEATURE INVERTS ON AN ATOMIC CORE, and it does not fail
+    // loudly — it fails as a launch that opens at a moment every watcher can
+    // predict, with the creator locked out of its own window.
+    //
+    // The pre-atomic shape this was written for: `createLaunch` reserves, the
+    // KEEPER binds the token some seconds later, and the creator then buys in a
+    // SEPARATE transaction before `tradingOpensAt`. `_buy` let the creator
+    // through early, which is what made the window exclusive to them.
+    //
+    // The atomic core issues and binds inside `createLaunch`, and its `_buy`
+    // carries "the trading-open gate, with NO creator exemption: the creator's
+    // one exclusive buy is the opening buy inside `createLaunch`". So a separate
+    // buy during the window REVERTS `TradingNotOpen` for the entire delay, and
+    // the first buy that can land is a public one on a launch whose open time is
+    // public knowledge. Setting the delay is strictly worse than not setting it.
+    //
+    // The exclusive buy still exists there — as `createLaunchWithOptions`'s
+    // `devBuyPairIn`, paid in the SAME transaction with `msg.value` = fee + buy.
+    // This client does not build that call yet, so it refuses the parameter
+    // rather than selling the caller a window it cannot use. Refused BEFORE the
+    // creation fee is spent: after the fact the timing is frozen onto the launch.
+    if (await this.isAtomicCore()) {
+      throw new ToolError(
+        "dev_buy_not_supported_on_this_core",
+        "this core issues and binds the token inside createLaunch, and its buy() has no creator exemption — a separate opening buy would revert TradingNotOpen for the whole window, then land as a PUBLIC buy at an open time everyone can predict. An exclusive opening buy on this core has to be atomic (createLaunchWithOptions), which this client does not build yet.",
+        "drop devBuyDelaySeconds: on this core a launch is Trading the moment the create lands, so an immediate initialBuy is already the first buy in the ordinary race",
       );
     }
 

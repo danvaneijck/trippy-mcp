@@ -166,6 +166,75 @@ describe("dev-buy delay floor", () => {
   });
 });
 
+/**
+ * The whole feature INVERTS on an ATOMIC core, and it does not fail loudly.
+ *
+ * Pre-atomic: `createLaunch` reserves, the KEEPER binds seconds later, and the
+ * creator buys in a SEPARATE transaction before `tradingOpensAt` — `_buy` let
+ * the creator through early, which is what made the window theirs.
+ *
+ * Atomic: the token is issued and bound inside `createLaunch`, and `_buy`
+ * carries "the trading-open gate, with NO creator exemption". A separate buy
+ * during the window reverts `TradingNotOpen` for the whole delay, and the first
+ * buy that can land is a PUBLIC one on a launch whose open time is public
+ * knowledge. Paying the creation fee for that is strictly worse than asking for
+ * no delay at all — so it is refused before anything is spent.
+ */
+describe("dev-buy window on an ATOMIC core", () => {
+  function venue(atomic: boolean): {
+    resolveLaunchTiming: (d: unknown, c: number, q: number) => Promise<unknown>;
+  } {
+    const v = new ShroomVenue(
+      NETWORKS.mainnet,
+      {} as never,
+      {} as never,
+      null,
+    ) as unknown as {
+      curvePresets: () => Promise<CurvePreset[]>;
+      isAtomicCore: () => Promise<boolean>;
+    } & Record<string, never>;
+    v.curvePresets = async () => [{ id: 0, name: "standard", rBps: 4000 } as CurvePreset];
+    v.isAtomicCore = async () => atomic;
+    return v as never;
+  }
+  const timing = (atomic: boolean, d: unknown) => venue(atomic).resolveLaunchTiming(d, 0, 1);
+
+  it("refuses a delayed open on an atomic core, before the creation fee is spent", async () => {
+    await expect(timing(true, { openDelaySeconds: MIN_SAFE_OPEN_DELAY_SECONDS })).rejects.toMatchObject(
+      { code: "dev_buy_not_supported_on_this_core" },
+    );
+  });
+
+  it("refuses it even when the caller opted out of the length floor", async () => {
+    // `allowShortDevBuyWindow` waives OUR empirical floor on bind latency. It
+    // cannot waive a contract that will not let the creator buy at all.
+    await expect(
+      timing(true, { openDelaySeconds: 5, allowShortWindow: true }),
+    ).rejects.toMatchObject({ code: "dev_buy_not_supported_on_this_core" });
+  });
+
+  it("points the caller at what actually works on that core", async () => {
+    await expect(timing(true, { openDelaySeconds: 600 })).rejects.toMatchObject({
+      hint: expect.stringContaining("drop devBuyDelaySeconds"),
+    });
+  });
+
+  it("leaves an immediate open alone — there is no window to lose", async () => {
+    // A launch on an atomic core is Trading the moment the create lands, so an
+    // immediate initialBuy is already the first buy in the ordinary race. The
+    // refusal must not reach a caller who asked for nothing.
+    const t = (await timing(true, { openDelaySeconds: 0 })) as { tradingOpensAt: bigint };
+    expect(t.tradingOpensAt).toBe(0n);
+  });
+
+  it("does not touch a PRE-ATOMIC core, where the window is the whole point", async () => {
+    const t = (await timing(false, { openDelaySeconds: MIN_SAFE_OPEN_DELAY_SECONDS })) as {
+      tradingOpensAt: bigint;
+    };
+    expect(t.tradingOpensAt).toBeGreaterThan(0n);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // and what it actually did, once the bind and the buy have happened
 // ---------------------------------------------------------------------------
