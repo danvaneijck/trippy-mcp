@@ -27,6 +27,7 @@ import {
   coreDeploymentFor,
   currentCoreDeployment,
   quoteAssetBySlot,
+  quoteSlotsOf,
 } from "../../chain/networks.js";
 import { ToolError } from "../../errors.js";
 import { assertBrandable, encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
@@ -450,6 +451,37 @@ export class ShroomVenue {
       tradeFeeBps: Number(c.tradeFeeBps),
       creatorFeeShareBps: Number(c.creatorFeeShareBps),
     };
+  }
+
+  /**
+   * Which of this package's quote slots THIS core will take a new launch on,
+   * read live — base slots and their fee tiers alike.
+   *
+   * Never hard-coded: quotes are enabled and disabled by a core-admin
+   * transaction with no redeploy, and the atomic mainnet core shipped with INJ
+   * (1%) and its 3% tier enabled and USDC/SAI not registered at all. A slot
+   * whose pair asset is not its base asset's is reported disabled, the same
+   * rule the pad's create form applies before it offers a tier.
+   */
+  async quoteMenu(): Promise<
+    { symbol: string; slot: number; tradeFeeBps: number; enabled: boolean }[]
+  > {
+    const slots = Object.keys(this.net.quoteAssets).flatMap((sym) =>
+      quoteSlotsOf(this.net, sym).map((slot) => ({ sym, slot })),
+    );
+    return Promise.all(
+      slots.map(async ({ sym, slot }) => {
+        const base = this.net.quoteAssets[sym]!;
+        const cfg = await this.getQuoteAssetConfig(slot).catch(() => null);
+        return {
+          symbol: sym,
+          slot,
+          tradeFeeBps: cfg?.tradeFeeBps ?? 0,
+          enabled:
+            !!cfg && cfg.enabled && cfg.pairAsset.toLowerCase() === base.pairAsset.toLowerCase(),
+        };
+      }),
+    );
   }
 
   /**
@@ -1045,6 +1077,11 @@ export class ShroomVenue {
     meta: LaunchMetadata;
     quoteSymbol: "INJ" | "USDC" | "SAI";
     /**
+     * The exact quote slot, when the caller picked a fee tier of `quoteSymbol`
+     * (INJ's 3% tier is slot 6). Omitted = the asset's base slot.
+     */
+    quoteSlot?: number;
+    /**
      * CurveRegistry preset (v2 only). Omitted = the registry's live `standard`,
      * looked up by name (see `defaultCurve`); 0 on a network with no menu.
      */
@@ -1092,8 +1129,30 @@ export class ShroomVenue {
     // fixable instead of permanent.
     assertBrandable("name", opts.meta.name);
     assertBrandable("symbol", opts.meta.symbol);
-    const q = this.net.quoteAssets[opts.quoteSymbol];
-    if (!q) throw new ToolError("bad_quote", `unknown quote asset ${opts.quoteSymbol}`);
+    const asset = this.net.quoteAssets[opts.quoteSymbol];
+    if (!asset) throw new ToolError("bad_quote", `unknown quote asset ${opts.quoteSymbol}`);
+    const slot = opts.quoteSlot ?? asset.slot;
+    if (!quoteSlotsOf(this.net, opts.quoteSymbol).includes(slot)) {
+      throw new ToolError("bad_quote", `slot ${slot} is not a ${opts.quoteSymbol} quote slot`);
+    }
+    const q = quoteAssetBySlot(this.net, slot)!;
+
+    // Read the live quote config BEFORE anything is spent. `_createLaunch`
+    // reverts `UnsupportedQuoteAsset` on a disabled slot, which costs the gas
+    // and names no alternative; the atomic mainnet core has USDC and SAI not
+    // registered at all, so this is the refusal a USDC launch actually meets.
+    const menu = await this.quoteMenu();
+    const picked = menu.find((m) => m.slot === slot);
+    if (!picked?.enabled) {
+      const open = menu.filter((m) => m.enabled);
+      throw new ToolError(
+        "quote_disabled",
+        `this core does not take new launches quoted in ${opts.quoteSymbol}${slot === asset.slot ? "" : ` (slot ${slot})`}`,
+        open.length
+          ? `enabled quotes here: ${open.map((m) => `${m.symbol} (slot ${m.slot}, ${m.tradeFeeBps / 100}% trade fee)`).join(", ")}`
+          : "no quote asset is enabled on this core right now — launches are closed",
+      );
+    }
 
     const fee = await this.signer.readContract<bigint>({
       address: this.core,
@@ -1219,7 +1278,8 @@ export class ShroomVenue {
     const warnings: string[] = [];
 
     // Poll Reserved(7) → Trading(1): the keeper mints + binds the bank token.
-    // Usually seconds; give it 90s before handing back a "still binding".
+    // Usually seconds; give it 90s before handing back a "still binding". An
+    // atomic core answers Trading on the first read — it bound in the create.
     let state = LaunchState.Reserved as number;
     let token: string | null = null;
     const deadline = Date.now() + 90_000;
@@ -1307,6 +1367,8 @@ export class ShroomVenue {
       }
     }
 
+    // Keyed by PAIR ASSET on chain, so a fee tier shares its base's ledger —
+    // reading slot 1 and slot 6 separately would report one wINJ balance twice.
     const referral: ClaimableLedgers["referral"] = [];
     for (const q of Object.values(this.net.quoteAssets)) {
       const amount = await this.signer.readContract<bigint>({

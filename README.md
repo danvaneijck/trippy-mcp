@@ -163,7 +163,8 @@ trippy-mcp export-key --yes-i-understand
 - `eth_getBalance` can report **0** for funded accounts on Injective's EVM RPC — balances are read from the Cosmos bank (LCD), and a transport shim keeps viem's preflight honest. Explorers/MetaMask may show 0 for the agent wallet; `trippy-mcp status` is authoritative.
 - Gas is billed at the **limit**, not usage — the signer estimates and adds a small buffer instead of flat limits.
 - Public RPCs 502 intermittently and receipts lag — requests retry across endpoints, and a missing receipt triggers a state re-read instead of a false failure.
-- Launches start **Reserved** until the keeper binds them (~seconds): `create_token` waits and reports honestly.
+- SHROOM Pad runs **three cores** on mainnet. New launches go to the **atomic** core (`0x1333…`, launch ids from 10000), which issues and binds the token inside the create transaction; the two older cores (`0xd948…`, `0xeBF6…`) are closed to new launches but keep trading, graduating and paying out. Every launch-scoped tool binds to the core on the launch row, and `claim_fees` reads all three. On the older cores a launch starts **Reserved** until the keeper binds it (~seconds): `create_token` waits and reports honestly.
+- Quote assets are read **live**: `create_token` refuses a quote the core has not enabled (mainnet's atomic core takes INJ today, at 1% or its 3% fee tier) before spending anything.
 
 ## Development
 

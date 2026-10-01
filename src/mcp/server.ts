@@ -400,7 +400,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "create_token",
-    'Launch a new token on SHROOM Pad (bonding curve, graduates to a Choice CLMM pool). Costs the on-chain creation fee (read it live with explain("shroom_pad_fees") — it is owner-settable and has changed on mainnet) plus optional initialBuy. The launch binds via the keeper within ~a minute — the tool waits and reports the tradable state. Where the deployment offers a curve menu, `curve` picks the shape of the raise and is FROZEN onto the launch forever — read explain("shroom_pad_curves") before choosing one; omitting it uses the standard curve.',
+    'Launch a new token on SHROOM Pad (bonding curve; on mainnet\'s current ATOMIC core it graduates, permissionlessly, to a Choice v2 pool on Injective EVM). Costs the on-chain creation fee (read it live with explain("shroom_pad_fees") — it is owner-settable and has changed on mainnet) plus optional initialBuy. On an atomic core the token is issued, bound and Trading inside the create transaction itself; on an older core it binds via the keeper within ~a minute — either way the tool reports the tradable state. Only quote assets the core has ENABLED are accepted, read live — a disabled one is refused before anything is spent, naming the enabled ones. Where the deployment offers a curve menu, `curve` picks the shape of the raise and is FROZEN onto the launch forever — read explain("shroom_pad_curves") before choosing one; omitting it uses the standard curve.',
     {
       name: z
         .string()
@@ -420,7 +420,19 @@ export async function serve(): Promise<void> {
       twitter: z.string().optional(),
       website: z.string().optional(),
       telegram: z.string().optional(),
-      quoteAsset: z.enum(["INJ", "USDC", "SAI"]).optional().describe("bonding-curve quote asset (default INJ)"),
+      quoteAsset: z
+        .enum(["INJ", "USDC", "SAI"])
+        .optional()
+        .describe(
+          "bonding-curve quote asset (default INJ). Must be enabled on the current core — mainnet's atomic core takes INJ only today; a disabled quote is refused up front with the list of enabled ones.",
+        ),
+      tradeFeeBps: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "the quote's FEE TIER, in bps of every trade: 100 (1%, the default) or a higher tier the core offers on the same asset (INJ has a 300 = 3% tier). Frozen onto the launch, and kept for life by its graduated Choice v2 pool. The creator takes the same share of either tier, so a higher tier pays the creator more per trade and costs every trader more. Refused unless that tier is enabled live.",
+        ),
       curve: z
         .string()
         .optional()
@@ -435,7 +447,7 @@ export async function serve(): Promise<void> {
         .max(86_400)
         .optional()
         .describe(
-          "delay public trading by this many seconds so `initialBuy` is an EXCLUSIVE creator buy instead of a public race. Without it the opening buy is open to anyone the moment the keeper binds. The window must outlast the keeper bind, which has measured 28-65s on mainnet, so values under 180 are REFUSED before anything is spent (override with allowShortDevBuyWindow). 180 is a good default. The contract refuses exclusivity without a cap, so `devBuyMaxBps` applies; max 86400 (24h). Frozen onto the launch — it cannot be changed afterwards. 🔴 REFUSED OUTRIGHT on an ATOMIC core (testnet since 2026-09-11): there `buy()` has no creator exemption, so a delayed open would lock the creator out of their own window and hand the first buy to the public at a predictable moment. On that core an immediate `initialBuy` is already the first buy in the ordinary race.",
+          "delay public trading by this many seconds so `initialBuy` is an EXCLUSIVE creator buy instead of a public race. Without it the opening buy is open to anyone the moment the keeper binds. The window must outlast the keeper bind, which has measured 28-65s on mainnet, so values under 180 are REFUSED before anything is spent (override with allowShortDevBuyWindow). 180 is a good default. The contract refuses exclusivity without a cap, so `devBuyMaxBps` applies; max 86400 (24h). Frozen onto the launch — it cannot be changed afterwards. 🔴 REFUSED OUTRIGHT on an ATOMIC core (mainnet since 2026-09-13, testnet since 2026-09-11): there `buy()` has no creator exemption, so a delayed open would lock the creator out of their own window and hand the first buy to the public at a predictable moment. On that core an immediate `initialBuy` is already the first buy in the ordinary race.",
         ),
       allowShortDevBuyWindow: z
         .boolean()

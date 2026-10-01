@@ -44,12 +44,16 @@ tradable token.** It returns a launchId in state Reserved. Trading only opens
 when the keeper flips it to Trading, usually within seconds. \`create_token\`
 polls for this and tells you the state it ended on.
 
-🔴 **An ATOMIC core skips all of that.** Testnet's core since 2026-09-11 issues
+🔴 **An ATOMIC core skips all of that** — and new launches are created on one on
+both networks (mainnet since 2026-09-13, testnet since 2026-09-11). It issues
 the token through its own \`LaunchTokenFactory\`, binds it and opens the curve
 INSIDE \`createLaunch\`, in the creator's own transaction — so a launch is
 Trading the moment the create lands, there is no Reserved state to poll, no
 keeper, no bind deadline and therefore no Cancelled-on-missed-bind exit. It also
-numbers its launches from 1000 rather than 0. Two consequences an agent will hit:
+numbers its on-chain ids from 10000 on mainnet (1000 on testnet), never from 0.
+The older cores stay live for the launches already on them, so a launch's core
+decides its rules; the tools resolve that per launch. Consequences an agent
+will hit:
 
 - \`msg.value\` must be EXACTLY the creation fee (plus the opening buy on a wINJ
   quote); an overshoot reverts rather than refunding.
@@ -59,6 +63,11 @@ numbers its launches from 1000 rather than 0. Two consequences an agent will hit
   separate buy, which is what the window meant on every earlier core, would lock
   the creator out of their own window. \`create_token\` refuses
   \`devBuyDelaySeconds\` on such a core rather than sell you one.
+- Only the quote slots the core has enabled take a new launch, and it reports
+  them live: \`explain("shroom_pad_fees")\` lists them, and \`create_token\`
+  refuses a disabled one before spending anything. INJ also has a higher FEE
+  TIER on its own quote slot (\`create_token\`'s \`tradeFeeBps\`): same asset,
+  higher trade fee, frozen onto the launch.
 
 ## Curve math
 
@@ -104,15 +113,27 @@ same transaction** — you get the tokens up to the target and the excess quote
 asset back, and the launch graduates. This is not a failure and needs no retry;
 \`quote\` shows the refund before you commit.
 
-Graduated liquidity goes into a Choice CLMM pool at the 0.30% tier and the
-position is locked forever. After that the token trades on Choice, not on the
-curve — the trading tools auto-route, but a direct curve call would revert.
+Where the liquidity goes depends on the launch's core, and the position is
+locked forever either way:
+
+- **Atomic core** — graduation is permissionless and atomic: whoever crosses
+  the target triggers it, and \`InfinitySettler\` seeds a **Choice v2** pool
+  (PancakeSwap Infinity CL, on Injective EVM) in the same transaction. The pool
+  is wINJ-quoted and keyed to a launch hook: recent graduates charge the
+  launch's OWN trade fee through \`LaunchPoolFeeHook\` (LP fee 0), while the
+  earliest ones charge an ordinary LP fee instead.
+- **Older cores** — a Choice v1 (CosmWasm) CLMM pool at the 0.30% tier.
+
+After that the token trades on Choice, not on the curve — a direct curve call
+would revert.
 
 ## The token itself
 
-One token, two interfaces: a Cosmos tokenfactory bank denom AND an
-erc20-module ERC20 at the same address, sharing ONE balance. Launch tokens are
-always 18-decimal. A bank transfer and an ERC20 transfer move the same coins,
+One token, two interfaces: a Cosmos bank denom AND an ERC20, sharing ONE
+balance. On the older cores the bank side is a tokenfactory denom with a
+per-launch salt; on an atomic core it is a bank-precompile ERC20 whose denom is
+\`erc20:\` plus the CHECKSUMMED token address. Launch tokens are always
+18-decimal. A bank transfer and an ERC20 transfer move the same coins,
 so holder snapshots taken from either side are complete.
 
 ## Anti-snipe controls (set by the creator at launch)

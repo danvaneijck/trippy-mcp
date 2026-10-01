@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { NETWORKS, coreDeployments } from "../src/chain/networks.js";
+import { NETWORKS, coreDeployments, quoteAssetBySlot } from "../src/chain/networks.js";
 import { createToken } from "../src/mcp/tools.js";
 import type { Runtime } from "../src/runtime.js";
 import { ShroomVenue } from "../src/venues/shroom/launchpad.js";
@@ -76,6 +76,25 @@ function stubVenue(menu: RawPreset[], bound: ReturnType<typeof coreDeployments>[
         case "launchTokenFactory":
           // Pre-atomic, so the dev-buy window is priced rather than refused.
           return `0x${"00".repeat(20)}`;
+        case "getQuoteAssetConfig": {
+          // Every quote this suite launches on is enabled here — what is under
+          // test is the curve, not the quote menu (launch-params covers that).
+          const q = quoteAssetBySlot(NETWORKS.mainnet, Number(args[0]));
+          return {
+            pairAsset: q?.pairAsset ?? `0x${"00".repeat(20)}`,
+            graduationPairTarget: 1n,
+            // v1's QuoteAssetConfig still carries the curve shape.
+            virtualPair: 1n,
+            virtualToken: 1n,
+            curveSupply: 1n,
+            graduationTokenReserve: 1n,
+            enabled: !!q,
+            bankDenom: q?.bankDenom ?? "",
+            requiresChoiceFactoryDust: false,
+            tradeFeeBps: 100,
+            creatorFeeShareBps: 7000,
+          };
+        }
         case "getPresets":
           return menu.map((p) => ({
             virtualToken: 1_073_000_000_000_000_000_000_000_000n,

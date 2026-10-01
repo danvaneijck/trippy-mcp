@@ -131,10 +131,16 @@ the gate and whether this agent currently qualifies.
 
 ## 5. Graduation — the SECOND fee rail
 
-No graduation fee. Liquidity moves into a Choice CLMM pool at the 0.30% tier
-and the position is locked permanently. Pool fees stream to the creator and the
-platform on the SAME split the curve used, so a launch keeps paying its creator
-after it stops trading on the curve.
+No graduation fee. On the older cores liquidity moves into a Choice v1 CLMM
+pool at the 0.30% tier and the position is locked permanently. Pool fees stream
+to the creator and the platform on the SAME split the curve used, so a launch
+keeps paying its creator after it stops trading on the curve.
+
+An ATOMIC-core launch graduates onto a Choice v2 pool on Injective EVM instead,
+whose fee leg runs through a launch hook (\`LaunchPoolFeeHook\`, the launch's own
+trade fee for life) or, on the earliest graduates, an ordinary LP fee on a position
+held by the v2 \`PositionLocker\`. That rail is NOT the CosmWasm locker below,
+and this package does not read or collect it yet.
 
 That second rail shares NOTHING with the first. The position NFT is held by a
 per-launch **locker** contract (CosmWasm, the launch's \`lockerAddr\`), not by
