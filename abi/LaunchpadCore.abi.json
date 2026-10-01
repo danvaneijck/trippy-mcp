@@ -1080,6 +1080,19 @@
   },
   {
     "type": "function",
+    "name": "launchTokenFactory",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ILaunchTokenFactory"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "launchesPaused",
     "inputs": [],
     "outputs": [
