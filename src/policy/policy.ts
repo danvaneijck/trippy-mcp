@@ -7,7 +7,8 @@
  * What it guards:
  *  - kill switch (`tradingEnabled`)
  *  - target allowlist: writes only to known contracts; ERC20 approvals only
- *    to the LaunchpadCore; sweeps/transfers only to the owner address
+ *    to the LaunchpadCore or (exactly, briefly) to Choice v2's Permit2 and
+ *    UniversalRouter; sweeps/transfers only to the owner address
  *  - per-tx and rolling-24h USD caps on trades/swaps/launches
  *  - slippage clamp
  */
@@ -66,13 +67,33 @@ export interface WriteIntent {
    */
   destination?: string;
   /**
+   * The allowance an `approve` grants. Required, and held to the exact-approval
+   * rules, when the spender is one of the policy's `exactApprovalSpenders`.
+   */
+  approval?: { amount: bigint; expiresAt?: number };
+  /**
    * USD value leaving the wallet. `undefined` = no spend (claims, approvals);
    * `null` = spend of unknown USD value (refused unless allowUnpricedSpend).
    */
   spendUsd?: number | null;
 }
 
+/** Longest a time-boxed (Permit2) grant may run. The swap it funds lands within minutes. */
+export const MAX_APPROVAL_TTL_SECONDS = 60 * 60;
+/** At or above this an allowance is "unlimited" in practice — 2^128 base units. */
+const UNLIMITED_ALLOWANCE = 1n << 128n;
+
+/** A spender every approval to which must be exact (and, if `expires`, time-boxed). */
+export interface ExactApprovalSpender {
+  /** Lowercased spender address. */
+  spender: string;
+  /** True for a Permit2 grant: it must carry an expiry within MAX_APPROVAL_TTL_SECONDS. */
+  expires: boolean;
+}
+
 export class PolicyEngine {
+  private readonly exactSpenders: Map<string, ExactApprovalSpender>;
+
   constructor(
     private readonly cfg: PolicyConfig,
     /** Lowercased addresses writes may target (contracts + approve spenders). */
@@ -80,7 +101,17 @@ export class PolicyEngine {
     /** Lowercased owner sweep destination — the ONLY allowed transfer dest. */
     private readonly sweepDestination: string,
     private readonly ledger: SpendLedger,
-  ) {}
+    /**
+     * Spenders that may only ever be granted an EXACT, bounded allowance —
+     * Choice v2's Permit2 and UniversalRouter. Unlike LaunchpadCore, whose
+     * address is the only thing that can ever draw on its allowance, these are
+     * shared plumbing: a standing max grant to Permit2 is a standing offer to
+     * every contract that wins a Permit2 grant later.
+     */
+    exactApprovalSpenders: readonly ExactApprovalSpender[] = [],
+  ) {
+    this.exactSpenders = new Map(exactApprovalSpenders.map((s) => [s.spender.toLowerCase(), s]));
+  }
 
   /**
    * Fee lockers the chain has confirmed pay THIS wallet, lowercased.
@@ -126,7 +157,7 @@ export class PolicyEngine {
     if (!allowed) {
       throw new PolicyError(
         `target ${intent.target} is not on the contract allowlist`,
-        "writes are restricted to the LaunchpadCore, its quote assets, the Choice aggregator and verified fee lockers",
+        "writes are restricted to the LaunchpadCores, their quote assets, the Choice aggregator, Choice v2's UniversalRouter and Permit2, and verified fee lockers",
       );
     }
 
@@ -143,7 +174,11 @@ export class PolicyEngine {
       return;
     }
 
-    if (intent.kind === "claim" || intent.kind === "approve") return;
+    if (intent.kind === "approve") {
+      this.enforceExactApproval(intent, target);
+      return;
+    }
+    if (intent.kind === "claim") return;
 
     // trade / swap / launch / airdrop — spend-bearing actions
     if (!this.cfg.tradingEnabled) {
@@ -199,6 +234,39 @@ export class PolicyEngine {
       );
     }
     this.assertWithinDailyBudget(spend);
+  }
+
+  /**
+   * Hold an approval to an exact-approval spender to its rules: the amount must
+   * be stated and bounded, and a Permit2 grant must expire soon. Checked here,
+   * inside the signer, so a venue bug that asked for `maxUint256` or a
+   * forever-grant is refused before it is signed rather than shipped.
+   */
+  private enforceExactApproval(intent: WriteIntent, target: string): void {
+    const rule = this.exactSpenders.get(target);
+    if (!rule) return;
+    const a = intent.approval;
+    if (!a) {
+      throw new PolicyError(
+        `an approval to ${intent.target} must state its exact amount`,
+        "approvals to Choice v2's Permit2 and router are exact and short-lived by policy",
+      );
+    }
+    if (a.amount <= 0n || a.amount >= UNLIMITED_ALLOWANCE) {
+      throw new PolicyError(
+        `refusing an unlimited approval to ${intent.target}`,
+        "approve exactly the amount being swapped",
+      );
+    }
+    if (rule.expires) {
+      const now = Math.floor(Date.now() / 1000);
+      if (a.expiresAt === undefined || a.expiresAt > now + MAX_APPROVAL_TTL_SECONDS || a.expiresAt <= now) {
+        throw new PolicyError(
+          `a Permit2 grant to ${intent.target} must expire within ${MAX_APPROVAL_TTL_SECONDS / 60} minutes`,
+          "grant only for the swap at hand",
+        );
+      }
+    }
   }
 
   /**

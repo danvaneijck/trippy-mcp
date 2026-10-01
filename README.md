@@ -2,9 +2,9 @@
 
 Let your coding agent trade on Injective. `trippy-mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that plugs into **Claude Code, Codex, Cursor** (any MCP client) and gives it tools to:
 
-- **launch tokens** on [SHROOM Pad](https://pump.trippyinj.xyz) (bonding curve → graduates to a Choice CLMM pool)
+- **launch tokens** on [SHROOM Pad](https://pump.trippyinj.xyz) (bonding curve → graduates to a Choice v2 pool on Injective EVM)
 - **trade bonding-curve tokens** (buy/sell/quote, on-chain-exact quotes)
-- **swap any Injective token** through the [Choice](https://choice.exchange) aggregation router (AMM + CLMM + orderbook smart order routing)
+- **swap any Injective token** through the [Choice](https://choice.exchange) aggregation router (AMM + CLMM + orderbook smart order routing), and **trade Choice v2** (PancakeSwap Infinity CL on Injective EVM) — where graduated launches, DojoFun and other EVM tokens live — with calldata built and checked locally, quotes on chain, and exact, short-lived Permit2 approvals
 - carry an **agent identity**: trades from your agent get an AGENT badge on [Trippy Terminal](https://trade.trippyinj.xyz), optionally linked to your profile
 
 **Non-custodial by construction.** `init` generates a fresh key on *your* machine; no server ever sees it. The agent wallet is a budgeted burner you fund from your main wallet — never your main key.
@@ -34,7 +34,7 @@ Writes are merge-then-rename with a `.trippy-bak` copy kept behind, so nothing e
 The key never leaves your machine, and four independent layers stand between a misbehaving (or prompt-injected) model and your funds:
 
 1. **Budgeted burner** — the wallet only ever holds what you send it. Your main wallet is never touched.
-2. **Policy engine in the signer** (not in the tools, not in the model): per-tx USD cap, rolling 24h budget, slippage ceiling, and a hard contract allowlist (LaunchpadCore, its quote assets, the Choice aggregator, the claim-drops contract — nothing else). The one address admitted at runtime is a launch's fee locker, and only after the chain confirms it pays this wallet, and only for fee collection. Configured in `~/.trippy-mcp/config.json`; changing it is a human action.
+2. **Policy engine in the signer** (not in the tools, not in the model): per-tx USD cap, rolling 24h budget, slippage ceiling, and a hard contract allowlist (every LaunchpadCore, its quote assets, the Choice aggregator, Choice v2's UniversalRouter and Permit2, the claim-drops contract — nothing else). Approvals to Permit2 and the router must be EXACT and, for the router, expire within the hour — enforced in the signer, not the venue. The one address admitted at runtime is a launch's fee locker, and only after the chain confirms it pays this wallet, and only for fee collection. Configured in `~/.trippy-mcp/config.json`; changing it is a human action.
 3. **Sweep is one-way home** — `sweep` takes no destination. Funds can only go to the owner address you fixed at `init`. Airdrops are the one exception that sends value to addresses you did not name, so they carry their own ceiling (`airdropCapUsd`, separate from the trade cap), are never allowed to skip USD valuation, and require a previewed plan id rather than raw criteria.
 4. **Untrusted-data discipline** — token names/descriptions are attacker-controlled internet text; tools sanitize them and fence them under `untrusted_metadata` so your agent treats them as data, not instructions.
 
@@ -49,13 +49,13 @@ Plus: encrypted keystore by default (scrypt + AES-256-GCM), append-only audit lo
 | `trending` / `new_launches` / `recent_trades` | discovery + tape |
 | `candles` | OHLCV price history as CSV rows under a `columns` header — curve launches (quote-priced + per-bucket USD rate) or Choice markets (USD-priced) |
 | `my_activity` | the agent's own history on both venues: curve trades + Choice swaps, orderbook fills, window-flow PnL, and the launches this wallet created |
-| `quote` | preview a buy/sell — auto-routes curve vs Choice |
-| `buy` / `sell` | execute — curve trades on SHROOM Pad, everything else via the Choice aggregator |
+| `quote` | preview a buy/sell — auto-routes curve vs Choice v1 vs Choice v2; a token listed on both Choice venues is quoted on both and the better output reported |
+| `buy` / `sell` | execute — curve trades on SHROOM Pad; atomic-core graduates and EVM tokens on Choice v2 (single-hop, UniversalRouter); everything else via the Choice aggregator |
 | `create_token` | launch on the bonding curve (image upload → IPFS, ~0.2 INJ creation fee, optional initial buy) |
 | `my_launches` | the creator's view: every launch this wallet made, with curve progress, 24h volume and holders, the dev-buy window it actually got, the bag at a live exit quote, and BOTH fee rails — the curve's creator ledger on the core and the graduated pool's uncollected fees in its locker — read on-chain, no transaction |
 | `claim_fees` | curve creator fees, referral fees, cancelled-launch refunds, and a graduated launch's Choice pool fees (held in a per-launch locker, invisible to every other tool, paid partly in the launch's own token). No ids = every launch this wallet created; `preview: true` reports what is owed without signing anything |
 | `wallet_status` / `sweep` | balances + policy budget; send funds home |
-| `portfolio` | every holding valued in USD (quote-rate feed / last curve trade / Choice stats) |
+| `portfolio` | every holding valued in USD (quote-rate feed / last curve trade / Choice stats / Choice v2 indexer) |
 | `agent_info` | identity + how to claim the agent to your Terminal profile |
 | `airdrop_preview` / `airdrop_execute` / `airdrop_status` | airdrop to a snapshot — CSV, token/launch holders, NFT (CW721 + CW404), governance voters, Mito vault LPs, or BuyBack participants. Two rails: a **merkle claim drop** (one tx for any list size, unclaimed funds recoverable after expiry) or a **push** straight to every wallet (≤1000 recipients, nobody has to claim, irreversible). Two-step commit: preview publishes and broadcasts nothing, execute funds only a previewed plan. A push run is resumable — re-run the same planId and nobody is paid twice |
 | `airdrop_manage` | claw back an expired campaign's remainder, extend its expiry, freeze the list, pause/resume claims. Call with just a campaignId to see which of those the contract will accept right now and why not — the check is local and costs nothing |

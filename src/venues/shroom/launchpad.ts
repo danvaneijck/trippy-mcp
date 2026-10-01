@@ -63,6 +63,11 @@ export interface LaunchView {
   token: Address;
   /** Per-launch sink contract — holds unsold curve supply, never a recipient. */
   sink: Address;
+  /**
+   * The graduation settler this launch snapshotted at creation. An
+   * InfinitySettler here means the launch graduates onto Choice v2.
+   */
+  settler: Address;
   quoteAsset: number;
   pairAsset: Address;
   gate: { gateToken: Address; minBalance: bigint; windowEndsAt: bigint; discountBps: number };
@@ -233,6 +238,7 @@ export class ShroomVenue {
       creator: l.creator,
       token: l.token,
       sink: l.sink,
+      settler: l.settler as Address,
       quoteAsset: Number(l.quoteAsset),
       pairAsset: l.pairAsset,
       gate: {
@@ -628,8 +634,8 @@ export class ShroomVenue {
       if (state === LaunchState.Graduated) {
         throw new ToolError(
           "graduated",
-          `launch #${launchId} has graduated — it trades on Choice now`,
-          "use the `quote`/`buy`/`sell` tools without venue override (they auto-route to Choice), or choice_swap directly",
+          `launch #${launchId} has graduated — it trades on Choice now (Choice v2 for an atomic-core launch, Choice v1 for an older one)`,
+          "use the `quote`/`buy`/`sell` tools without a venue override — they auto-route to the pool it graduated into",
         );
       }
       if (state === LaunchState.Reserved) {

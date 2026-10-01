@@ -68,6 +68,43 @@ export interface Erc8004Config {
   deployBlock?: number;
 }
 
+/**
+ * Choice v2 — PancakeSwap Infinity (CL) on Injective EVM, where an ATOMIC-core
+ * launch graduates. Vendored from choice_v2_contracts
+ * `deployments/injective_mainnet.json`; absent on a network without it.
+ *
+ * Everything a swap is BUILT from is pinned here, never taken from the v2 API:
+ * the API is read-only to this package (pool discovery, prices, tape), and a
+ * swap's calldata is assembled locally against these addresses.
+ */
+export interface ChoiceV2Config {
+  /** Read-only indexer API (GET only). */
+  apiBase: string;
+  /** The ONE contract a v2 swap may execute on. */
+  universalRouter: Address;
+  /** Pulls the input token for the router; approved per swap, exactly, briefly. */
+  permit2: Address;
+  /** Simulates a swap through the pool's hooks, so a hook fee is in the quote. */
+  clQuoter: Address;
+  clPoolManager: Address;
+  vault: Address;
+  /** The wrapped-native the pools are quoted in; native INJ wraps/unwraps 1:1. */
+  winj: Address;
+  /**
+   * InfinitySettlers that graduate a launch onto v2. A launch whose snapshotted
+   * settler is in here has its pool key read off `LOCKER().getPosition(id)`
+   * rather than discovered — the chain names the pool, not an API.
+   */
+  infinitySettlers: readonly Address[];
+  /**
+   * The ONLY hooks a v2 swap will route through, besides none at all. A hook
+   * runs code inside the swap and can take any cut it likes of either side, so
+   * an unknown one is refused rather than quoted. Both of these are Choice's
+   * own launch hooks and both were read for what they do on a swap.
+   */
+  allowedHooks: readonly { address: Address; name: string }[];
+}
+
 export interface NetworkDef {
   name: NetworkName;
   evmChainId: number;
@@ -175,6 +212,8 @@ export interface NetworkDef {
    */
   quoteFeeTiers: Record<number, { base: "INJ" | "USDC" | "SAI"; tradeFeeBps: number }>;
   quoteAssets: Record<string, QuoteAssetInfo>;
+  /** Choice v2 (Infinity CL on the EVM). Absent = no v2 venue on this network. */
+  choiceV2?: ChoiceV2Config;
   /** Default gas price (wei) — Injective EVM uses a fixed floor, not an auction. */
   gasPriceWei: bigint;
   erc8004: Erc8004Config;
@@ -318,6 +357,27 @@ const MAINNET: NetworkDef = {
       decimals: 18,
       isNative: false,
     },
+  },
+  choiceV2: {
+    apiBase: "https://evm-api.choice.exchange",
+    universalRouter: "0xDF242D1937Cfaf2F3f5245CFBd5A8F2012cda856",
+    permit2: "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+    clQuoter: "0x13241d5d4FED3ee7eD8E4f1aB74c14544A789d65",
+    clPoolManager: "0x6A4085Bb379e5213Df84Dc2dD52562559602b029",
+    vault: "0xB67dd13b30ed21310be170968301eF83827B1Cad",
+    winj: "0x0000000088827d2d103ee2d9A6b781773AE03FfB",
+    // The atomic core's `seederFactory`; every atomic launch snapshots it.
+    infinitySettlers: ["0x43a72CA9A2f4A49385c1Caa9413Ccd0566BcfBbE"],
+    allowedHooks: [
+      // Graduation pools since ~10006: LP fee 0, and the hook charges the
+      // launch's OWN trade fee on the quote side of every swap (beforeSwap /
+      // afterSwap return deltas), credited to the creator. CLQuoter runs the
+      // swap through the hook, so the fee is inside every quote.
+      { address: "0x4baC811606b5b91A9cE6187330d255B8134169B4", name: "LaunchPoolFeeHook" },
+      // Early graduates (10000): registers `beforeInitialize` ONLY, so it is
+      // never called on a swap — the pool is an ordinary 1% LP-fee pool.
+      { address: "0x700924558Af21DB531090E19B104702414Aabf2B", name: "LaunchPoolGuardHook" },
+    ],
   },
   gasPriceWei: 500_000_000n,
   erc8004: {

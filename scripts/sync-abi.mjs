@@ -16,7 +16,7 @@
  *
  * Modes:
  *   node scripts/sync-abi.mjs --check     assert surface ⊆ vendored (CI; needs `npm run build` first)
- *   node scripts/sync-abi.mjs --refresh   re-copy the ABIs from $SHROOM_REPO / $AGENT_SDK_REPO
+ *   node scripts/sync-abi.mjs --refresh   re-copy the ABIs from $SHROOM_REPO / $AGENT_SDK_REPO / $CHOICE_V2_REPO
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -76,6 +76,75 @@ const SURFACES = [
       pick: (artifact) => artifact.abi,
     },
   },
+  // Choice v2 (PancakeSwap Infinity on Injective EVM). A swap's calldata is
+  // built against these hand-written surfaces, so a selector that drifted from
+  // the deployed contract would build a call that reverts — or one that hits a
+  // different function. Refreshed from the `choice_v2` workspace's Foundry
+  // outputs (the Infinity forks' src/ is byte-identical to audited upstream).
+  {
+    label: "Choice v2 UniversalRouter",
+    vendored: join(root, "abi", "choice-v2", "UniversalRouter.abi.json"),
+    module: "dist/venues/choiceV2/abi.js",
+    exportName: "UNIVERSAL_ROUTER_ABI",
+    source: "src/venues/choiceV2/abi.ts",
+    refresh: { env: "CHOICE_V2_REPO", path: "forks/infinity-universal-router/foundry-out/UniversalRouter.sol/UniversalRouter.json", pick: (artifact) => artifact.abi },
+  },
+  {
+    label: "Choice v2 CLQuoter",
+    vendored: join(root, "abi", "choice-v2", "CLQuoter.abi.json"),
+    module: "dist/venues/choiceV2/abi.js",
+    exportName: "CL_QUOTER_ABI",
+    source: "src/venues/choiceV2/abi.ts",
+    refresh: { env: "CHOICE_V2_REPO", path: "contracts/foundry-out/CLQuoter.sol/CLQuoter.json", pick: (artifact) => artifact.abi },
+  },
+  {
+    label: "Choice v2 CLPoolManager",
+    vendored: join(root, "abi", "choice-v2", "CLPoolManager.abi.json"),
+    module: "dist/venues/choiceV2/abi.js",
+    exportName: "CL_POOL_MANAGER_ABI",
+    source: "src/venues/choiceV2/abi.ts",
+    refresh: { env: "CHOICE_V2_REPO", path: "forks/infinity-core/foundry-out/CLPoolManager.sol/CLPoolManager.json", pick: (artifact) => artifact.abi },
+  },
+  {
+    label: "Choice v2 CLPositionManager",
+    vendored: join(root, "abi", "choice-v2", "CLPositionManager.abi.json"),
+    module: "dist/venues/choiceV2/abi.js",
+    exportName: "CL_POSITION_MANAGER_ABI",
+    source: "src/venues/choiceV2/abi.ts",
+    refresh: { env: "CHOICE_V2_REPO", path: "contracts/foundry-out/CLPositionManager.sol/CLPositionManager.json", pick: (artifact) => artifact.abi },
+  },
+  {
+    label: "Choice v2 IAllowanceTransfer",
+    vendored: join(root, "abi", "choice-v2", "IAllowanceTransfer.abi.json"),
+    module: "dist/venues/choiceV2/abi.js",
+    exportName: "PERMIT2_ABI",
+    source: "src/venues/choiceV2/abi.ts",
+    refresh: { env: "CHOICE_V2_REPO", path: "contracts/foundry-out/IAllowanceTransfer.sol/IAllowanceTransfer.json", pick: (artifact) => artifact.abi },
+  },
+  {
+    label: "Choice v2 InfinitySettler",
+    vendored: join(root, "abi", "choice-v2", "InfinitySettler.abi.json"),
+    module: "dist/venues/choiceV2/abi.js",
+    exportName: "INFINITY_SETTLER_ABI",
+    source: "src/venues/choiceV2/abi.ts",
+    refresh: { env: "CHOICE_V2_REPO", path: "contracts/foundry-out/InfinitySettler.sol/InfinitySettler.json", pick: (artifact) => artifact.abi },
+  },
+  {
+    label: "Choice v2 PositionLocker",
+    vendored: join(root, "abi", "choice-v2", "PositionLocker.abi.json"),
+    module: "dist/venues/choiceV2/abi.js",
+    exportName: "POSITION_LOCKER_ABI",
+    source: "src/venues/choiceV2/abi.ts",
+    refresh: { env: "CHOICE_V2_REPO", path: "contracts/foundry-out/PositionLocker.sol/PositionLocker.json", pick: (artifact) => artifact.abi },
+  },
+  {
+    label: "Choice v2 LaunchPoolFeeHook",
+    vendored: join(root, "abi", "choice-v2", "LaunchPoolFeeHook.abi.json"),
+    module: "dist/venues/choiceV2/abi.js",
+    exportName: "LAUNCH_POOL_FEE_HOOK_ABI",
+    source: "src/venues/choiceV2/abi.ts",
+    refresh: { env: "CHOICE_V2_REPO", path: "contracts/foundry-out/LaunchPoolFeeHook.sol/LaunchPoolFeeHook.json", pick: (artifact) => artifact.abi },
+  },
   {
     label: "IdentityRegistry (ERC-8004)",
     vendored: join(root, "abi", "IdentityRegistry.abi.json"),
@@ -107,7 +176,7 @@ if (mode === "refresh") {
     refreshed++;
   }
   if (refreshed === 0) {
-    console.error("nothing refreshed — set SHROOM_REPO and/or AGENT_SDK_REPO");
+    console.error("nothing refreshed — set SHROOM_REPO, AGENT_SDK_REPO and/or CHOICE_V2_REPO");
     process.exit(1);
   }
   process.exit(0);

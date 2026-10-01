@@ -18,6 +18,7 @@ import type { Runtime } from "../runtime.js";
 import * as agentWallet from "./agent_wallet.js";
 import * as airdrops from "./airdrops.js";
 import * as choice from "./choice.js";
+import * as choiceV2 from "./choice_v2.js";
 import { loadLiveParams, type LiveParams } from "./params.js";
 import * as shroomPad from "./shroom_pad.js";
 import * as shroomPadCurves from "./shroom_pad_curves.js";
@@ -38,6 +39,7 @@ export const TOPICS: readonly DocTopic[] = [
   shroomPadCurves,
   shroomPadFees,
   choice,
+  choiceV2,
   agentWallet,
   airdrops,
 ];

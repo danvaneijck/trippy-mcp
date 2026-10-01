@@ -43,12 +43,21 @@ import { IdentityRegistry } from "../identity/registry.js";
 import { loadIdentityState } from "../identity/state.js";
 import { detectAinj } from "../interop.js";
 import { decodeMetadataUri, resolveImage, type LaunchMetadata } from "../metadata.js";
-import { CURVE_STATES, resolveToken, type ResolvedTarget } from "../router.js";
+import { CURVE_STATES, hasV2Pool, pickBetterQuote, resolveToken, type ResolvedTarget } from "../router.js";
+import {
+  candlesV2,
+  quoteV2,
+  recentTradesV2,
+  tokenInfoV2,
+  tradeV2,
+  v2Counter,
+  type V2Target,
+} from "./choiceV2Tools.js";
 import type { Runtime } from "../runtime.js";
 import { deepSanitize, sanitizeText, untrustedMeta } from "../untrusted.js";
 import { checkForUpdate, PKG_VERSION } from "../version.js";
 import { extractUsdPrice } from "../venues/choice/swap.js";
-import { LAUNCH_STATE_LABEL, LaunchState } from "../venues/shroom/abi.js";
+import { ERC20_ABI, LAUNCH_STATE_LABEL, LaunchState } from "../venues/shroom/abi.js";
 import {
   priceRunX,
   resolveCurveChoice,
@@ -166,7 +175,7 @@ async function tradeSummaries(rt: Runtime, items: ApiTrade[]): Promise<Record<st
   return items.map((t) => tradeSummary(t, byLaunch.get(t.launchId) ?? null));
 }
 
-type RoutedTarget = Extract<ResolvedTarget, { venue: "curve" } | { venue: "choice" }>;
+type RoutedTarget = Extract<ResolvedTarget, { venue: "curve" } | { venue: "choice" } | { venue: "choiceV2" }>;
 
 async function routed(rt: Runtime, query: string): Promise<RoutedTarget> {
   const target = await resolveToken(rt, query);
@@ -194,7 +203,19 @@ export async function searchTokens(rt: Runtime, args: { query: string }): Promis
   if (target.venue === "curve") {
     return { venue: "curve", launch: launchSummary(rt, target.launch) };
   }
-  return { venue: "choice", tokenId: target.tokenId };
+  if (target.venue === "choiceV2") {
+    return {
+      venue: "choiceV2",
+      token: target.token,
+      ...(target.launch ? { launch: launchSummary(rt, target.launch) } : {}),
+      ...(target.v1TokenId ? { alsoOnChoiceV1: target.v1TokenId } : {}),
+    };
+  }
+  return {
+    venue: "choice",
+    tokenId: target.tokenId,
+    ...(target.v2Token ? { alsoOnChoiceV2: target.v2Token } : {}),
+  };
 }
 
 export async function tokenInfo(rt: Runtime, args: { query: string }): Promise<unknown> {
@@ -221,8 +242,20 @@ export async function tokenInfo(rt: Runtime, args: { query: string }): Promise<u
       terminalUrl: rt.net.terminalBase ? `${rt.net.terminalBase}/t/shroom-curve%3A${target.launch.id}` : undefined,
     };
   }
+  if (target.venue === "choiceV2") {
+    return {
+      ...(await tokenInfoV2(rt, target)),
+      ...(target.launch ? { launch: launchSummary(rt, target.launch), graduatedTo: "Choice v2" } : {}),
+      ...(target.v1TokenId ? { alsoOnChoiceV1: target.v1TokenId } : {}),
+    };
+  }
   const payload = await rt.choiceApi.token(target.tokenId);
-  return { venue: "choice", tokenId: target.tokenId, data: deepSanitize(payload) };
+  return {
+    venue: "choice",
+    tokenId: target.tokenId,
+    data: deepSanitize(payload),
+    ...(target.v2Token ? { alsoOnChoiceV2: await tokenInfoV2(rt, { token: target.v2Token }).catch(() => target.v2Token) } : {}),
+  };
 }
 
 /**
@@ -396,6 +429,17 @@ export async function recentTrades(
       // on-chain one and fetches a different launch's tape.
       const { items } = await rt.pump.getTrades(target.launch.id, limit);
       return { trades: await tradeSummaries(rt, items) };
+    }
+    // Choice v2 indexes its own tape per pool, so a v2 market has one to show —
+    // including the v2 pool of an asset whose main listing is on v1.
+    if (target.venue === "choiceV2") {
+      return recentTradesV2(rt, target, limit);
+    }
+    if (target.venue === "choice" && target.v2Token) {
+      return {
+        ...(await recentTradesV2(rt, { token: target.v2Token }, limit)),
+        note: "this asset also trades on Choice v1, whose per-token tape is not served here — these are its Choice v2 pool's trades",
+      };
     }
     // A graduated launch IS a SHROOM launch — saying otherwise sends the reader
     // looking for the wrong mistake. Its curve tape simply ended at graduation.
@@ -591,6 +635,10 @@ export async function candles(rt: Runtime, args: CandlesArgs): Promise<unknown> 
       candles: rows,
       note: `each candle is one CSV row of \`columns\`, oldest first. o/h/l/c are ${q.symbol} per token; cUsd/vUsd use each bucket's quote→USD rate (rateUsd), and are empty when the bucket has no rate. Only buckets containing trades are returned.`,
     };
+  }
+
+  if (target.venue === "choiceV2") {
+    return candlesV2(rt, target, interval, limit);
   }
 
   const shape = (payload: Record<string, unknown>, extra: Record<string, unknown> = {}) => {
@@ -886,8 +934,19 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
   // the USD legs, the shortfall warning and the reported `amountIn` — describes
   // the same concrete size the executor would send. The curve leg resolves
   // inside its own branch, where it already reads the position anyway.
-  const amount =
-    sellAll && target.venue === "choice" ? await sizeChoiceSellAll(rt, target.tokenId) : args.amount;
+  // Choice v2, alone or as one of two venues for the same asset.
+  const dual = dualVenue(target);
+  const amount = !sellAll
+    ? args.amount
+    : dual
+      ? await sizeDualSellAll(rt, dual)
+      : target.venue === "choice"
+        ? await sizeChoiceSellAll(rt, target.tokenId)
+        : args.amount;
+  if (dual) return (await quoteBothVenues(rt, dual, args, amount, slippageBps)).report;
+  if (target.venue === "choiceV2") {
+    return (await quoteV2(rt, target, args.side, args.amount, slippageBps, args.counterToken)).summary;
+  }
 
   if (target.venue === "curve") {
     const { launch, warnings } = await rt.shroom.forLaunch(target.launch).precheckTrade(target.launchId, args.side);
@@ -982,9 +1041,23 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
     };
   }
 
-  const counter = args.counterToken ?? DEFAULT_COUNTER;
-  const [tokenIn, tokenOut] =
-    args.side === "buy" ? [counter, target.tokenId] : [target.tokenId, counter];
+  return quoteV1(rt, target.tokenId, args.side, amount, slippageBps, args.counterToken);
+}
+
+/**
+ * A Choice v1 quote, as `quote` reports it. `amount` is already sized: a
+ * `sell … "all"` arrives as the concrete position.
+ */
+async function quoteV1(
+  rt: Runtime,
+  tokenId: string,
+  side: "buy" | "sell",
+  amount: string,
+  slippageBps: number,
+  counterToken?: string,
+): Promise<Record<string, unknown>> {
+  const counter = counterToken ?? DEFAULT_COUNTER;
+  const [tokenIn, tokenOut] = side === "buy" ? [counter, tokenId] : [tokenId, counter];
   const q = await rt.choice.quote(tokenIn, tokenOut, amount, slippageBps / 100);
   const expectedOutput = String(q.summary.expected_output);
   // Priced from the token overviews, so an unpriceable token reports null
@@ -1013,7 +1086,7 @@ export async function quote(rt: Runtime, args: QuoteArgs): Promise<unknown> {
   }
   return {
     venue: "choice",
-    side: args.side,
+    side,
     tokenIn,
     tokenOut,
     amountIn: amount,
@@ -1034,6 +1107,11 @@ export async function buy(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<u
     const res = await rt.shroom.forLaunch(target.launch).buy(target.launchId, args.amount, slippageBps);
     return { ...res, launchId: target.launch.id };
   }
+  const dual = dualVenue(target);
+  if (dual) return tradeOnBetterVenue(rt, dual, { ...args, side: "buy" }, args.amount, slippageBps);
+  if (target.venue === "choiceV2") {
+    return tradeV2(rt, target, "buy", args.amount, slippageBps, args.counterToken);
+  }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   return rt.choice.swap(counter, target.tokenId, args.amount, slippageBps / 100);
 }
@@ -1047,10 +1125,121 @@ export async function sell(rt: Runtime, args: Omit<QuoteArgs, "side">): Promise<
       .sell(target.launchId, args.amount === "all" ? "all" : args.amount, slippageBps);
     return { ...res, launchId: target.launch.id };
   }
+  const dual = dualVenue(target);
+  if (dual) {
+    const amount = args.amount === "all" ? await sizeDualSellAll(rt, dual) : args.amount;
+    return tradeOnBetterVenue(rt, dual, { ...args, side: "sell" }, amount, slippageBps);
+  }
+  if (target.venue === "choiceV2") {
+    return tradeV2(rt, target, "sell", args.amount, slippageBps, args.counterToken);
+  }
   const counter = args.counterToken ?? DEFAULT_COUNTER;
   // Same sizing `quote` reports, so the preview and the broadcast agree.
   const amount = args.amount === "all" ? await sizeChoiceSellAll(rt, target.tokenId) : args.amount;
   return rt.choice.swap(target.tokenId, counter, amount, slippageBps / 100);
+}
+
+/** An asset listed on BOTH Choice venues: its v1 id and its v2 token. */
+interface DualVenue {
+  v1TokenId: string;
+  v2: V2Target;
+}
+
+function dualVenue(target: RoutedTarget): DualVenue | null {
+  if (target.venue === "choice" && target.v2Token) {
+    return { v1TokenId: target.tokenId, v2: { token: target.v2Token, ...(target.launch ? { launch: target.launch } : {}) } };
+  }
+  if (target.venue === "choiceV2" && target.v1TokenId) {
+    return { v1TokenId: target.v1TokenId, v2: { token: target.token, ...(target.launch ? { launch: target.launch } : {}) } };
+  }
+  return null;
+}
+
+/**
+ * Quote the same trade on both Choice venues and say which is better.
+ *
+ * Both legs spend the same input and buy the same asset (one balance, two
+ * markets), so the outputs compare directly in human units. A leg that cannot
+ * quote — v2 cannot express a bank-denom counter, say — simply loses; if both
+ * fail, the v1 error is the one reported, since v1 is the venue this used to be.
+ */
+async function quoteBothVenues(
+  rt: Runtime,
+  dual: DualVenue,
+  args: QuoteArgs,
+  amount: string,
+  slippageBps: number,
+): Promise<{ report: Record<string, unknown>; pick: "choice" | "choiceV2" }> {
+  const v2Able = (await v2Counter(rt, args.counterToken).catch(() => null)) !== null;
+  const [v1, v2] = await Promise.allSettled([
+    quoteV1(rt, dual.v1TokenId, args.side, amount, slippageBps, args.counterToken),
+    v2Able
+      ? quoteV2(rt, dual.v2, args.side, amount, slippageBps, args.counterToken)
+      : Promise.reject(new ToolError("bad_counter", "not a Choice v2 counter")),
+  ]);
+  const v1Out = v1.status === "fulfilled" ? Number(v1.value.expectedOutput) : null;
+  const v2Out = v2.status === "fulfilled" ? v2.value.expectedOutHuman : null;
+  const pick = pickBetterQuote(v1Out, v2Out);
+  if (!pick) {
+    throw v1.status === "rejected" ? v1.reason : (v2 as PromiseRejectedResult).reason;
+  }
+  const chosen = pick === "choice" ? (v1 as PromiseFulfilledResult<Record<string, unknown>>).value : (v2 as PromiseFulfilledResult<{ summary: Record<string, unknown> }>).value.summary;
+  const other =
+    pick === "choice"
+      ? v2.status === "fulfilled"
+        ? { venue: "choiceV2", expectedOutput: v2.value.summary.expectedOutput, pool: v2.value.summary.pool }
+        : { venue: "choiceV2", error: errorText(v2.reason) }
+      : v1.status === "fulfilled"
+        ? { venue: "choice", expectedOutput: v1.value.expectedOutput, route: v1.value.route }
+        : { venue: "choice", error: errorText(v1.reason) };
+  return {
+    pick,
+    report: {
+      ...chosen,
+      alternative: other,
+      venueChoice: `listed on both Choice v1 and Choice v2 — ${pick === "choice" ? "v1" : "v2"} quotes the larger output for this size, so buy/sell would execute there`,
+    },
+  };
+}
+
+/** Execute on whichever Choice venue quotes the larger output right now. */
+async function tradeOnBetterVenue(
+  rt: Runtime,
+  dual: DualVenue,
+  args: QuoteArgs,
+  amount: string,
+  slippageBps: number,
+): Promise<unknown> {
+  const { pick, report } = await quoteBothVenues(rt, dual, args, amount, slippageBps);
+  const res =
+    pick === "choiceV2"
+      ? await tradeV2(rt, dual.v2, args.side, amount, slippageBps, args.counterToken)
+      : args.side === "buy"
+        ? await rt.choice.swap(args.counterToken ?? DEFAULT_COUNTER, dual.v1TokenId, amount, slippageBps / 100)
+        : await rt.choice.swap(dual.v1TokenId, args.counterToken ?? DEFAULT_COUNTER, amount, slippageBps / 100);
+  return { ...res, venueChoice: report.venueChoice, alternative: report.alternative };
+}
+
+/**
+ * Size `sell … "all"` for an asset on both venues, from the ERC20 itself.
+ *
+ * Both venues spend ONE balance (the bank denom and the EVM token are the same
+ * coin), so either side could answer — but v1's `erc20:` ids rarely publish
+ * denom metadata, which would refuse the sell as `unknown_decimals`, while the
+ * token contract always knows its own exponent.
+ */
+async function sizeDualSellAll(rt: Runtime, dual: DualVenue): Promise<string> {
+  const token = dual.v2.token;
+  const [held, decimals] = await Promise.all([
+    rt.signer.readContract<bigint>({ address: token, abi: ERC20_ABI, functionName: "balanceOf", args: [rt.signer.address] }),
+    rt.signer.readContract<number>({ address: token, abi: ERC20_ABI, functionName: "decimals", args: [] }),
+  ]);
+  if (held <= 0n) throw new ToolError("no_balance", `this wallet holds none of ${token}`);
+  return formatUnits(held, Number(decimals));
+}
+
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 // ---------------------------------------------------------------------------
@@ -2019,7 +2208,7 @@ export interface PortfolioRow {
   amount: number;
   priceUsd: number | null;
   valueUsd: number | null;
-  pricedVia: "quote-rate" | "curve" | "choice" | "unpriced";
+  pricedVia: "quote-rate" | "curve" | "choice" | "choice-v2" | "unpriced";
   launchId?: string;
   /** Set when the chain publishes no exponent: `amount` assumes 18, so it may
    *  be off by orders of magnitude and the row is deliberately left unpriced. */
@@ -2411,13 +2600,22 @@ async function choiceHoldingRow(
 ): Promise<PortfolioRow> {
   // Launch tokens are always 18-decimal; anything else has to be looked up, and
   // an unknown exponent means the quantity is a guess — so the row stays
-  // unpriced rather than multiplying a real price by a wrong amount.
-  const sized = launch
+  // unpriced rather than multiplying a real price by a wrong amount. An EVM
+  // token answers `decimals()` itself even where no denom metadata exists,
+  // which is every Choice v2 token that never touched the bank module's registry.
+  let sized: { amount: number; decimalsUnknown?: true; amountBase?: string } = launch
     ? { amount: Number(formatUnits(raw, 18)) }
     : await humanAmount(rt, denom, raw);
+  if (sized.decimalsUnknown && erc20Token) {
+    const d = await rt.signer
+      .readContract<number>({ address: erc20Token as Address, abi: ERC20_ABI, functionName: "decimals", args: [] })
+      .catch(() => null);
+    if (d !== null) sized = { amount: Number(formatUnits(raw, Number(d))) };
+  }
   const { amount } = sized;
   let priceUsd: number | null = null;
   let overview: Record<string, unknown> | null = null;
+  let via: PortfolioRow["pricedVia"] = "choice";
   for (const query of [denom, ...(erc20Token ? [erc20Token] : [])]) {
     try {
       overview = await rt.choiceApi.token(query);
@@ -2427,16 +2625,34 @@ async function choiceHoldingRow(
       // try the next query form
     }
   }
-  if (sized.decimalsUnknown) priceUsd = null;
-  const stale = priceUsd !== null && overview !== null && isDeadMarket(overview);
+  let stale = priceUsd !== null && overview !== null && isDeadMarket(overview);
   if (stale) priceUsd = null;
+  // Choice v1 has no mark: an EVM token may still trade on Choice v2 — every
+  // atomic graduate does, and only there. Same rule as a v1 mark: it counts
+  // only while a live pool stands behind it.
+  if (priceUsd === null && erc20Token && rt.choiceV2Api) {
+    const v2 = await rt.choiceV2Api.token(erc20Token).catch(() => null);
+    const p = v2?.priceUsd === null || v2?.priceUsd === undefined ? NaN : Number(v2.priceUsd);
+    if (Number.isFinite(p) && p > 0) {
+      if (await hasV2Pool(rt, erc20Token)) {
+        priceUsd = p;
+        via = "choice-v2";
+        stale = false;
+        overview = overview ?? { symbol: v2!.symbol, name: v2!.name };
+      } else {
+        stale = true;
+      }
+    }
+  }
+  if (sized.decimalsUnknown) priceUsd = null;
   return {
     denom,
     symbol: null,
     ...sized,
     priceUsd,
     valueUsd: priceUsd !== null ? priceUsd * amount : null,
-    pricedVia: priceUsd !== null ? "choice" : "unpriced",
+    pricedVia: priceUsd !== null ? via : "unpriced",
+    ...(launch ? { launchId: launch.id } : {}),
     ...(stale ? { staleMark: true as const } : {}),
     untrusted_metadata: untrustedMeta({
       symbol: (overview as { symbol?: unknown } | null)?.symbol,
