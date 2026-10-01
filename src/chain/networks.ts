@@ -97,6 +97,12 @@ export interface ChoiceV2Config {
    */
   infinitySettlers: readonly Address[];
   /**
+   * The v2 PositionLocker that holds every graduation position NFT and splits
+   * its LP fees (`collect` credits, `claim` pays). Pinned, and checked against
+   * `settler.LOCKER()` before anything is claimed from it.
+   */
+  positionLocker: Address;
+  /**
    * The ONLY hooks a v2 swap will route through, besides none at all. A hook
    * runs code inside the swap and can take any cut it likes of either side, so
    * an unknown one is refused rather than quoted. Both of these are Choice's
@@ -368,6 +374,7 @@ const MAINNET: NetworkDef = {
     winj: "0x0000000088827d2d103ee2d9A6b781773AE03FfB",
     // The atomic core's `seederFactory`; every atomic launch snapshots it.
     infinitySettlers: ["0x43a72CA9A2f4A49385c1Caa9413Ccd0566BcfBbE"],
+    positionLocker: "0xED68d58Cfb7D8F34B6a9353Cb428aDa2dD63B8EF",
     allowedHooks: [
       // Graduation pools since ~10006: LP fee 0, and the hook charges the
       // launch's OWN trade fee on the quote side of every swap (beforeSwap /

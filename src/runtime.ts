@@ -19,6 +19,7 @@ import { evmToInj, loadKeystore, unlockKeystore } from "./keystore.js";
 import { PolicyEngine, type ExactApprovalSpender } from "./policy/policy.js";
 import { SpendLedger } from "./policy/spend.js";
 import { ChoiceVenue } from "./venues/choice/swap.js";
+import { V2CreatorFees } from "./venues/choiceV2/creatorFees.js";
 import { ChoiceV2Venue } from "./venues/choiceV2/venue.js";
 import { ShroomVenue } from "./venues/shroom/launchpad.js";
 
@@ -39,6 +40,8 @@ export interface Runtime {
   choiceV2Api: ChoiceV2Api | null;
   /** Choice v2 (Infinity CL, EVM) venue; null where the network has none. */
   choiceV2: ChoiceV2Venue | null;
+  /** Choice v2 graduates' creator-fee rails (fee hook + position locker); null without v2. */
+  v2CreatorFees: V2CreatorFees | null;
   /** USD value of a v2 swap leg (`native` = INJ); null when nothing can mark it. */
   choiceV2UsdValue: (token: string, amount: bigint, decimals: number) => Promise<number | null>;
 }
@@ -114,6 +117,15 @@ export function exactApprovalSpendersFor(net: NetworkDef): ExactApprovalSpender[
   ];
 }
 
+/** Choice v2's creator-fee contracts: reachable by a `claim`, and by nothing else. */
+export function claimOnlyTargetsFor(net: NetworkDef): string[] {
+  if (!net.choiceV2) return [];
+  return [
+    net.choiceV2.positionLocker,
+    ...net.choiceV2.allowedHooks.filter((h) => h.name === "LaunchPoolFeeHook").map((h) => h.address),
+  ];
+}
+
 export function buildRuntime(passphrase?: string): Runtime {
   const home = defaultHomeDir();
   const cfg = loadConfig(home);
@@ -133,6 +145,7 @@ export function buildRuntime(passphrase?: string): Runtime {
     cfg.ownerSweepAddress.toLowerCase(),
     ledger,
     exactApprovalSpendersFor(net),
+    claimOnlyTargetsFor(net),
   );
 
   const chain = makeChain(net, net.rpcUrls);
@@ -194,6 +207,7 @@ export function buildRuntime(passphrase?: string): Runtime {
     choice,
     choiceV2Api,
     choiceV2,
+    v2CreatorFees: net.choiceV2 ? new V2CreatorFees(net.choiceV2, signer) : null,
     choiceV2UsdValue: async (token, amount, decimals) =>
       choiceV2Api ? choiceV2UsdValue(net, shroom, choiceV2Api, token, amount, decimals) : null,
   };

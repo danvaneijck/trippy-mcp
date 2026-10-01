@@ -46,6 +46,9 @@ import { decodeMetadataUri, resolveImage, type LaunchMetadata } from "../metadat
 import { CURVE_STATES, hasV2Pool, pickBetterQuote, resolveToken, type ResolvedTarget } from "../router.js";
 import {
   candlesV2,
+  v2ActivityRow,
+  v2FeesForLaunch,
+  v2FeesSummary,
   quoteV2,
   recentTradesV2,
   tokenInfoV2,
@@ -66,6 +69,7 @@ import {
   type CurvePreset,
 } from "../venues/shroom/curves.js";
 import type { LaunchView, ShroomVenue } from "../venues/shroom/launchpad.js";
+import type { V2LaunchFees } from "../venues/choiceV2/creatorFees.js";
 import { legBpsFor, lockerPending, prepareCollect, shareOf } from "../venues/shroom/locker.js";
 import { sweep as walletSweep, walletStatus } from "../wallet.js";
 import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
@@ -478,6 +482,19 @@ export async function myActivity(
     out.choice = deepSanitize(await rt.choiceApi.wallet(rt.injAddress, limit, days));
   } catch (e) {
     out.choiceNote = `Choice swap history unavailable: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  // Choice v2 is a different chain half with its own indexer: swaps made on the
+  // EVM through the UniversalRouter never reach Choice v1's wallet history.
+  if (rt.choiceV2Api) {
+    try {
+      const since = Date.now() - days * 86_400_000;
+      const rows = (await rt.choiceV2Api.walletTrades(rt.signer.address, limit)).filter(
+        (t) => Date.parse(t.blockTimestamp) >= since,
+      );
+      out.choiceV2 = rows.map(v2ActivityRow);
+    } catch (e) {
+      out.choiceV2Note = `Choice v2 swap history unavailable: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
   // Creating a launch is activity, and it was the one kind this tool could not
   // see: the tape carries trades, so a launch of your own showed up as the buy
@@ -1708,6 +1725,12 @@ async function createdLaunchRow(
   // launch's own token rather than in the quote asset.
   const pool = await poolFeesSummary(rt, l);
   if (pool) row.poolFees = pool;
+  // A Choice v2 graduate pays through the fee hook or the v2 position locker —
+  // neither is the core nor the CosmWasm locker above.
+  if (live) {
+    const v2 = await v2FeesForLaunch(rt, live, onchainId).catch(() => null);
+    if (v2) row.v2PoolFees = await v2FeesSummary(rt, v2, l.id);
+  }
 
   if (flow && q) row.myPosition = positionSummary(flow, q, owed);
   return row;
@@ -2142,6 +2165,12 @@ export async function claimFees(
   txHashes.push(...pool.txHashes);
   for (const n of pool.notes) notes.add(n);
 
+  // Choice v2 graduates: the fee hook's creator credit and the v2 position
+  // locker. Before the WINJ settle below, because both pay their quote leg in WINJ.
+  const v2 = await collectV2PoolFees(rt, rows, args.preview === true);
+  txHashes.push(...v2.txHashes);
+  for (const n of v2.notes) notes.add(n);
+
   // After both rails: the core ledger is what pays in WINJ, so this has to see
   // the balance the claim above just produced.
   const winj = await settleWinj(rt, args.preview === true, args.unwrap !== false);
@@ -2154,9 +2183,10 @@ export async function claimFees(
     referralFees.length === 0 &&
     refundInj === null &&
     pool.poolFees.length === 0 &&
+    v2.v2PoolFees.length === 0 &&
     winj.unwrappedInj === null;
   if (nothing) {
-    notes.add("nothing to claim — every core ledger and every graduated pool is zero");
+    notes.add("nothing to claim — every core ledger and every graduated pool (Choice v1 and v2) is zero");
   } else if (args.preview) {
     notes.add("preview only — nothing was broadcast. Call claim_fees again without `preview` to collect this.");
   }
@@ -2168,11 +2198,74 @@ export async function claimFees(
     creatorFees,
     referralFees,
     poolFees: pool.poolFees,
+    ...(v2.v2PoolFees.length ? { v2PoolFees: v2.v2PoolFees } : {}),
     refundInj,
     ...(winj.unwrappedInj !== null ? { unwrappedInj: winj.unwrappedInj } : {}),
     txHashes,
     notes: [...notes],
   };
+}
+
+/**
+ * Read — and unless previewing, collect — the Choice v2 creator-fee rails of
+ * every v2 graduate among `rows`.
+ *
+ * Which launches qualify is decided by the CHAIN: each row's own core reports
+ * its state and snapshotted settler, and only a Graduated launch whose settler
+ * is a pinned InfinitySettler is read. One unreadable launch is reported and
+ * skipped, never fatal — the core claims above already broadcast.
+ */
+async function collectV2PoolFees(
+  rt: Runtime,
+  rows: ClaimRow[],
+  preview: boolean,
+): Promise<{ v2PoolFees: Record<string, unknown>[]; txHashes: string[]; notes: string[] }> {
+  const out = { v2PoolFees: [] as Record<string, unknown>[], txHashes: [] as string[], notes: [] as string[] };
+  if (!rt.v2CreatorFees) return out;
+  const found: { row: ClaimRow; fees: V2LaunchFees }[] = [];
+  for (const row of rows) {
+    if (!coreDeploymentFor(rt.net, row.core)) continue;
+    const onchainId = BigInt(row.onchainId ?? row.id);
+    try {
+      const live = await rt.shroom.forLaunch(row).getLaunchView(onchainId);
+      const fees = await v2FeesForLaunch(rt, live, onchainId);
+      if (fees) found.push({ row, fees });
+    } catch (e) {
+      out.notes.push(`could not read launch #${row.id}'s Choice v2 fee rail (${e instanceof Error ? e.message : String(e)}) — UNKNOWN, not zero`);
+    }
+  }
+  for (const { row, fees } of found) {
+    const summary = await v2FeesSummary(rt, fees, row.id);
+    // Report a launch with something in it for this wallet, or one that would not read.
+    if (summary.collectWith || summary.errors) out.v2PoolFees.push({ launchId: row.id, ...summary });
+  }
+  if (preview || out.v2PoolFees.length === 0) return out;
+
+  try {
+    const res = await rt.v2CreatorFees.claim(
+      found.map((f) => f.fees),
+      rt.signer.address,
+    );
+    out.txHashes.push(...res.txHashes);
+    for (const p of out.v2PoolFees) {
+      const onchain = found.find((f) => f.row.id === p.launchId)?.fees.onchainId;
+      p.collected = {
+        feeHook: res.hookClaims.some((h) => h.onchainId === onchain),
+        lockerCollect: res.lockerCollects.some((id) => id === onchain),
+      };
+    }
+    if (res.lockerClaims.length) {
+      out.notes.push(
+        `PositionLocker paid this wallet ${res.lockerClaims.map((c) => `${formatUnits(c.amount, c.decimals)} ${c.currency.toLowerCase() === rt.net.choiceV2?.winj.toLowerCase() ? "WINJ" : c.currency}`).join(", ")}`,
+      );
+    }
+  } catch (e) {
+    out.notes.push(`Choice v2 fee claim failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  out.notes.push(
+    "Choice v2 pool fees pay in WINJ (unwrapped below) and, from a position locker, partly in the launch's own token",
+  );
+  return out;
 }
 
 /**

@@ -334,7 +334,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "my_activity",
-    "The agent wallet's own history across both venues: SHROOM Pad curve trades plus Choice/CLMM swaps, orderbook fills and per-token window-flow PnL, and the launches this wallet CREATED (`my_launches` values those and reads the creator fees they are owed)." + UNTRUSTED_NOTE,
+    "The agent wallet's own history across every venue: SHROOM Pad curve trades plus Choice/CLMM swaps, orderbook fills and per-token window-flow PnL, its Choice v2 (EVM) swaps under `choiceV2`, and the launches this wallet CREATED (`my_launches` values those and reads the creator fees they are owed)." + UNTRUSTED_NOTE,
     {
       limit: z.number().int().min(1).max(100).optional().describe("max Choice swaps returned (default 20)"),
       days: z.number().int().min(1).max(365).optional().describe("Choice history window in days (default 30)"),
@@ -498,7 +498,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "claim_fees",
-    "Claim everything a launch pays this wallet: curve creator fees per launch, referral fees, cancelled-launch refunds, AND the swap fees a graduated launch earns on its Choice pool. That last one lives in a per-launch locker contract with no link to the launchpad core — it is invisible to every other tool here, it accrues uncollected until collected, and on a busy pool it can dwarf the curve ledger, so a graduated launch is never fully read from the core alone. With no `launchIds` it covers EVERY launch this wallet created (plus the wallet-level referral and refund ledgers); pass `launchIds` — the ids token_info, my_launches and portfolio report — to narrow it. `preview: true` reads every ledger and broadcasts nothing, which is how to ask what a launch is owed without spending gas. Pool fees pay out partly in the launch's own token, and only non-zero balances are ever claimed. On an INJ-quoted launch the core settles the curve fee in WINJ (wrapped INJ, INJ's ERC20 pair asset) rather than the native coin, so this unwraps it 1:1 afterwards and reports the amount as `unwrappedInj` — without that the payout cannot pay gas or fund a buy.",
+    "Claim everything a launch pays this wallet: curve creator fees per launch, referral fees, cancelled-launch refunds, AND the swap fees a graduated launch earns on its Choice pool — the Choice v1 locker for older-core graduates, and for Choice v2 graduates the LaunchPoolFeeHook creator credit (current creator only) and the v2 PositionLocker (collect, then claim), reported under `v2PoolFees`. That last one lives in a per-launch locker contract with no link to the launchpad core — it is invisible to every other tool here, it accrues uncollected until collected, and on a busy pool it can dwarf the curve ledger, so a graduated launch is never fully read from the core alone. With no `launchIds` it covers EVERY launch this wallet created (plus the wallet-level referral and refund ledgers); pass `launchIds` — the ids token_info, my_launches and portfolio report — to narrow it. `preview: true` reads every ledger and broadcasts nothing, which is how to ask what a launch is owed without spending gas. Pool fees pay out partly in the launch's own token, and only non-zero balances are ever claimed. On an INJ-quoted launch the core settles the curve fee in WINJ (wrapped INJ, INJ's ERC20 pair asset) rather than the native coin, so this unwraps it 1:1 afterwards and reports the amount as `unwrappedInj` — without that the payout cannot pay gas or fund a buy.",
     {
       launchIds: z.array(z.string()).optional(),
       preview: z
@@ -518,7 +518,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "my_launches",
-    "Every token this agent wallet LAUNCHED on SHROOM Pad, valued: curve state and graduation progress, 24h volume and holders, the dev-buy window the launch actually got, the wallet's own bag at its live exit quote, and — read on-chain, no transaction — BOTH fee rails a launch pays. `fees` is the curve's creator ledger on the core; `poolFees` is what the graduated Choice pool has accrued in its locker, gross with this wallet's split applied, which no other tool can see. This is the creator's view; `portfolio` values what the wallet holds and `my_activity` lists what it traded, neither of which can tell a launch of your own from a stranger's coin. Collect both with `claim_fees`." +
+    "Every token this agent wallet LAUNCHED on SHROOM Pad, valued: curve state and graduation progress, 24h volume and holders, the dev-buy window the launch actually got, the wallet's own bag at its live exit quote, and — read on-chain, no transaction — BOTH fee rails a launch pays. `fees` is the curve's creator ledger on the core; `poolFees` is what a Choice v1 graduate's pool has accrued in its locker, gross with this wallet's split applied, and `v2PoolFees` is a Choice v2 graduate's fee-hook credit and position-locker fees — neither visible to any other tool. This is the creator's view; `portfolio` values what the wallet holds and `my_activity` lists what it traded, neither of which can tell a launch of your own from a stranger's coin. Collect both with `claim_fees`." +
       UNTRUSTED_NOTE,
     {
       limit: z.number().int().min(1).max(25).optional().describe("most recent launches to value (default 10)"),

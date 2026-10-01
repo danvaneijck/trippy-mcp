@@ -109,9 +109,19 @@ export class PolicyEngine {
      * every contract that wins a Permit2 grant later.
      */
     exactApprovalSpenders: readonly ExactApprovalSpender[] = [],
+    /**
+     * Contracts a `claim` may call and NOTHING else may — Choice v2's
+     * LaunchPoolFeeHook and PositionLocker, whose only calls here pay out to
+     * this wallet. Kept out of `allowedTargets` so no trade, swap or approval
+     * can ever be pointed at them.
+     */
+    claimOnlyTargets: readonly string[] = [],
   ) {
     this.exactSpenders = new Map(exactApprovalSpenders.map((s) => [s.spender.toLowerCase(), s]));
+    this.claimOnly = new Set(claimOnlyTargets.map((t) => t.toLowerCase()));
   }
+
+  private readonly claimOnly: Set<string>;
 
   /**
    * Fee lockers the chain has confirmed pay THIS wallet, lowercased.
@@ -153,7 +163,7 @@ export class PolicyEngine {
     // address discovered at runtime safe.
     const allowed =
       this.allowedTargets.has(target) ||
-      (intent.kind === "claim" && this.payoutLockers.has(target));
+      (intent.kind === "claim" && (this.payoutLockers.has(target) || this.claimOnly.has(target)));
     if (!allowed) {
       throw new PolicyError(
         `target ${intent.target} is not on the contract allowlist`,

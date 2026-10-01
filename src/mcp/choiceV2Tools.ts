@@ -16,7 +16,10 @@ import { ToolError } from "../errors.js";
 import type { Runtime } from "../runtime.js";
 import { deepSanitize, untrustedMeta } from "../untrusted.js";
 import { ERC20_ABI } from "../venues/shroom/abi.js";
+import type { V2Trade } from "../api/choiceV2.js";
+import type { CurrencyAmount, V2LaunchFees } from "../venues/choiceV2/creatorFees.js";
 import type { ChoiceV2Venue, Counter, V2Quote, V2Route, V2TradeResult } from "../venues/choiceV2/venue.js";
+import { LaunchState } from "../venues/shroom/abi.js";
 
 export interface V2Target {
   token: Address;
@@ -293,5 +296,102 @@ export async function candlesV2(
     count: rows.length,
     candles: rows,
     note: "each candle is one CSV row of `columns`, oldest first: the token's USD price per bucket, converted at each bucket's own time; empty fields where the series has no USD mark.",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// the creator-fee rail of a v2 graduate
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a launch's v2 creator-fee rails for this wallet, or null when the
+ * launch is not a Choice v2 graduate (still on its curve, or graduated the
+ * CosmWasm way). `live` is the launch as its own core reports it — the settler
+ * is the launch's snapshot, never the core's current pointer.
+ */
+export async function v2FeesForLaunch(
+  rt: Runtime,
+  live: { state: number; settler: Address },
+  onchainId: bigint,
+): Promise<V2LaunchFees | null> {
+  const cfg = rt.net.choiceV2;
+  if (!cfg || !rt.v2CreatorFees || live.state !== LaunchState.Graduated) return null;
+  if (!cfg.infinitySettlers.some((s) => s.toLowerCase() === live.settler.toLowerCase())) return null;
+  return rt.v2CreatorFees.read(live.settler, onchainId, rt.signer.address);
+}
+
+function currencyLabel(rt: Runtime, c: Address): string {
+  return c.toLowerCase() === rt.net.choiceV2?.winj.toLowerCase() ? "WINJ" : c;
+}
+
+async function amountRow(rt: Runtime, a: CurrencyAmount): Promise<Record<string, unknown>> {
+  return {
+    currency: currencyLabel(rt, a.currency),
+    amount: formatUnits(a.amount, a.decimals),
+    usd: await rt.choiceV2UsdValue(a.currency, a.amount, a.decimals),
+  };
+}
+
+/** `v2FeesForLaunch`, as `my_launches` and `claim_fees preview` report it. */
+export async function v2FeesSummary(
+  rt: Runtime,
+  fees: V2LaunchFees,
+  launchId: string,
+): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = { rail: "choice-v2" };
+  let yoursUsd: number | null = 0;
+  const add = (usd: unknown) => {
+    if (yoursUsd === null) return;
+    yoursUsd = typeof usd === "number" ? yoursUsd + usd : null;
+  };
+  let anything = false;
+
+  if (fees.hook) {
+    const owed = await amountRow(rt, fees.hook.owed);
+    out.feeHook = {
+      owed,
+      claimableByThisWallet: fees.hook.claimable,
+      ...(fees.hook.claimable ? {} : { note: `payable only to the launch's current creator ${fees.hook.creator}` }),
+    };
+    if (fees.hook.claimable) {
+      add(owed.usd);
+      anything ||= fees.hook.owed.amount > 0n;
+    }
+  }
+  // A fee-hook pool has an LP fee of 0, so its locked position never earns —
+  // an all-empty locker block there is noise, not information.
+  const lockerEmpty =
+    !!fees.locker && fees.locker.pending.every((p) => p.amount === 0n) && fees.locker.credited.length === 0;
+  if (fees.locker && !(lockerEmpty && fees.hook)) {
+    const pending = await Promise.all(fees.locker.pending.filter((p) => p.amount > 0n).map((p) => amountRow(rt, p)));
+    const yours = await Promise.all(fees.locker.pendingYours.filter((p) => p.amount > 0n).map((p) => amountRow(rt, p)));
+    const credited = await Promise.all(fees.locker.credited.map((p) => amountRow(rt, p)));
+    out.positionLocker = {
+      pendingGross: pending,
+      pendingYours: yours,
+      yourShareBps: fees.locker.mine ? fees.locker.creatorBps : 0,
+      creditedToThisWallet: credited,
+      ...(fees.locker.mine ? {} : { note: `the position's creator leg is ${fees.locker.positionCreator}, not this wallet` }),
+    };
+    for (const r of [...yours, ...credited]) add(r.usd);
+    anything ||= yours.length > 0 || credited.length > 0;
+  }
+  if (fees.errors.length) out.errors = fees.errors.map((e) => `${e} — that rail is UNKNOWN, not zero`);
+  out.yoursUsd = yoursUsd;
+  if (anything) out.collectWith = `claim_fees launchIds:["${launchId}"]`;
+  return out;
+}
+
+/** One of this wallet's own v2 swaps, for `my_activity`. Symbols are third-party text. */
+export function v2ActivityRow(t: V2Trade): Record<string, unknown> {
+  return {
+    venue: "choiceV2",
+    in: { amount: t.amountIn, token: t.tokenIn.address },
+    out: { amount: t.amountOut, token: t.tokenOut.address },
+    usd: t.usdValue === null ? null : Number(t.usdValue),
+    at: t.blockTimestamp,
+    txHash: t.txHash,
+    pools: t.pools ?? [],
+    untrusted_metadata: untrustedMeta({ symbolIn: t.tokenIn.symbol, symbolOut: t.tokenOut.symbol }),
   };
 }

@@ -106,6 +106,12 @@ export class ChoiceV2Api {
     return (await this.tokens(address, 5)).find((t) => t.address.toLowerCase() === want) ?? null;
   }
 
+  /** One wallet's swaps across every pool — the indexer keys `trader` on the tx sender. */
+  async walletTrades(trader: string, limit: number): Promise<V2Trade[]> {
+    const r = await this.get<{ trades?: V2Trade[] }>("/trades", { trader: trader.toLowerCase(), limit });
+    return r.trades ?? [];
+  }
+
   async trades(pool: string, limit: number): Promise<V2Trade[]> {
     const r = await this.get<{ trades?: V2Trade[] }>("/trades", { pool, limit });
     return r.trades ?? [];

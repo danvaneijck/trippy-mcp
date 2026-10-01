@@ -139,8 +139,10 @@ keeps paying its creator after it stops trading on the curve.
 An ATOMIC-core launch graduates onto a Choice v2 pool on Injective EVM instead,
 whose fee leg runs through a launch hook (\`LaunchPoolFeeHook\`, the launch's own
 trade fee for life) or, on the earliest graduates, an ordinary LP fee on a position
-held by the v2 \`PositionLocker\`. That rail is NOT the CosmWasm locker below,
-and this package does not read or collect it yet.
+held by the v2 \`PositionLocker\`. That rail is NOT the CosmWasm locker below:
+\`my_launches\` reports it as \`v2PoolFees\` and \`claim_fees\` collects it. The
+fee hook pays only the launch's CURRENT creator; the position locker pays the
+creator leg fixed at graduation, partly in the launch's own token.
 
 That second rail shares NOTHING with the first. The position NFT is held by a
 per-launch **locker** contract (CosmWasm, the launch's \`lockerAddr\`), not by

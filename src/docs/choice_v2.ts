@@ -80,8 +80,18 @@ chain; \`recent_trades\` and \`candles\` read the v2 tape and USD candles of the
 token's pool; \`portfolio\` prices v2-only holdings off the v2 indexer while a
 live pool stands behind the mark.
 
-## Not covered yet
+## The creator's fees after graduation
 
-The graduated pool's own creator-fee rail on v2 (the fee hook's per-launch
-ledger, or the v2 position locker) is not read or collected by \`claim_fees\`.`;
+A v2 graduate keeps paying its creator, through the pool rather than the core:
+
+- **Fee-hook pools** credit the creator share of every swap to the hook's
+  per-launch ledger, payable only to the launch's current creator.
+- **Position-locker pools** (the earliest graduates) earn LP fees inside the
+  locked position; collecting credits them to the split fixed at graduation,
+  and claiming pays each leg — partly in the launch's own token.
+
+\`my_launches\` reports both as \`v2PoolFees\` (pending fees are read by
+simulating the collect, which changes nothing), and \`claim_fees\` collects them
+alongside the curve ledgers, unwrapping the wrapped-INJ leg afterwards.
+\`my_activity\` lists this wallet's own v2 swaps under \`choiceV2\`.`;
 }

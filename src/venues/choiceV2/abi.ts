@@ -48,6 +48,12 @@ export const INFINITY_SETTLER_ABI = parseAbi([
 export const POSITION_LOCKER_ABI = parseAbi([
   "struct LockedPosition { uint256 tokenId; address creator; uint16 creatorBps; }",
   "function getPosition(uint256 launchId) view returns (LockedPosition)",
+  // Permissionless: pulls the position's fees and CREDITS them to the split.
+  // Simulated with eth_call to read what is pending; reverts NothingToCollect at 0.
+  "function collect(uint256 launchId) returns (uint256 amount0, uint256 amount1)",
+  // Permissionless, and it always pays `recipient`, never the caller.
+  "function claim(address currency, address recipient) returns (uint256 amount)",
+  "function owed(address currency, address recipient) view returns (uint256)",
 ]);
 
 export const CL_POSITION_MANAGER_ABI = parseAbi([
@@ -57,4 +63,11 @@ export const CL_POSITION_MANAGER_ABI = parseAbi([
 
 export const LAUNCH_POOL_FEE_HOOK_ABI = parseAbi([
   "function poolFeePips(bytes32 poolId) view returns (uint24)",
+  // The creator's rail on a fee-hook pool: a per-launch credit in the quote,
+  // payable only to the launch's CURRENT creator (read off the core).
+  "function launchPool(uint256 launchId) view returns (bytes32)",
+  "function launchQuote(uint256 launchId) view returns (address)",
+  "function creatorOwed(uint256 launchId) view returns (uint256)",
+  "function creatorOf(uint256 launchId) view returns (address)",
+  "function claimCreator(uint256 launchId) returns (uint256 amount)",
 ]);
