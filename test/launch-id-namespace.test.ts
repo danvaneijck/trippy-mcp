@@ -22,6 +22,7 @@ import { NETWORKS, coreDeployments, quoteAssetBySlot } from "../src/chain/networ
 
 const CORE_V2 = "0xd948740da926E8908A08414879490d0D8F96D463";
 const CORE_V1 = "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227";
+const CORE_ATOMIC = "0x1333692eB905823df110762525c26f7489BB9300";
 
 const row = (o: Partial<ApiLaunch> & { id: string }) =>
   ({
@@ -139,7 +140,7 @@ describe("claim_fees", () => {
     const { rt, seen } = claimRt([row({ id: "234", onchainId: "108", core: CORE_V2 })]);
     await claimFees(rt, { launchIds: ["234"] });
     expect(seen.map((s) => s.core.toLowerCase()).sort()).toEqual(
-      [CORE_V1.toLowerCase(), CORE_V2.toLowerCase()].sort(),
+      [CORE_ATOMIC.toLowerCase(), CORE_V1.toLowerCase(), CORE_V2.toLowerCase()].sort(),
     );
   });
 

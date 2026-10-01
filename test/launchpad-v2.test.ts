@@ -121,16 +121,36 @@ describe("network version detection", () => {
  * must be a refusal rather than a best guess.
  */
 describe("core resolution", () => {
+  const MAINNET_ATOMIC = "0x1333692eB905823df110762525c26f7489BB9300";
   const MAINNET_V2 = "0xd948740da926E8908A08414879490d0D8F96D463";
   const MAINNET_V1 = "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227";
 
-  it("mainnet serves both cores, current first", () => {
+  it("mainnet serves all three cores, the atomic one current", () => {
     const all = coreDeployments(getNetwork("mainnet"));
-    expect(all).toHaveLength(2);
-    expect(all[0]!.core.toLowerCase()).toBe(MAINNET_V2.toLowerCase());
-    expect(all[0]!.legacy).toBe(false);
-    expect(all[1]!.core.toLowerCase()).toBe(MAINNET_V1.toLowerCase());
-    expect(all[1]!.legacy).toBe(true);
+    expect(all.map((d) => [d.core.toLowerCase(), d.legacy])).toEqual([
+      [MAINNET_ATOMIC.toLowerCase(), false],
+      [MAINNET_V2.toLowerCase(), true],
+      [MAINNET_V1.toLowerCase(), true],
+    ]);
+  });
+
+  it("the atomic core reads through ITS OWN views and registry, never v2's", () => {
+    // A views satellite reads one core's storage layout. Pointing the atomic
+    // core at v2's satellite does not revert — it returns v2's launch at that
+    // slot, decoded as if it were this one.
+    const atomic = coreDeploymentFor(getNetwork("mainnet"), MAINNET_ATOMIC)!;
+    expect(atomic.hasCurveId).toBe(true);
+    expect(atomic.views).toBe("0xF3aDbFeDd7C5e2F843F82E264FEe351134240445");
+    expect(atomic.curveRegistry).toBe("0xA92c68bDe572a0edCf93588836b81eF136a65C23");
+    const v2 = coreDeploymentFor(getNetwork("mainnet"), MAINNET_V2)!;
+    expect(v2.views).toBe("0x4a4e90f87F5376E25E235B1d0609857C06f520B6");
+    expect(v2.curveRegistry).toBe("0x684e7dd1E8E3b9777B7f9b373c494Ad8CdaE9B39");
+  });
+
+  it("create targets the atomic core, and never the paused v2 core", () => {
+    // v2 has `launchesPaused() == true` since 2026-09-13: every create there
+    // reverts LaunchesPaused(). Only `createLaunch` may assume the current core.
+    expect(getNetwork("mainnet").addresses.launchpadCore).toBe(MAINNET_ATOMIC);
   });
 
   it("each core carries its OWN tuple shape and views address", () => {

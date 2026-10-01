@@ -115,10 +115,11 @@ export interface NetworkDef {
    *
    * `LaunchpadCore` has a plain constructor and no proxy, so every contract
    * change is a new address and the old core stays live for the launches
-   * already on it — mainnet has served two since 2026-08-24. Each core numbers
-   * its launches from 0, so an on-chain id only means anything against the core
-   * that issued it, and reading one core's id on another does NOT fail: it
-   * returns a real, valid, DIFFERENT launch.
+   * already on it — mainnet has served three since 2026-09-13. The two older
+   * cores both number their launches from 0 (the atomic ones start at 1000 on
+   * testnet and 10000 on mainnet), so an on-chain id only means anything
+   * against the core that issued it, and reading one core's id on another does
+   * NOT fail: it returns a real, valid, DIFFERENT launch.
    *
    * Every launch-scoped call therefore binds to the core named on the launch
    * row (`ApiLaunch.core`) via `ShroomVenue.forLaunch`, and an unknown core is
@@ -160,6 +161,19 @@ export interface NetworkDef {
    * creator (the contract forbids referrer == creator or == buyer).
    */
   defaultReferrer: Address;
+  /**
+   * Quote FEE TIERS: a second quote slot on the SAME pair asset at a higher
+   * `tradeFeeBps`. `createLaunch` copies the slot's fee onto the launch, and a
+   * launch on a tier trades, prices and pays exactly like its base asset.
+   *
+   * Mirrors the pad's `QUOTE_FEE_TIERS` (frontend/src/chain/addresses.ts),
+   * which pins INJ's 3% tier to slot 6 on BOTH networks. Without this entry
+   * every slot-6 launch — about half of the atomic core's — failed
+   * `quoteInfo` with "unknown quote asset slot 6" and could not be quoted,
+   * bought or sold. `tradeFeeBps` is the tier's NOMINAL fee, for naming it in
+   * a menu; what a launch actually charges is its own snapshotted fee.
+   */
+  quoteFeeTiers: Record<number, { base: "INJ" | "USDC" | "SAI"; tradeFeeBps: number }>;
   quoteAssets: Record<string, QuoteAssetInfo>;
   /** Default gas price (wei) — Injective EVM uses a fixed floor, not an auction. */
   gasPriceWei: bigint;
@@ -181,23 +195,61 @@ const MAINNET: NetworkDef = {
   choiceApiBase: "https://api.choice.exchange",
   terminalBase: "https://trade.trippyinj.xyz",
   addresses: {
-    // v2, live 2026-08-24 at block 180013452.
-    launchpadCore: "0xd948740da926E8908A08414879490d0D8F96D463",
-    launchpadViews: "0x4a4e90f87F5376E25E235B1d0609857C06f520B6",
-    curveRegistry: "0x684e7dd1E8E3b9777B7f9b373c494Ad8CdaE9B39",
+    // The ATOMIC core, live 2026-09-13 at block 182781300. `createLaunch`
+    // issues the token through the core's own `LaunchTokenFactory`
+    // (0x615EDD89…) and binds it in the SAME transaction, so a launch is
+    // Trading the moment its create lands: no keeper bind, no CosmWasm sink, no
+    // Phase3Settler. It graduates in one permissionless tx through choice_v2's
+    // InfinitySettler 0x43a72CA9… onto a Choice v2 (Infinity CL) pool on the
+    // EVM — NOT onto Choice v1. `msg.value` must be EXACTLY
+    // `denomCreationFeeInj()`; an overshoot reverts `InsufficientLaunchFee`.
+    // 🔴 It numbers its launches from FIRST_LAUNCH_ID = 10000, so its on-chain
+    // ids never collide with the two older cores', which both count from 0.
+    launchpadCore: "0x1333692eB905823df110762525c26f7489BB9300",
+    // Pinned to the core above: a views satellite carries its core as an
+    // immutable and reads that ONE core's storage layout. Never carry one across
+    // a redeploy — it does not revert, it mis-reads.
+    launchpadViews: "0xF3aDbFeDd7C5e2F843F82E264FEe351134240445",
+    // This core's OWN registry. Presets 0-6 were retired on 2026-10-01 (Safe
+    // nonce 11) and re-registered as 7-12 under the same names, which is why
+    // nothing here pins a preset id: the default curve is resolved by NAME.
+    curveRegistry: "0xA92c68bDe572a0edCf93588836b81eF136a65C23",
     winj9: "0x0000000088827d2d103ee2d9A6b781773AE03FfB",
-    feeTreasury: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
+    // The atomic core's `treasury()`: the PREDICTED buyback sink, a reserved
+    // CREATE3 address that is CODELESS until that contract is deployed. Read
+    // here only to exclude it from holder snapshots — it is NOT the default
+    // referrer (see `defaultReferrer`), and must not become it: referral
+    // credits are pull-only, and an address with no code can never claim.
+    feeTreasury: "0x65Dc46Ee554A27bC790710f9fAee74B427c1C57D",
   },
+  // Mainnet serves THREE cores, mirroring the pad's `MAINNET_CORES`
+  // (frontend/src/chain/addresses.ts) and contracts/deployments/
+  // injective_mainnet.json `previousDeployments`. Both legacy cores are
+  // `launchesPaused` and keep trading, graduating and paying out the launches
+  // already on them; their graduates went to Choice v1 (CosmWasm).
   legacyCores: [
-    // v1. Closed to NEW launches on chain (`launchesPaused = true`, so its
-    // `nextLaunchId` is frozen at 16) and still trading, graduating and paying
-    // out the 16 launches already on it. Serves its own getters — no views
-    // satellite — and its `Launch` tuple has no `curveId`.
+    // v2, live 2026-08-24 at block 180013452, superseded 2026-09-13. 217
+    // launches. Pre-atomic: the keeper bound its tokens, and it graduates
+    // through Phase3Settler 0x5Db6B8d9… onto a Choice v1 CLMM pool.
+    {
+      core: "0xd948740da926E8908A08414879490d0D8F96D463",
+      views: "0x4a4e90f87F5376E25E235B1d0609857C06f520B6",
+      curveRegistry: "0x684e7dd1E8E3b9777B7f9b373c494Ad8CdaE9B39",
+      hasCurveId: true,
+      legacy: true,
+      treasury: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
+    },
+    // v1, live 2026-06-29 at block 172064322. 16 launches. Serves its own
+    // getters — no views satellite — and its `Launch` tuple has no `curveId`.
+    // 🔴 `hasCurveId: false` is what picks that tuple: the selector is the same
+    // on both shapes, so a wrong pick decodes SILENTLY with every field from
+    // `curveId` on shifted by one slot.
     {
       core: "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227",
       views: "0xeBF62508F322137EE0986935Ee3b4A60a3F0D227",
       hasCurveId: false,
       legacy: true,
+      treasury: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
     },
   ],
   // `cwAddresses.issuer` in shroom_launchpad contracts/deployments/injective_mainnet.json
@@ -235,7 +287,12 @@ const MAINNET: NetworkDef = {
     hasuraUrl: "https://api.trippyinj.xyz/v1/graphql",
     claimBase: "https://trippyinj.xyz/claim",
   },
+  // The v2 core's treasury EOA (it has no code, so it CAN claim a pull-based
+  // referral credit). Unchanged by the atomic cutover on purpose: which address
+  // the default referral share goes to is an operator decision, and the atomic
+  // core's own treasury (0x65Dc46Ee…) is codeless and could never claim it.
   defaultReferrer: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
+  quoteFeeTiers: { 6: { base: "INJ", tradeFeeBps: 300 } },
   quoteAssets: {
     INJ: {
       symbol: "INJ",
@@ -354,6 +411,7 @@ const TESTNET: NetworkDef = {
     claimBase: "https://trippyinj.xyz/claim",
   },
   defaultReferrer: "0xBf08c09Fe227ada4A86d279e98E695344848d33D",
+  quoteFeeTiers: { 6: { base: "INJ", tradeFeeBps: 300 } },
   quoteAssets: {
     INJ: {
       symbol: "INJ",
@@ -412,8 +470,28 @@ export function makeChain(def: NetworkDef, rpcUrls?: string[]): Chain {
   });
 }
 
+/**
+ * The quote asset a launch on `slot` is paid in. A fee-tier slot resolves to
+ * its BASE asset carrying the tier's own slot, so it trades and prices as that
+ * asset (slot 6 is native INJ, `buyNative`/`sellNative`) while every call that
+ * names a slot still names the launch's real one.
+ */
 export function quoteAssetBySlot(def: NetworkDef, slot: number): QuoteAssetInfo | undefined {
-  return Object.values(def.quoteAssets).find((q) => q.slot === slot);
+  const direct = Object.values(def.quoteAssets).find((q) => q.slot === slot);
+  if (direct) return direct;
+  const tier = def.quoteFeeTiers?.[slot];
+  const base = tier ? def.quoteAssets[tier.base] : undefined;
+  return base ? { ...base, slot } : undefined;
+}
+
+/** Every slot that is `symbol`'s asset: its base slot and its fee tiers. */
+export function quoteSlotsOf(def: NetworkDef, symbol: string): number[] {
+  const base = def.quoteAssets[symbol];
+  if (!base) return [];
+  const tiers = Object.entries(def.quoteFeeTiers ?? {})
+    .filter(([, t]) => t.base === symbol)
+    .map(([slot]) => Number(slot));
+  return [base.slot, ...tiers];
 }
 
 /**
@@ -448,6 +526,12 @@ export interface CoreDeployment {
   hasCurveId: boolean;
   /** A superseded core, still serving the launches already on it. */
   legacy: boolean;
+  /**
+   * This core's `treasury()`, where it differs from `addresses.feeTreasury`.
+   * A record for holder snapshots (a treasury is never a real holder), not a
+   * fee destination this package chooses.
+   */
+  treasury?: Address;
 }
 
 /** The core new launches are created on. */
@@ -458,6 +542,7 @@ export function currentCoreDeployment(def: NetworkDef): CoreDeployment {
     curveRegistry: def.addresses.curveRegistry,
     hasCurveId: isCurveV2(def),
     legacy: false,
+    treasury: def.addresses.feeTreasury,
   };
 }
 

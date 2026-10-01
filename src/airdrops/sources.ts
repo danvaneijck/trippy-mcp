@@ -12,7 +12,7 @@
  * something a caller can reason about without knowing a denom's decimals.
  */
 
-import { formatUnits } from "viem";
+import { formatUnits, getAddress } from "viem";
 
 import { asApiLaunchId } from "../api/pump.js";
 import { coreDeploymentFor } from "../chain/networks.js";
@@ -301,26 +301,7 @@ async function launchHolders(
   // launch, the SAI factory denom for a SAI-quoted one — so snapshotting it
   // targets every holder of the quote asset instead of the launch's own
   // holders. On launch #2 that is every INJ holder on mainnet.
-  //
-  // The launch token's own denom carries a per-launch salt in its subdenom, so
-  // it cannot be derived from the launch fields. It lives on the sink, from
-  // token-bind onward — which covers the whole curve phase, and the curve
-  // phase is usually the point of snapshotting a launch.
-  const sink = evmToInj(live.sink as `0x${string}`);
-  const sinkConfig = await smartQuery<{ token_denom?: string }>(
-    rt.net.lcdUrl,
-    sink,
-    { sink_config: {} },
-    { errorCode: "no_denom" },
-  );
-  const tokenDenom = sinkConfig.token_denom;
-  if (!tokenDenom) {
-    throw new ToolError(
-      "no_denom",
-      `launch #${launchIdRaw}'s sink did not report a token_denom`,
-      "the launch may not be bound yet — wait for the keeper and snapshot again",
-    );
-  }
+  const tokenDenom = await launchTokenDenom(rt, live, launchIdRaw);
 
   // Launch tokens are always 18-decimal.
   const all = await denomOwners(rt.net.grpcUrl, tokenDenom, 18);
@@ -328,10 +309,13 @@ async function launchHolders(
   // 20 bytes, addressed the way the bank module indexes them.
   // The core to exclude is the one that ISSUED this launch, not whichever one
   // is current — a superseded core still holds its own launches' balances.
-  const issuingCore = coreDeploymentFor(rt.net, row.core)?.core ?? rt.net.addresses.launchpadCore;
-  const launchOwned = [live.sink, issuingCore, rt.net.addresses.feeTreasury].map((a) =>
-    evmToInj(a as `0x${string}`),
-  );
+  // Likewise its OWN treasury: the atomic core pays a different one from the
+  // two older cores, and either can hold a launch's token.
+  const issuing = coreDeploymentFor(rt.net, row.core);
+  const issuingCore = issuing?.core ?? rt.net.addresses.launchpadCore;
+  const launchOwned = [live.sink, issuingCore, issuing?.treasury ?? rt.net.addresses.feeTreasury]
+    .filter((a) => !/^0x0{40}$/i.test(a))
+    .map((a) => evmToInj(a as `0x${string}`));
   return filterHolders(
     all,
     launchOwned,
@@ -340,6 +324,40 @@ async function launchHolders(
     18,
     "whole tokens held",
   );
+}
+
+/**
+ * The bank denom a launch's TOKEN lives under — which no field on the launch
+ * names, and which differs by core generation.
+ *
+ * Pre-atomic cores bound a keeper-minted tokenfactory denom whose subdenom
+ * carries a per-launch salt, so only the launch's CosmWasm sink knows it. An
+ * ATOMIC core has no sink at all (`sink` is address(0)): its
+ * `LaunchTokenFactory` issues a bank-precompile ERC20, whose bank denom is
+ * `erc20:` + the CHECKSUMMED token address — the lowercase spelling is a
+ * different, empty denom.
+ */
+export async function launchTokenDenom(
+  rt: Runtime,
+  live: { sink: string; token: string },
+  launchIdRaw: string,
+): Promise<string> {
+  if (/^0x0{40}$/i.test(live.sink)) return `erc20:${getAddress(live.token)}`;
+  const sink = evmToInj(live.sink as `0x${string}`);
+  const sinkConfig = await smartQuery<{ token_denom?: string }>(
+    rt.net.lcdUrl,
+    sink,
+    { sink_config: {} },
+    { errorCode: "no_denom" },
+  );
+  if (!sinkConfig.token_denom) {
+    throw new ToolError(
+      "no_denom",
+      `launch #${launchIdRaw}'s sink did not report a token_denom`,
+      "the launch may not be bound yet — wait for the keeper and snapshot again",
+    );
+  }
+  return sinkConfig.token_denom;
 }
 
 // ---------------------------------------------------------------------------

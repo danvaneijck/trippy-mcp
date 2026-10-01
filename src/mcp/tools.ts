@@ -56,7 +56,7 @@ import {
   usableCurvesLabel,
   type CurvePreset,
 } from "../venues/shroom/curves.js";
-import type { LaunchView } from "../venues/shroom/launchpad.js";
+import type { LaunchView, ShroomVenue } from "../venues/shroom/launchpad.js";
 import { legBpsFor, lockerPending, prepareCollect, shareOf } from "../venues/shroom/locker.js";
 import { sweep as walletSweep, walletStatus } from "../wallet.js";
 import { balanceOf, bankBalances, denomDecimals } from "../api/lcd.js";
@@ -217,7 +217,7 @@ export async function tokenInfo(rt: Runtime, args: { query: string }): Promise<u
         tokensSold: formatUnits(live.tokensSold, 18),
       },
       terms: await launchTerms(rt, live),
-      curve: await launchCurve(rt, live),
+      curve: await launchCurve(rt.shroom.forLaunch(target.launch), live),
       terminalUrl: rt.net.terminalBase ? `${rt.net.terminalBase}/t/shroom-curve%3A${target.launch.id}` : undefined,
     };
   }
@@ -238,9 +238,13 @@ export async function tokenInfo(rt: Runtime, args: { query: string }): Promise<u
  * null rather than a number if the menu will not read — a bare id names
  * nothing an agent can reason about.
  */
-async function launchCurve(rt: Runtime, live: LaunchView): Promise<unknown> {
-  if (live.curveId === null || !rt.shroom.curvesSelectable) return null;
-  const presets = await rt.shroom.curvePresets().catch(() => null);
+async function launchCurve(venue: ShroomVenue, live: LaunchView): Promise<unknown> {
+  // `venue` is bound to the launch's OWN core. A curve id names a preset on
+  // that core's registry only — mainnet's atomic registry retired 0-6 and
+  // re-registered them as 7-12, so reading a v2 launch's id 3 off the current
+  // registry would describe a retired entry of some other core's menu.
+  if (live.curveId === null || !venue.curvesSelectable) return null;
+  const presets = await venue.curvePresets().catch(() => null);
   const preset = presets?.find((c) => c.id === live.curveId);
   if (!preset) return null;
   return {
@@ -1063,6 +1067,8 @@ export interface CreateTokenArgs {
   website?: string;
   telegram?: string;
   quoteAsset?: "INJ" | "USDC" | "SAI";
+  /** The quote's fee tier in bps (100 = the base slot, 300 = INJ's 3% tier). */
+  tradeFeeBps?: number;
   /**
    * Bonding curve, by preset name or curveId. Only where a CurveRegistry
    * exists; omitted = the registry's live `standard` preset, resolved by name.
@@ -1150,7 +1156,8 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
     throw new ToolError("bad_input", "name and symbol are required");
   }
   const quoteSymbol = args.quoteAsset ?? "INJ";
-  const chosen = await resolveCurve(rt, args.curve, quoteSymbol);
+  const quoteSlot = await resolveQuoteSlot(rt, quoteSymbol, args.tradeFeeBps);
+  const chosen = await resolveCurve(rt, args.curve, quoteSymbol, quoteSlot);
   const gate = await resolveGateArgs(rt, args);
   if (args.devBuyMaxBps && !args.devBuyDelaySeconds) {
     throw new ToolError(
@@ -1183,6 +1190,7 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
       telegram: args.telegram,
     },
     quoteSymbol,
+    quoteSlot,
     curveId: chosen?.curveId,
     ...(args.devBuyDelaySeconds
       ? {
@@ -1286,10 +1294,40 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
  * launch actually got. Null only where there is no menu at all (v1), where the
  * curve is the quote asset's and there is nothing to report.
  */
+/**
+ * Turn `tradeFeeBps` into the quote slot that charges it, from the core's LIVE
+ * quote menu.
+ *
+ * Omitted means the asset's base slot, exactly as before tiers existed. A tier
+ * is matched on the fee the chain reports for the slot, not on the nominal
+ * figure in the network table, so a tier whose fee was retuned is still named
+ * correctly — and one that is not enabled is refused here, with the menu,
+ * rather than reverting `UnsupportedQuoteAsset` after the image upload.
+ */
+async function resolveQuoteSlot(
+  rt: Runtime,
+  quoteSymbol: "INJ" | "USDC" | "SAI",
+  tradeFeeBps: number | undefined,
+): Promise<number | undefined> {
+  if (tradeFeeBps === undefined) return undefined;
+  const menu = (await rt.shroom.quoteMenu()).filter((m) => m.symbol === quoteSymbol);
+  const hit = menu.find((m) => m.enabled && m.tradeFeeBps === tradeFeeBps);
+  if (hit) return hit.slot;
+  const offered = menu.filter((m) => m.enabled).map((m) => m.tradeFeeBps);
+  throw new ToolError(
+    "bad_fee_tier",
+    `this core offers no enabled ${quoteSymbol} quote at a ${tradeFeeBps} bps trade fee`,
+    offered.length
+      ? `${quoteSymbol} tiers enabled here: ${offered.map((b) => `${b} bps`).join(", ")}`
+      : `${quoteSymbol} is not enabled on this core at all`,
+  );
+}
+
 async function resolveCurve(
   rt: Runtime,
   choice: string | undefined,
   quoteSymbol: "INJ" | "USDC" | "SAI",
+  quoteSlot?: number,
 ): Promise<{ curveId: number; preset: CurvePreset } | null> {
   const omitted = choice === undefined || choice === "";
   if (omitted && !rt.shroom.curvesSelectable) return null;
@@ -1302,7 +1340,8 @@ async function resolveCurve(
       "omit `curve` — there is nothing to choose here",
     );
   }
-  const slot = rt.net.quoteAssets[quoteSymbol]?.slot;
+  // Presets are masked per SLOT, so a fee tier is checked against its own bit.
+  const slot = quoteSlot ?? rt.net.quoteAssets[quoteSymbol]?.slot;
   if (slot === undefined) {
     throw new ToolError("bad_input", `unknown quote asset ${quoteSymbol}`);
   }
