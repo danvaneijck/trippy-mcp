@@ -98,8 +98,9 @@ export const LAUNCHPAD_VIEWS_ABI = parseAbi([
 /**
  * v2 `createLaunch`. `LaunchConfig` gained `uint16 curveId` (after quoteAsset),
  * so the v1 write ABI encodes a different calldata layout and the call reverts.
- * curveId 0 is the standard preset and reproduces the v1 curve exactly, so it
- * is the safe default for a caller that does not care.
+ * There is no safe constant for `curveId`: a preset is corrected by disabling
+ * it and re-registering its name at a new id, so a caller that does not care
+ * gets the live `standard` resolved by name (`ShroomVenue.defaultCurve`).
  */
 export const LAUNCHPAD_WRITE_V2_ABI = parseAbi([
   "struct LaunchGate { address gateToken; uint256 minBalance; uint64 windowEndsAt; uint16 discountBps; }",

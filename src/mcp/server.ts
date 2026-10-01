@@ -425,7 +425,7 @@ export async function serve(): Promise<void> {
         .string()
         .optional()
         .describe(
-          'bonding-curve preset, by name ("standard", "whale", …) or curveId. Frozen onto the launch and not changeable afterwards. Presets are masked per quote asset, so an illegal pairing is refused with the legal list. Only where the deployment has a CurveRegistry; see explain("shroom_pad_curves"). Default: curveId 0, the standard curve.',
+          'bonding-curve preset, by name ("standard", "whale", …) or curveId. Frozen onto the launch and not changeable afterwards. Prefer the NAME: a replaced preset is retired and its name re-registered at a new curveId, so a name resolves to the live entry while an id is taken literally and a retired id is refused. Presets are masked per quote asset, so an illegal pairing is refused with the legal list. Only where the deployment has a CurveRegistry; see explain("shroom_pad_curves") for the live menu. Default: the live "standard" preset, looked up by name (not a fixed curveId); the result reports which curve the launch got.',
         ),
       initialBuy: z.string().optional().describe("optional first buy in quote-asset human units"),
       devBuyDelaySeconds: z
@@ -450,7 +450,7 @@ export async function serve(): Promise<void> {
         .max(2_000)
         .optional()
         .describe(
-          "cap on the creator's pre-open buy, in bps of the graduation raise. Omit it to take the most THIS curve allows: the contract also holds the cap to 50% of the launch's float, which binds sooner on steeper curves, so the ceiling is 2000 on most presets and 1154 on `steep`. An explicit value over that is refused rather than clamped. Only meaningful with devBuyDelaySeconds.",
+          "cap on the creator's pre-open buy, in bps of the graduation raise. Omit it to take the most THIS curve allows: the contract also holds the cap to 50% of the launch's float, which binds sooner on steeper curves, so on the steepest presets (`steep`) the ceiling is below 2000. An explicit value over the curve's ceiling is refused, naming that ceiling, rather than clamped. Only meaningful with devBuyDelaySeconds.",
         ),
       gateToken: z
         .string()

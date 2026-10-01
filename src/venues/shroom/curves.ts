@@ -177,9 +177,9 @@ export function devBuyFloatBps(rBps: number, maxBuyBps: number): number {
  * Invert the above at the ceiling: `1e4·m(1+r)/(r+m) <= MAX_DEV_FLOAT_BPS`
  * solves to `m <= r/(1+2r)` at a 50% ceiling, then the absolute
  * `MAX_DEV_BUY_BPS` applies on top. Steeper curves reach the float ceiling
- * first — `steep` tops out at 1154 bps where every other preset gets the full
- * 2000 — so a caller that just used the maximum would eat a revert on one
- * preset out of seven, after paying for it.
+ * first — `steep` (r = 0.15) tops out at 1154 bps where every flatter preset
+ * gets the full 2000 — so a caller that just used the maximum would eat a
+ * revert on that preset, after paying for it.
  */
 export function maxDevBuyBpsFor(rBps: number): number {
   if (rBps <= 0) return 0;
@@ -197,6 +197,18 @@ export function maxDevBuyBpsFor(rBps: number): number {
 }
 
 /**
+ * The preset a launch gets when the caller names none, resolved BY NAME.
+ *
+ * Not "curveId 0". The registry is append-only, so the only way to correct a
+ * preset is to disable it and register a replacement under the same name at a
+ * new id. Once `standard` has been replaced, id 0 is a disabled preset and a
+ * hard-coded 0 makes every launch that expressed no preference revert
+ * `PresetDisabled` — after the agent has decided to launch, with nothing in the
+ * revert it can act on. The name is the stable handle; the id is not.
+ */
+export const DEFAULT_CURVE_NAME = "standard";
+
+/**
  * Resolve what an agent asked for — a curveId, or a preset NAME — to a curveId.
  *
  * Names are accepted because they are what a model reasons with ("launch it on
@@ -204,6 +216,19 @@ export function maxDevBuyBpsFor(rBps: number): number {
  * case-insensitive; there is deliberately no fuzzy match, because the presets
  * differ in ways ("steep" vs "gentle") where a near-miss would silently pick
  * the opposite of what was asked for.
+ *
+ * A name can be registered more than once: correcting a preset means disabling
+ * it and appending its replacement under the same name, so after a menu swap
+ * `getPresets()` holds an old disabled `standard` AND a new enabled one. Taking
+ * the first match would pick the retired one and refuse a perfectly good
+ * request. Among same-named presets this takes one that is enabled AND legal on
+ * the quote, and of those the HIGHEST id — the newest registration is the live
+ * one. Only when no same-named preset is usable does it refuse, and then with
+ * the reason that applies: the quote mask if an enabled one exists but is
+ * masked off this quote, "retired" if every match is disabled.
+ *
+ * A numeric id names exactly one preset and is taken literally — retired or
+ * not — because an agent that passed an id meant that id.
  *
  * Returns a `{ error }` rather than throwing so the caller can attach the menu.
  */
@@ -213,24 +238,53 @@ export function resolveCurveChoice(
   quoteSlot: number,
 ): { curveId: number; preset: CurvePreset } | { error: string } {
   const raw = typeof choice === "number" ? String(choice) : choice.trim();
-  let found: CurvePreset | undefined;
 
   if (/^\d+$/.test(raw)) {
-    found = presets.find((p) => p.id === Number(raw));
+    const found = presets.find((p) => p.id === Number(raw));
     if (!found) return { error: `no curve with id ${raw}` };
-  } else {
-    const want = raw.toLowerCase();
-    found = presets.find((p) => p.name.toLowerCase() === want);
-    if (!found) return { error: `no curve named "${raw}"` };
+    return usableOrError(found, quoteSlot);
   }
 
-  if (!found.enabled) {
-    return { error: `curve "${found.name}" (id ${found.id}) is retired and cannot be used` };
+  const want = raw.toLowerCase();
+  const named = presets.filter((p) => p.name.toLowerCase() === want);
+  if (named.length === 0) return { error: `no curve named "${raw}"` };
+
+  const usable = named.filter((p) => presetAllowedOnQuote(p, quoteSlot));
+  if (usable.length > 0) return usableOrError(newest(usable), quoteSlot);
+
+  // Nothing usable. Explain with the most specific preset: an enabled one that
+  // is masked off this quote says more than a retired one that is gone for good.
+  const enabled = named.filter((p) => p.enabled);
+  return usableOrError(newest(enabled.length > 0 ? enabled : named), quoteSlot);
+}
+
+/** The latest registration of a set of presets. `presets` must be non-empty. */
+function newest(presets: readonly CurvePreset[]): CurvePreset {
+  return presets.reduce((a, b) => (b.id > a.id ? b : a));
+}
+
+function usableOrError(
+  p: CurvePreset,
+  quoteSlot: number,
+): { curveId: number; preset: CurvePreset } | { error: string } {
+  if (!p.enabled) {
+    return { error: `curve "${p.name}" (id ${p.id}) is retired and cannot be used` };
   }
-  if (!presetAllowedOnQuote(found, quoteSlot)) {
+  if (!presetAllowedOnQuote(p, quoteSlot)) {
     return {
-      error: `curve "${found.name}" (id ${found.id}) is not available on this quote asset — its raise is not sourceable there`,
+      error: `curve "${p.name}" (id ${p.id}) is not available on this quote asset — its raise is not sourceable there`,
     };
   }
-  return { curveId: found.id, preset: found };
+  return { curveId: p.id, preset: p };
+}
+
+/**
+ * The presets usable on a quote slot, as `name (id N)`, for refusal hints.
+ * Empty string when there are none, so the caller picks its own wording.
+ */
+export function usableCurvesLabel(presets: readonly CurvePreset[], quoteSlot: number): string {
+  return presets
+    .filter((c) => presetAllowedOnQuote(c, quoteSlot))
+    .map((c) => `${c.name} (id ${c.id})`)
+    .join(", ");
 }

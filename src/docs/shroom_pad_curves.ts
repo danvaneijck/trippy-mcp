@@ -8,8 +8,13 @@
  *
  * Every number here is read from the registry at call time, presets included:
  * the menu is append-only and the owner can register a new preset without a
- * redeploy, so a hard-coded list of seven would go stale silently and an agent
- * choosing off it would pass a curveId that no longer means what it read.
+ * redeploy, so a hard-coded list would go stale silently and an agent choosing
+ * off it would pass a curveId that no longer means what it read.
+ *
+ * Retired presets are listed apart from the live menu, by name and id only. A
+ * preset is corrected by retiring it and re-registering its NAME at a new id,
+ * so after a menu swap the raw registry holds every name twice; rendering both
+ * as full blocks reads like two "standard" curves to choose between.
  */
 
 import {
@@ -47,7 +52,6 @@ function pct(bps: number | null): string {
 const TOTAL_SUPPLY = 1_000_000_000;
 
 function presetBlock(c: CurvePreset, p: LiveParams): string {
-  const flag = c.enabled ? "" : "  [RETIRED — existing launches keep it, new ones cannot use it]";
   const mul = c.targetMulBps / 10_000;
   const quotes = p.quotes
     .filter((q) => q.enabled && presetAllowedOnQuote(c, q.slot))
@@ -59,7 +63,7 @@ function presetBlock(c: CurvePreset, p: LiveParams): string {
       return `${q.symbol} (raises ${round(raise)} ${q.symbol}, graduates at ~${round(fdv)} ${q.symbol} market cap)`;
     });
 
-  return `### ${c.name}  —  curveId ${c.id}${flag}
+  return `### ${c.name}  —  curveId ${c.id}
 
   float                 ${pct(c.floatBps)} of supply reaches the market through the curve
   pool liquidity        ${pct(c.lpBps)} of supply is locked to seed the graduated pool
@@ -86,7 +90,27 @@ asset uses that quote's one fixed curve, so there is nothing to choose and
 \`shroom_pad_quotes\` for what each quote asset does change.`;
   }
 
-  const menu = p.curves.length > 0 ? p.curves.map((c) => presetBlock(c, p)).join("\n\n") : UNKNOWN;
+  const live = p.curves.filter((c) => c.enabled);
+  const retired = p.curves.filter((c) => !c.enabled);
+  const menu =
+    p.curves.length === 0
+      ? UNKNOWN
+      : live.length > 0
+        ? live.map((c) => presetBlock(c, p)).join("\n\n")
+        : "Every preset on the registry is retired right now, so `create_token` has no curve to launch on.";
+  const retiredSection =
+    retired.length === 0
+      ? ""
+      : `
+
+## Retired presets
+
+Launches already created on these keep them forever (\`token_info\` reports a
+launch's own curve); new launches cannot use them. A name listed here AND in
+the menu above was replaced: the menu entry is the live one, and that is what
+the name resolves to.
+
+${retired.map((c) => `- ${c.name}  —  curveId ${c.id}`).join("\n")}`;
 
   return `# Choosing a bonding curve
 
@@ -97,11 +121,13 @@ far the price travels on the way. It does not change what the launch raises in
 (that is the quote asset) or what it charges (that is the fee config).
 
 Pass \`curve\` to \`create_token\` — either the name or the curveId below.
-Omitting it uses curveId 0, which reproduces the pre-registry curve exactly.
+A name resolves to its live entry on the menu. Omitting \`curve\` uses the
+\`standard\` preset, looked up the same way, by name: do not assume it has a
+fixed curveId.
 
 ## The menu
 
-${menu}
+${menu}${retiredSection}
 
 ## What the three numbers mean
 
@@ -133,10 +159,14 @@ bigger raise is a deeper pool and a harder price to move.
 1. **Presets are append-only and never edited.** A preset is retired by being
    disabled, not changed — otherwise every launch created under the old
    parameters would start being described by the new ones.
-2. **curveId 0 is the standard curve** and reproduces exactly what launches got
-   before the registry existed. Omitting a choice is therefore never a surprise.
-3. **Presets are masked per quote asset.** A 4x raise is not sourceable through
-   a thin pool, so it is simply not on the menu for those quotes. The
+2. **Names are stable, curveIds are not.** Because nothing is edited in place,
+   correcting a preset means retiring it and registering the fix under the
+   SAME name at a new curveId. A name always resolves to the live entry, and
+   so does the default (\`standard\`); a curveId is taken literally, and a
+   retired one is refused. Prefer names unless you read the id off this menu.
+3. **Presets are masked per quote asset.** A multiplied raise is not
+   sourceable through a thin pool, so it is simply not on the menu for those
+   quotes. The
    "available on" line above is the authority; \`create_token\` refuses an
    illegal pairing rather than letting it revert on chain.
 
