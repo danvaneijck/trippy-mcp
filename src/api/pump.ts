@@ -89,6 +89,19 @@ export interface ApiLaunch {
    * wanted.
    */
   onchainId?: string;
+  /**
+   * The graduation settler this launch snapshotted at creation. An
+   * InfinitySettler here means the launch graduates onto Choice v2, which is
+   * the field routing trusts — together with the chain, never the pointer on
+   * the core, which moves at every cutover.
+   */
+  settler?: string | null;
+  /** Where it graduated: "cosmwasm", "choice_v2", or null while unclassified. */
+  graduationVenue?: "cosmwasm" | "choice_v2" | string | null;
+  /** Choice v2 pool id (bytes32) — a cross-check only; the key is read on chain. */
+  v2PoolId?: string | null;
+  /** True when the launch token is the v2 pool's currency1. */
+  v2Invert?: boolean | null;
 }
 
 /**

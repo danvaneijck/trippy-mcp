@@ -299,7 +299,7 @@ export async function serve(): Promise<void> {
 
   register(server, "search_tokens", "Resolve a token reference across SHROOM Pad launches and Choice DEX tokens on Injective. Returns the venue it trades on plus a summary." + UNTRUSTED_NOTE, { query }, (rt2, a: { query: string }) => t.searchTokens(rt2, a));
 
-  register(server, "token_info", "Detailed token view: bonding-curve state + graduation progress for SHROOM launches, or the Choice market overview for DEX tokens. For curve launches it also returns `terms` — THIS launch's own snapshotted trade fee, creator split and holder gate/discount, including whether this agent currently qualifies for the discount. This is market state — for raw on-chain denom metadata (decimals, peggy/IBC/factory origin) the Injective SDK's `token_metadata` is the better source." + UNTRUSTED_NOTE, { query }, (rt2, a: { query: string }) => t.tokenInfo(rt2, a));
+  register(server, "token_info", "Detailed token view: bonding-curve state + graduation progress for SHROOM launches, the Choice market overview for DEX tokens, or — for a launch graduated onto Choice v2 and any EVM token traded there — its v2 price and every pool verified ON CHAIN (hook and fee included). For curve launches it also returns `terms` — THIS launch's own snapshotted trade fee, creator split and holder gate/discount, including whether this agent currently qualifies for the discount. This is market state — for raw on-chain denom metadata (decimals, peggy/IBC/factory origin) the Injective SDK's `token_metadata` is the better source." + UNTRUSTED_NOTE, { query }, (rt2, a: { query: string }) => t.tokenInfo(rt2, a));
 
   register(
     server,
@@ -326,7 +326,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "recent_trades",
-    "Recent SHROOM Pad curve trades — global tape, or one launch when `query` is set. Each trade carries `pairAmount` in its launch's own quote asset, `usd` as that trade's NOTIONAL, and `quoteRateUsd` as the quote asset's price at the time." + UNTRUSTED_NOTE,
+    "Recent SHROOM Pad curve trades — global tape, or one launch when `query` is set; for a token trading on Choice v2 (graduated atomic-core launches, DojoFun and other EVM tokens) it returns that pool's tape instead. Each curve trade carries `pairAmount` in its launch's own quote asset, `usd` as that trade's NOTIONAL, and `quoteRateUsd` as the quote asset's price at the time." + UNTRUSTED_NOTE,
     { query: query.optional(), limit: z.number().int().min(1).max(50).optional() },
     (rt2, a: { query?: string; limit?: number }) => t.recentTrades(rt2, a),
   );
@@ -334,7 +334,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "my_activity",
-    "The agent wallet's own history across both venues: SHROOM Pad curve trades plus Choice/CLMM swaps, orderbook fills and per-token window-flow PnL, and the launches this wallet CREATED (`my_launches` values those and reads the creator fees they are owed)." + UNTRUSTED_NOTE,
+    "The agent wallet's own history across every venue: SHROOM Pad curve trades plus Choice/CLMM swaps, orderbook fills and per-token window-flow PnL, its Choice v2 (EVM) swaps under `choiceV2`, and the launches this wallet CREATED (`my_launches` values those and reads the creator fees they are owed)." + UNTRUSTED_NOTE,
     {
       limit: z.number().int().min(1).max(100).optional().describe("max Choice swaps returned (default 20)"),
       days: z.number().int().min(1).max(365).optional().describe("Choice history window in days (default 30)"),
@@ -345,7 +345,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "candles",
-    "OHLCV price history for a token. Auto-routes: active SHROOM curve launches return quote-priced candles with a per-bucket USD rate; graduated/DEX tokens return Choice market candles (USD-priced). Candles come back as CSV rows under a `columns` header, oldest first, one row per bucket. Use this to measure momentum before trading. Covers spot only — Helix perp/spot market prices come from the Injective SDK's `market_price`/`market_list`." + UNTRUSTED_NOTE,
+    "OHLCV price history for a token. Auto-routes: active SHROOM curve launches return quote-priced candles with a per-bucket USD rate; graduated/DEX tokens return Choice market candles (USD-priced) — from the token's Choice v2 pool when that is where it trades. Candles come back as CSV rows under a `columns` header, oldest first, one row per bucket. Use this to measure momentum before trading. Covers spot only — Helix perp/spot market prices come from the Injective SDK's `market_price`/`market_list`." + UNTRUSTED_NOTE,
     {
       query,
       interval: z.enum(t.CANDLE_INTERVALS).optional().describe("bucket size (default 1h)"),
@@ -357,7 +357,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "portfolio",
-    "Every token the agent wallet holds, valued in USD: amount, indicative price, USD value per holding and the total. Prices come from the quote-rate feed (INJ/USDC/SAI), the last curve trade (active launches) or Choice token stats — always `quote` before trading on them. Spot holdings of THIS agent wallet only — bank balances plus the CW20 contracts this build knows to probe (SHROOM among them): perp positions and trading-subaccount balances are not included and belong to a different wallet (Injective SDK `account_positions`/`account_balances`). A CW20 balance cannot be enumerated from the chain, so a CW20 the package does not know about is invisible here even though `quote`/`sell` handle it fine — add its contract to `cw20Tokens` in config.json to surface it." + UNTRUSTED_NOTE,
+    "Every token the agent wallet holds, valued in USD: amount, indicative price, USD value per holding and the total. Prices come from the quote-rate feed (INJ/USDC/SAI), the last curve trade (active launches), Choice token stats, or the Choice v2 indexer for EVM tokens that trade only there — always `quote` before trading on them. Spot holdings of THIS agent wallet only — bank balances plus the CW20 contracts this build knows to probe (SHROOM among them): perp positions and trading-subaccount balances are not included and belong to a different wallet (Injective SDK `account_positions`/`account_balances`). A CW20 balance cannot be enumerated from the chain, so a CW20 the package does not know about is invisible here even though `quote`/`sell` handle it fine — add its contract to `cw20Tokens` in config.json to surface it." + UNTRUSTED_NOTE,
     {},
     (rt2) => t.portfolio(rt2),
   );
@@ -365,7 +365,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "quote",
-    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; graduated/DEX tokens quote through the Choice aggregator (counterToken defaults to INJ). Buy amounts are in the counter/quote asset; sell amounts in the token, and a sell takes `all` — sized against the live position exactly as `sell` would, so the whole-position trade can be previewed rather than retyped from `portfolio`. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
+    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; a launch graduated from the ATOMIC core, and any EVM token with a Choice v2 pool, quotes ON CHAIN through Choice v2's CLQuoter (single-hop, the launch hook's fee included); other graduated/DEX tokens quote through the Choice v1 aggregator (counterToken defaults to INJ). A token listed on BOTH Choice venues is quoted on both and the better output is reported, with the other as `alternative`. Buy amounts are in the counter/quote asset; sell amounts in the token, and a sell takes `all` — sized against the live position exactly as `sell` would, so the whole-position trade can be previewed rather than retyped from `portfolio`. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
       SPOT_ONLY_NOTE,
     {
       query,
@@ -374,7 +374,7 @@ export async function serve(): Promise<void> {
         .string()
         .describe('human units (e.g. "0.5"); "all" on a sell = the whole position'),
       slippageBps,
-      counterToken: z.string().optional().describe("Choice-venue counter asset denom (default inj)"),
+      counterToken: z.string().optional().describe("counter asset (default INJ). Choice v1: a denom or CW20. Choice v2: INJ or an 0x / erc20: ERC20 paired directly with the token."),
     },
     (rt2, a: t.QuoteArgs) => t.quote(rt2, a),
   );
@@ -382,7 +382,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "buy",
-    "Execute a buy. Auto-routes like `quote`. Spends the quote/counter asset from the agent wallet; enforced by the local policy engine (per-tx cap, 24h budget, contract allowlist) — policy denials come back as errors. Returns the tx hash and fill details." +
+    "Execute a buy. Auto-routes like `quote` (on a token listed on both Choice venues, executes where the output is larger). On Choice v2 the swap calldata is built locally, never taken from an API, and native INJ is wrapped inside the router. Spends the quote/counter asset from the agent wallet; enforced by the local policy engine (per-tx cap, 24h budget, contract allowlist) — policy denials come back as errors. Returns the tx hash and fill details." +
       SPOT_ONLY_NOTE,
     { query, amount: z.string(), slippageBps, counterToken: z.string().optional() },
     (rt2, a: Omit<t.QuoteArgs, "side">) => t.buy(rt2, a),
@@ -391,7 +391,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "sell",
-    'Execute a sell. Auto-routes like `quote`. `amount` is token human units or "all". Proceeds stay in the agent wallet.' +
+    'Execute a sell. Auto-routes like `quote`. On Choice v2, selling an ERC20 first approves Permit2 for EXACTLY the amount and lets the router pull it for a few minutes only — never an unlimited or standing approval. `amount` is token human units or "all". Proceeds stay in the agent wallet.' +
       SPOT_ONLY_NOTE,
     { query, amount: z.string(), slippageBps, counterToken: z.string().optional() },
     (rt2, a: Omit<t.QuoteArgs, "side">) => t.sell(rt2, a),
@@ -498,7 +498,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "claim_fees",
-    "Claim everything a launch pays this wallet: curve creator fees per launch, referral fees, cancelled-launch refunds, AND the swap fees a graduated launch earns on its Choice pool. That last one lives in a per-launch locker contract with no link to the launchpad core — it is invisible to every other tool here, it accrues uncollected until collected, and on a busy pool it can dwarf the curve ledger, so a graduated launch is never fully read from the core alone. With no `launchIds` it covers EVERY launch this wallet created (plus the wallet-level referral and refund ledgers); pass `launchIds` — the ids token_info, my_launches and portfolio report — to narrow it. `preview: true` reads every ledger and broadcasts nothing, which is how to ask what a launch is owed without spending gas. Pool fees pay out partly in the launch's own token, and only non-zero balances are ever claimed. On an INJ-quoted launch the core settles the curve fee in WINJ (wrapped INJ, INJ's ERC20 pair asset) rather than the native coin, so this unwraps it 1:1 afterwards and reports the amount as `unwrappedInj` — without that the payout cannot pay gas or fund a buy.",
+    "Claim everything a launch pays this wallet: curve creator fees per launch, referral fees, cancelled-launch refunds, AND the swap fees a graduated launch earns on its Choice pool — the Choice v1 locker for older-core graduates, and for Choice v2 graduates the LaunchPoolFeeHook creator credit (current creator only) and the v2 PositionLocker (collect, then claim), reported under `v2PoolFees`. That last one lives in a per-launch locker contract with no link to the launchpad core — it is invisible to every other tool here, it accrues uncollected until collected, and on a busy pool it can dwarf the curve ledger, so a graduated launch is never fully read from the core alone. With no `launchIds` it covers EVERY launch this wallet created (plus the wallet-level referral and refund ledgers); pass `launchIds` — the ids token_info, my_launches and portfolio report — to narrow it. `preview: true` reads every ledger and broadcasts nothing, which is how to ask what a launch is owed without spending gas. Pool fees pay out partly in the launch's own token, and only non-zero balances are ever claimed. On an INJ-quoted launch the core settles the curve fee in WINJ (wrapped INJ, INJ's ERC20 pair asset) rather than the native coin, so this unwraps it 1:1 afterwards and reports the amount as `unwrappedInj` — without that the payout cannot pay gas or fund a buy.",
     {
       launchIds: z.array(z.string()).optional(),
       preview: z
@@ -518,7 +518,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "my_launches",
-    "Every token this agent wallet LAUNCHED on SHROOM Pad, valued: curve state and graduation progress, 24h volume and holders, the dev-buy window the launch actually got, the wallet's own bag at its live exit quote, and — read on-chain, no transaction — BOTH fee rails a launch pays. `fees` is the curve's creator ledger on the core; `poolFees` is what the graduated Choice pool has accrued in its locker, gross with this wallet's split applied, which no other tool can see. This is the creator's view; `portfolio` values what the wallet holds and `my_activity` lists what it traded, neither of which can tell a launch of your own from a stranger's coin. Collect both with `claim_fees`." +
+    "Every token this agent wallet LAUNCHED on SHROOM Pad, valued: curve state and graduation progress, 24h volume and holders, the dev-buy window the launch actually got, the wallet's own bag at its live exit quote, and — read on-chain, no transaction — BOTH fee rails a launch pays. `fees` is the curve's creator ledger on the core; `poolFees` is what a Choice v1 graduate's pool has accrued in its locker, gross with this wallet's split applied, and `v2PoolFees` is a Choice v2 graduate's fee-hook credit and position-locker fees — neither visible to any other tool. This is the creator's view; `portfolio` values what the wallet holds and `my_activity` lists what it traded, neither of which can tell a launch of your own from a stranger's coin. Collect both with `claim_fees`." +
       UNTRUSTED_NOTE,
     {
       limit: z.number().int().min(1).max(25).optional().describe("most recent launches to value (default 10)"),
@@ -566,8 +566,8 @@ export async function serve(): Promise<void> {
               "0. First stop when you are unsure how something works: `explain`. Topics cover SHROOM Pad mechanics, quote-asset choice, every fee/discount/gate, Choice routing failure modes, and this agent's own wallet and spend policy. Its numbers are read from the chain at call time, so prefer it over assumptions about fees or graduation targets.",
               "1. Discover with `trending`/`new_launches`/`search_tokens`; inspect with `token_info` (curve state, graduation progress, and this launch's own fee/gate terms), `candles` (price history/momentum) and `recent_trades`.",
               "2. Always `quote` before `buy`/`sell`. Quotes are executed on-chain (curve) or via the Choice SOR — the same math the trade uses.",
-              "3. Buys/sells auto-route: active SHROOM curves trade on the launchpad; graduated tokens and everything else swap through the Choice aggregator against INJ by default.",
-              "4. `create_token` launches on the bonding curve (creation fee ~0.2 INJ); it graduates to a Choice CLMM pool when the curve fills. Where a curve menu exists, `curve` picks the shape of the raise and cannot be changed afterwards — read `explain(\"shroom_pad_curves\")` first, and note the curve is a separate choice from the quote asset.",
+              "3. Buys/sells auto-route: active SHROOM curves trade on the launchpad; launches graduated from the atomic core, and EVM tokens with a Choice v2 pool, trade on Choice v2 (see `explain(\"choice_v2\")`); everything else swaps through the Choice aggregator against INJ by default. A token listed on both Choice venues trades wherever the output is larger.",
+              "4. `create_token` launches on the bonding curve (creation fee ~0.2 INJ); it graduates to a Choice v2 pool when the curve fills (permissionlessly, in the transaction that fills it). Where a curve menu exists, `curve` picks the shape of the raise and cannot be changed afterwards — read `explain(\"shroom_pad_curves\")` first, and note the curve is a separate choice from the quote asset.",
               "5. `portfolio` values every holding in USD; `my_activity` audits past trades (both venues, with flow PnL); `wallet_status` shows balances and the remaining policy budget; `sweep` returns funds to the owner (only destination allowed).",
               "5b. After launching: `my_launches` is the creator's view — curve progress, the bag, and BOTH fee rails. A launch pays twice: the curve fee accrues to a per-launch ledger on the core (`fees`), and after graduation the Choice pool's swap fee accrues in the launch's own locker contract (`poolFees`), partly in the launch's own token. Neither reaches the wallet on its own and the second is not on the core at all; `claim_fees` with `preview: true` reads both for free and without it collects both.",
               "6. Airdrops (when enabled): `airdrop_preview` snapshots holders (token/launch/NFT/gov-voter) and caches a plan without publishing or broadcasting anything, `airdrop_execute` funds that exact plan in one irreversible tx, `airdrop_status` tracks claims, `airdrop_manage` claws back or extends a live campaign. Always read the preview before executing — the campaign freezes on creation and cannot be edited. See `explain(\"airdrops\")`.",

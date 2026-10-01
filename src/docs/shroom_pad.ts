@@ -124,8 +124,9 @@ locked forever either way:
   earliest ones charge an ordinary LP fee instead.
 - **Older cores** — a Choice v1 (CosmWasm) CLMM pool at the 0.30% tier.
 
-After that the token trades on Choice, not on the curve — a direct curve call
-would revert.
+After that the token trades on Choice, not on the curve — the trading tools
+route to whichever pool it graduated into (see \`explain("choice_v2")\` for the
+v2 side), and a direct curve call would revert.
 
 ## The token itself
 
