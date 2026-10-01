@@ -31,6 +31,7 @@ import {
 import { ToolError } from "../../errors.js";
 import { assertBrandable, encodeMetadataUri, type LaunchMetadata } from "../../metadata.js";
 import {
+  DEFAULT_CURVE_NAME,
   devBuyFloatBps,
   MAX_DEV_BUY_BPS,
   MAX_DEV_FLOAT_BPS,
@@ -38,8 +39,10 @@ import {
   MAX_OPEN_DELAY_SECONDS,
   maxDevBuyBpsFor,
   MIN_SAFE_OPEN_DELAY_SECONDS,
+  resolveCurveChoice,
   SHAPE_FLOAT_BPS,
   SHAPE_LP_BPS,
+  usableCurvesLabel,
   type CurvePreset,
 } from "./curves.js";
 import {
@@ -75,7 +78,8 @@ export interface LaunchView {
   /**
    * CurveRegistry preset this launch was created with. `null` on a v1 network,
    * where the curve was a property of the quote asset and there was nothing to
-   * choose. 0 is the standard preset, which reproduces the v1 curve exactly.
+   * choose. An id names one registration, not a name: once a preset is
+   * replaced, the old id keeps describing the launches created on it.
    */
   curveId: number | null;
   metadataURI: string;
@@ -389,6 +393,38 @@ export class ShroomVenue {
         virtualToken: Number(formatUnits(BigInt(p.virtualToken), 18)),
       };
     });
+  }
+
+  /**
+   * The preset a launch is created on when the caller names none: the live
+   * `standard`, looked up BY NAME on the registry as it stands right now.
+   *
+   * Null where there is no menu (v1, or a v2 deployment configured without a
+   * registry). There the curve is not the creator's to choose and curveId 0 is
+   * what those launches have always been created with.
+   *
+   * Never a hard-coded id. Presets are corrected by disabling them and
+   * registering the replacement under the same name, so "standard" moves —
+   * from id 0 to whatever id the replacement got — and a fixed 0 turns every
+   * launch without a stated preference into a `PresetDisabled` revert. If no
+   * usable `standard` exists on this quote, this refuses before anything is
+   * spent rather than quietly picking some other shape the caller never chose.
+   */
+  async defaultCurve(quoteSlot: number): Promise<{ curveId: number; preset: CurvePreset } | null> {
+    if (!this.curvesSelectable) return null;
+    const presets = (await this.curvePresets()) ?? [];
+    const picked = resolveCurveChoice(presets, DEFAULT_CURVE_NAME, quoteSlot);
+    if ("error" in picked) {
+      const usable = usableCurvesLabel(presets, quoteSlot);
+      throw new ToolError(
+        "bad_curve",
+        `no curve was named and the default "${DEFAULT_CURVE_NAME}" curve cannot be used: ${picked.error}`,
+        usable
+          ? `pass \`curve\` explicitly — usable on this quote: ${usable}. See explain("shroom_pad_curves")`
+          : "no preset on the registry is usable on this quote asset — try another quote asset",
+      );
+    }
+    return picked;
   }
 
   async getQuoteAssetConfig(slot: number): Promise<QuoteAssetConfigView> {
@@ -906,7 +942,7 @@ export class ShroomVenue {
       : null;
 
     // No cap named: take the most this CURVE allows rather than the absolute
-    // maximum. They are the same on six of seven presets, and on `steep` the
+    // maximum. They are the same on every preset but `steep`, where the
     // absolute maximum reverts — refusing a launch over a default the caller
     // never chose is a bad trade for one line of arithmetic. An explicit
     // over-cap value is still refused: silently changing what was asked for is
@@ -1008,7 +1044,10 @@ export class ShroomVenue {
   async createLaunch(opts: {
     meta: LaunchMetadata;
     quoteSymbol: "INJ" | "USDC" | "SAI";
-    /** CurveRegistry preset (v2 only). Omitted / 0 = the standard curve. */
+    /**
+     * CurveRegistry preset (v2 only). Omitted = the registry's live `standard`,
+     * looked up by name (see `defaultCurve`); 0 on a network with no menu.
+     */
     curveId?: number;
     /**
      * V-4 exclusive pre-open window. `tradingOpensAt` sits `openDelaySeconds`
@@ -1074,10 +1113,12 @@ export class ShroomVenue {
 
     // v2's LaunchConfig carries `curveId` (after quoteAsset), so the two
     // versions encode different calldata and the wrong one reverts rather than
-    // misbehaving quietly. curveId 0 is the standard preset, which reproduces
-    // the v1 curve exactly — so an agent that expresses no curve preference
-    // gets the same launch on both networks.
-    const curveId = opts.curveId ?? 0;
+    // misbehaving quietly. No preference = the registry's LIVE `standard`,
+    // resolved by name: it is not pinned to id 0, because a preset is
+    // corrected by disabling it and re-registering the name at a new id. 0 is
+    // left only for a network with no menu, where there is nothing to choose.
+    // The same id feeds the dev-buy pricing below and the calldata.
+    const curveId = opts.curveId ?? (await this.defaultCurve(q.slot))?.curveId ?? 0;
     const timing = await this.resolveLaunchTiming(opts.devBuy, curveId, q.slot);
     const gate = this.resolveGate(opts.gate);
     const base = {

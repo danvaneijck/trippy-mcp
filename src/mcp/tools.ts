@@ -50,10 +50,10 @@ import { checkForUpdate, PKG_VERSION } from "../version.js";
 import { extractUsdPrice } from "../venues/choice/swap.js";
 import { LAUNCH_STATE_LABEL, LaunchState } from "../venues/shroom/abi.js";
 import {
-  presetAllowedOnQuote,
   priceRunX,
   resolveCurveChoice,
   THIN_DEV_BUY_MARGIN_SECONDS,
+  usableCurvesLabel,
   type CurvePreset,
 } from "../venues/shroom/curves.js";
 import type { LaunchView } from "../venues/shroom/launchpad.js";
@@ -1065,7 +1065,7 @@ export interface CreateTokenArgs {
   quoteAsset?: "INJ" | "USDC" | "SAI";
   /**
    * Bonding curve, by preset name or curveId. Only where a CurveRegistry
-   * exists; omitted = curveId 0, which reproduces the pre-registry curve.
+   * exists; omitted = the registry's live `standard` preset, resolved by name.
    */
   curve?: string;
   initialBuy?: string;
@@ -1277,15 +1277,22 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
  * `enabled` are both readable up front. A wrong pick is also not recoverable —
  * the curve is frozen onto the launch forever.
  *
- * Returns null when no choice was expressed, which is a no-op: curveId 0 is
- * `standard` and reproduces the pre-registry curve exactly.
+ * No choice expressed resolves the DEFAULT here too, by name, through the
+ * venue's `defaultCurve` — not to a fixed id. A replaced preset is disabled
+ * and re-registered under the same name at a new id, so the old "0 is
+ * standard" turned every launch without a stated preference into a
+ * `PresetDisabled` revert. Resolving it here also refuses an unusable default
+ * before the image upload and the fee, and lets the result say which curve the
+ * launch actually got. Null only where there is no menu at all (v1), where the
+ * curve is the quote asset's and there is nothing to report.
  */
 async function resolveCurve(
   rt: Runtime,
   choice: string | undefined,
   quoteSymbol: "INJ" | "USDC" | "SAI",
 ): Promise<{ curveId: number; preset: CurvePreset } | null> {
-  if (choice === undefined || choice === "") return null;
+  const omitted = choice === undefined || choice === "";
+  if (omitted && !rt.shroom.curvesSelectable) return null;
   if (!rt.shroom.curvesSelectable) {
     // Dropping it silently would hand back a launch on a curve the caller did
     // not pick, permanently, and report success.
@@ -1299,6 +1306,7 @@ async function resolveCurve(
   if (slot === undefined) {
     throw new ToolError("bad_input", `unknown quote asset ${quoteSymbol}`);
   }
+  if (omitted) return rt.shroom.defaultCurve(slot);
   const presets = await rt.shroom.curvePresets();
   if (!presets || presets.length === 0) {
     throw new ToolError("bad_curve", "the curve registry returned no presets");
@@ -1308,12 +1316,7 @@ async function resolveCurve(
     throw new ToolError(
       "bad_curve",
       picked.error,
-      `curves available on ${quoteSymbol}: ${
-        presets
-          .filter((c) => presetAllowedOnQuote(c, slot))
-          .map((c) => `${c.name} (id ${c.id})`)
-          .join(", ") || "none"
-      } — see explain("shroom_pad_curves")`,
+      `curves available on ${quoteSymbol}: ${usableCurvesLabel(presets, slot) || "none"} — see explain("shroom_pad_curves")`,
     );
   }
   return picked;

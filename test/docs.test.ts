@@ -184,6 +184,29 @@ describe("topic rendering", () => {
     expect(text).toContain("~9.0000 bps of the buy");
   });
 
+  it("shroom_pad_curves shows a swapped menu once, with the retired entries apart", () => {
+    // After a menu swap the registry holds each name twice: the disabled
+    // original and its replacement. Rendering both as full blocks reads like
+    // two `standard` curves to pick between.
+    const text = findTopic("shroom_pad_curves")!.render(
+      params({
+        curves: [
+          preset({ id: 0, name: "standard", enabled: false }),
+          preset({ id: 4, name: "high-float", enabled: false }),
+          preset({ id: 7, name: "standard" }),
+        ],
+      }),
+    );
+    expect(text.match(/^### standard/gm)).toHaveLength(1);
+    expect(text).toContain("### standard  —  curveId 7");
+    expect(text).not.toContain("### high-float");
+    expect(text).toContain("## Retired presets");
+    expect(text).toContain("- standard  —  curveId 0");
+    expect(text).toContain("- high-float  —  curveId 4");
+    // The default is a NAME, never a fixed id.
+    expect(text).not.toMatch(/curveId 0, which|curveId 0 is the standard/);
+  });
+
   it("every topic renders non-trivially with full live params", () => {
     for (const topic of TOPICS) {
       const text = topic.render(params());
