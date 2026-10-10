@@ -113,7 +113,9 @@ export async function usdValue(
   const known = Object.values(rt.net.quoteAssets).find((q) => q.bankDenom === denom);
   if (known) {
     const unit = await rt.shroom.usdValue(known.slot, 10n ** BigInt(known.decimals));
-    return unit === null ? null : unit * amount;
+    // No feed rate (a quote slot the feed has not priced yet) is not a price
+    // of zero: fall through to Choice, which answers or returns null.
+    if (unit !== null) return unit * amount;
   }
   try {
     const { extractUsdPrice } = await import("../venues/choice/swap.js");

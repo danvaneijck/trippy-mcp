@@ -2471,17 +2471,21 @@ export async function portfolio(rt: Runtime): Promise<unknown> {
       continue;
     }
 
+    // A quote asset with no rate in the feed falls through to the lookups
+    // below rather than reporting unpriced: SPROUT is also a graduated launch
+    // the Choice v2 indexer prices, and the feed only learns a slot's rate
+    // around when the chain enables it.
     const q = quoteByDenom.get(b.denom);
-    if (q) {
+    const quoteUsd = q ? await rt.shroom.usdValue(q.slot, raw) : null;
+    if (q && quoteUsd !== null) {
       const amount = Number(formatUnits(raw, q.decimals));
-      const valueUsd = await rt.shroom.usdValue(q.slot, raw);
       rows.push({
         denom: b.denom,
         symbol: q.symbol,
         amount,
-        priceUsd: valueUsd !== null && amount > 0 ? valueUsd / amount : null,
-        valueUsd,
-        pricedVia: valueUsd !== null ? "quote-rate" : "unpriced",
+        priceUsd: amount > 0 ? quoteUsd / amount : null,
+        valueUsd: quoteUsd,
+        pricedVia: "quote-rate",
       });
       continue;
     }
