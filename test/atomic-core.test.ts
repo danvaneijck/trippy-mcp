@@ -4,6 +4,7 @@ import { launchTokenDenom } from "../src/airdrops/sources.js";
 import { asApiLaunchId, type ApiLaunch } from "../src/api/pump.js";
 import {
   NETWORKS,
+  baseQuoteSlot,
   coreDeploymentFor,
   quoteAssetBySlot,
   quoteSlotsOf,
@@ -40,12 +41,39 @@ describe("fee-tier quote slots", () => {
   });
 
   it("an unregistered slot is still unknown — no tier invented", () => {
-    expect(quoteAssetBySlot(NET, 7)).toBeUndefined();
+    expect(quoteAssetBySlot(NET, 10)).toBeUndefined();
+    // Never reused: SHROOM (0) and testnet's EIGHT/TWLV (4/5).
+    for (const slot of [0, 4, 5]) expect(quoteAssetBySlot(NET, slot)).toBeUndefined();
   });
 
-  it("INJ's slots are its base and its tier; the others have no tier", () => {
+  it("USDC's 3% tier (7) and SPROUT (8) with its tier (9) resolve to their base assets", () => {
+    const usdc3 = quoteAssetBySlot(NET, 7)!;
+    expect(usdc3).toMatchObject({ symbol: "USDC", slot: 7, decimals: 6, isNative: false });
+    expect(usdc3.pairAsset).toBe("0xa00C59fF5a080D2b954d0c75e46E22a0c371235a");
+    const sprout = quoteAssetBySlot(NET, 8)!;
+    expect(sprout).toMatchObject({ symbol: "SPROUT", slot: 8, decimals: 18, isNative: false });
+    expect(sprout.pairAsset).toBe("0x503f2A7bAc1E2ff2800Aa92EdB82abeF0bFA631E");
+    expect(quoteAssetBySlot(NET, 9)).toMatchObject({ symbol: "SPROUT", slot: 9, pairAsset: sprout.pairAsset });
+    for (const [tier, base] of [[6, 1], [7, 2], [9, 8], [2, 2], [8, 8], [3, 3]] as const) {
+      expect(baseQuoteSlot(NET, tier)).toBe(base);
+    }
+  });
+
+  it("testnet carries the same slots, on its own SPROUT", () => {
+    const T = NETWORKS.testnet;
+    expect(quoteAssetBySlot(T, 9)).toMatchObject({
+      symbol: "SPROUT",
+      slot: 9,
+      pairAsset: "0xEDF52618Cf3C61Be2a721d964C5064c87970331E",
+    });
+    expect(quoteSlotsOf(T, "USDC")).toEqual([2, 7]);
+  });
+
+  it("each asset's slots are its base and its tier", () => {
     expect(quoteSlotsOf(NET, "INJ")).toEqual([1, 6]);
-    expect(quoteSlotsOf(NET, "USDC")).toEqual([2]);
+    expect(quoteSlotsOf(NET, "USDC")).toEqual([2, 7]);
+    expect(quoteSlotsOf(NET, "SPROUT")).toEqual([8, 9]);
+    expect(quoteSlotsOf(NET, "SAI")).toEqual([3]);
     expect(quoteSlotsOf(NET, "NOPE")).toEqual([]);
   });
 });

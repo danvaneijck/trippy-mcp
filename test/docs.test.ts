@@ -126,7 +126,7 @@ describe("prose carries no numbers", () => {
         .replace(/0\.30% tier/g, "")
         .replace(/0\.5% max_spread/g, "")
         .replace(/\b1e\d+\b/g, "")
-        .replace(/slots? 0-7/g, "")
+        .replace(/slots? 0-9/g, "")
         // Contract invariants, not parameters: the discount is capped at 100%
         // of the creator cut by the code, it is not a configurable figure.
         .replace(/100% of it|up to 100%/g, "")

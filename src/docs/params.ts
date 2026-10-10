@@ -71,7 +71,7 @@ export interface LiveParams {
  * from the chain, not from our bundled list, or it will never see a quote asset
  * added after this package was published.
  */
-const PROBE_SLOTS = [0, 1, 2, 3, 4, 5, 6, 7];
+const PROBE_SLOTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 const LIVE_TTL_MS = 60_000;
 
