@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { maxUint256 } from "viem";
 
 import { launchTokenDenom } from "../src/airdrops/sources.js";
 import { asApiLaunchId, type ApiLaunch } from "../src/api/pump.js";
 import {
   NETWORKS,
+  baseQuoteSlot,
   coreDeploymentFor,
   quoteAssetBySlot,
   quoteSlotsOf,
@@ -40,12 +42,39 @@ describe("fee-tier quote slots", () => {
   });
 
   it("an unregistered slot is still unknown — no tier invented", () => {
-    expect(quoteAssetBySlot(NET, 7)).toBeUndefined();
+    expect(quoteAssetBySlot(NET, 10)).toBeUndefined();
+    // Never reused: SHROOM (0) and testnet's EIGHT/TWLV (4/5).
+    for (const slot of [0, 4, 5]) expect(quoteAssetBySlot(NET, slot)).toBeUndefined();
   });
 
-  it("INJ's slots are its base and its tier; the others have no tier", () => {
+  it("USDC's 3% tier (7) and SPROUT (8) with its tier (9) resolve to their base assets", () => {
+    const usdc3 = quoteAssetBySlot(NET, 7)!;
+    expect(usdc3).toMatchObject({ symbol: "USDC", slot: 7, decimals: 6, isNative: false });
+    expect(usdc3.pairAsset).toBe("0xa00C59fF5a080D2b954d0c75e46E22a0c371235a");
+    const sprout = quoteAssetBySlot(NET, 8)!;
+    expect(sprout).toMatchObject({ symbol: "SPROUT", slot: 8, decimals: 18, isNative: false });
+    expect(sprout.pairAsset).toBe("0x503f2A7bAc1E2ff2800Aa92EdB82abeF0bFA631E");
+    expect(quoteAssetBySlot(NET, 9)).toMatchObject({ symbol: "SPROUT", slot: 9, pairAsset: sprout.pairAsset });
+    for (const [tier, base] of [[6, 1], [7, 2], [9, 8], [2, 2], [8, 8], [3, 3]] as const) {
+      expect(baseQuoteSlot(NET, tier)).toBe(base);
+    }
+  });
+
+  it("testnet carries the same slots, on its own SPROUT", () => {
+    const T = NETWORKS.testnet;
+    expect(quoteAssetBySlot(T, 9)).toMatchObject({
+      symbol: "SPROUT",
+      slot: 9,
+      pairAsset: "0xEDF52618Cf3C61Be2a721d964C5064c87970331E",
+    });
+    expect(quoteSlotsOf(T, "USDC")).toEqual([2, 7]);
+  });
+
+  it("each asset's slots are its base and its tier", () => {
     expect(quoteSlotsOf(NET, "INJ")).toEqual([1, 6]);
-    expect(quoteSlotsOf(NET, "USDC")).toEqual([2]);
+    expect(quoteSlotsOf(NET, "USDC")).toEqual([2, 7]);
+    expect(quoteSlotsOf(NET, "SPROUT")).toEqual([8, 9]);
+    expect(quoteSlotsOf(NET, "SAI")).toEqual([3]);
     expect(quoteSlotsOf(NET, "NOPE")).toEqual([]);
   });
 });
@@ -182,13 +211,18 @@ describe("a launch on INJ's 3% tier (slot 6) trades", () => {
  * mainnet one at the time of writing: INJ on slot 1 at 1%, its tier on slot 6
  * at 3%, USDC and SAI not registered.
  */
-function atomicCreateVenue() {
+function atomicCreateVenue(
+  extra: Record<number, { fee: number; pairAsset: string }> = {},
+  balances: Record<string, bigint> = {},
+) {
   const sent: { address: string; cfg: Record<string, unknown>; value?: bigint }[] = [];
   const zero = `0x${"00".repeat(20)}`;
   const signer = {
     address: `0x${"12".repeat(20)}`,
-    readContract: async ({ functionName, args }: { functionName: string; args: unknown[] }) => {
+    readContract: async ({ address, functionName, args }: { address: string; functionName: string; args: unknown[] }) => {
       switch (functionName) {
+        case "balanceOf":
+          return balances[address.toLowerCase()] ?? 0n;
         case "paused":
           return false;
         case "denomCreationFeeInj":
@@ -199,10 +233,14 @@ function atomicCreateVenue() {
           return "0x615EDD898be2F44d18CE875Bbc75A1065E8D9BA2";
         case "getQuoteAssetConfig": {
           const slot = Number(args[0]);
-          const live: Record<number, { fee: number }> = { 1: { fee: 100 }, 6: { fee: 300 } };
+          const live: Record<number, { fee: number; pairAsset: string }> = {
+            1: { fee: 100, pairAsset: WINJ },
+            6: { fee: 300, pairAsset: WINJ },
+            ...extra,
+          };
           const hit = live[slot];
           return {
-            pairAsset: hit ? WINJ : zero,
+            pairAsset: hit ? hit.pairAsset : zero,
             graduationPairTarget: hit ? 2_500n * 10n ** 18n : 0n,
             enabled: !!hit,
             bankDenom: hit ? "inj" : "",
@@ -236,9 +274,66 @@ function atomicCreateVenue() {
   };
   const pump = { quotePrices: async () => ({ items: [] }), listLaunches: async () => ({ items: [] }) };
   const venue = new ShroomVenue(NET, signer as never, pump as never, null);
-  const rt = { net: NET, shroom: venue, pump } as unknown as Runtime;
+  const rt = { net: NET, shroom: venue, pump, signer } as unknown as Runtime;
   return { venue, rt, sent };
 }
+
+const SPROUT = "0x503f2A7bAc1E2ff2800Aa92EdB82abeF0bFA631E";
+const USDC = "0xa00C59fF5a080D2b954d0c75e46E22a0c371235a";
+
+describe("create on a USDC or SPROUT quote", () => {
+  it("SPROUT at 3% launches on slot 9 once the chain enables it", async () => {
+    const { rt, sent } = atomicCreateVenue({ 8: { fee: 100, pairAsset: SPROUT }, 9: { fee: 300, pairAsset: SPROUT } });
+    await createToken(rt, { name: "Sprouted", symbol: "SPRT1", quoteAsset: "SPROUT", tradeFeeBps: 300 });
+    expect(sent[0]!.cfg.quoteAsset).toBe(9);
+    // The fee is paid in INJ whatever the quote; nothing else rides the create.
+    expect(sent[0]!.value).toBe(10n ** 18n);
+  });
+
+  it("USDC at the default tier launches on slot 2", async () => {
+    const { rt, sent } = atomicCreateVenue({ 2: { fee: 100, pairAsset: USDC }, 7: { fee: 300, pairAsset: USDC } });
+    await createToken(rt, { name: "Dollar", symbol: "DLR1", quoteAsset: "USDC" });
+    expect(sent[0]!.cfg.quoteAsset).toBe(2);
+  });
+
+  it("refuses SPROUT while the chain has not enabled it, before spending", async () => {
+    const { rt, sent } = atomicCreateVenue();
+    await expect(createToken(rt, { name: "Early", symbol: "EARLY", quoteAsset: "SPROUT" })).rejects.toMatchObject({
+      code: "quote_disabled",
+      hint: expect.stringContaining("INJ (slot 1, 1% trade fee)"),
+    });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("an enabled tier with a disabled base names the tier to pick", async () => {
+    const { rt, sent } = atomicCreateVenue({ 9: { fee: 300, pairAsset: SPROUT } });
+    await expect(createToken(rt, { name: "Base", symbol: "BASE", quoteAsset: "SPROUT" })).rejects.toMatchObject({
+      code: "quote_disabled",
+      hint: expect.stringContaining("SPROUT (slot 9, 3% trade fee)"),
+    });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("a slot 8 carrying any other token than SPROUT's address reads as disabled", async () => {
+    const fake = `0x${"5e".repeat(20)}`;
+    const { rt, sent } = atomicCreateVenue({ 8: { fee: 100, pairAsset: fake } });
+    await expect(createToken(rt, { name: "Fake", symbol: "FAKE", quoteAsset: "SPROUT" })).rejects.toMatchObject({
+      code: "quote_disabled",
+    });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("refuses an opening buy the wallet holds no SPROUT for, before the launch exists", async () => {
+    const { rt, sent } = atomicCreateVenue(
+      { 8: { fee: 100, pairAsset: SPROUT } },
+      { [SPROUT.toLowerCase()]: 10n ** 18n },
+    );
+    await expect(
+      createToken(rt, { name: "Poor", symbol: "POOR", quoteAsset: "SPROUT", initialBuy: "1000" }),
+    ).rejects.toMatchObject({ code: "no_balance", message: expect.stringContaining("priced in SPROUT") });
+    expect(sent).toHaveLength(0);
+  });
+});
 
 describe("create on the atomic core", () => {
   it("sends createLaunch to 0x1333… with EXACTLY the creation fee as value", async () => {
@@ -295,5 +390,89 @@ describe("holder snapshots of an atomic launch", () => {
     );
     // The lowercase spelling is a different, EMPTY bank denom.
     expect(denom).toBe("erc20:0x86e8e94F3181b15d11bB0303b88d272AbD4fb00D");
+  });
+});
+
+describe("USD for a fee-tier slot follows its base asset", () => {
+  const venue = (items: { quoteAsset: number; rateUsd: string | null }[]) =>
+    new ShroomVenue(NET, {} as never, { quotePrices: async () => ({ items }) } as never, null);
+  const THOUSAND = 1_000n * 10n ** 18n;
+
+  it("SPROUT's 3% slot is priced at slot 8's rate, and USDC's at slot 2's", async () => {
+    expect(await venue([{ quoteAsset: 8, rateUsd: "0.0005" }]).usdValue(9, THOUSAND)).toBeCloseTo(0.5);
+    expect(await venue([{ quoteAsset: 2, rateUsd: "1" }]).usdValue(7, 5_000_000n)).toBeCloseTo(5);
+  });
+
+  it("falls back to the tier's own row when the base has none", async () => {
+    expect(await venue([{ quoteAsset: 9, rateUsd: "0.0005" }]).usdValue(9, THOUSAND)).toBeCloseTo(0.5);
+  });
+
+  it("a missing, null or zero rate is UNPRICED, never $0", async () => {
+    expect(await venue([]).usdValue(8, THOUSAND)).toBeNull();
+    expect(await venue([{ quoteAsset: 8, rateUsd: null }]).usdValue(9, THOUSAND)).toBeNull();
+    expect(await venue([{ quoteAsset: 8, rateUsd: "0" }]).usdValue(8, THOUSAND)).toBeNull();
+    expect(await venue([{ quoteAsset: 1, rateUsd: "7" }]).usdValue(10, THOUSAND)).toBeNull();
+  });
+});
+
+describe("curve trades on an ERC20 quote (SPROUT, slot 8)", () => {
+  const TOKEN = `0x${"77".repeat(20)}`;
+  function sproutVenue(balances: Record<string, bigint>) {
+    const writes: { address: string; functionName: string; args: unknown[]; value?: bigint }[] = [];
+    const signer = {
+      address: `0x${"12".repeat(20)}`,
+      readContract: async ({ address, functionName }: { address: string; functionName: string }) => {
+        switch (functionName) {
+          case "paused":
+            return false;
+          case "getLaunch":
+            return { ...tierLaunch(), quoteAsset: 8, pairAsset: SPROUT, tradeFeeBps: 100, bankDenom: `erc20:${SPROUT}` };
+          case "quoteBuy":
+            return [10n ** 24n, 10n ** 19n, 0n];
+          case "quoteSell":
+            return [5n * 10n ** 20n, 5n * 10n ** 18n];
+          case "balanceOf":
+            return balances[address.toLowerCase()] ?? 0n;
+          case "allowance":
+            return 0n;
+          default:
+            throw new Error(`unexpected read ${functionName}`);
+        }
+      },
+      writeTx: async (req: { address: string; functionName: string; args: unknown[]; value?: bigint }) => {
+        writes.push({ address: req.address, functionName: req.functionName, args: req.args, value: req.value });
+        return { status: "dry-run" as const, hash: null };
+      },
+    };
+    const pump = { quotePrices: async () => ({ items: [{ quoteAsset: 8, rateUsd: "0.0005" }] }) };
+    return { venue: new ShroomVenue(NET, signer as never, pump as never, null), writes };
+  }
+
+  it("a buy approves the core for SPROUT, then calls buy with no value", async () => {
+    const { venue, writes } = sproutVenue({ [SPROUT.toLowerCase()]: 5_000n * 10n ** 18n });
+    const res = await venue.buy(10_200n, "1000", 100);
+    expect(writes.map((w) => `${w.functionName}@${w.address}`)).toEqual([`approve@${SPROUT}`, `buy@${ATOMIC}`]);
+    expect(writes[0]!.args).toEqual([ATOMIC, maxUint256]);
+    expect(writes[1]!.value).toBeUndefined();
+    expect(res.quoteSymbol).toBe("SPROUT");
+  });
+
+  it("a wallet without the SPROUT is told to acquire it, before any approval", async () => {
+    const { venue, writes } = sproutVenue({});
+    await expect(venue.buy(10_200n, "1000", 100)).rejects.toMatchObject({
+      code: "no_balance",
+      message: expect.stringContaining("priced in SPROUT"),
+      hint: expect.stringContaining(SPROUT),
+    });
+    expect(writes).toHaveLength(0);
+  });
+
+  it("a sell approves the launch token and takes SPROUT back", async () => {
+    const { venue, writes } = sproutVenue({ [TOKEN.toLowerCase()]: 10n ** 24n });
+    const res = await venue.sell(10_200n, "all", 100);
+    expect(writes.map((w) => `${w.functionName}@${w.address}`)).toEqual([`approve@${TOKEN}`, `sell@${ATOMIC}`]);
+    expect(writes[0]!.args).toEqual([ATOMIC, maxUint256]);
+    expect(res.pairAmount).toBe("500");
+    expect(res.quoteSymbol).toBe("SPROUT");
   });
 });

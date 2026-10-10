@@ -32,7 +32,7 @@ Usage:
   trippy-mcp claim-code            mint a code to link this agent to your Terminal profile
   trippy-mcp identity <action>     the agent's ERC-8004 on-chain identity (Injective's
                                    ecosystem registry) — register | show | link | transfer
-  trippy-mcp sweep <asset> <amt>   send funds to the owner wallet (asset: INJ|USDC|SAI|0x…, amt or "all")
+  trippy-mcp sweep <asset> <amt>   send funds to the owner wallet (asset: INJ|USDC|SPROUT|SAI|0x…, amt or "all")
   trippy-mcp export-key --yes-i-understand   print the raw private key (DANGER)
   trippy-mcp version [--check]     running version, and whether a newer one is published
                                    (--check skips the 24h cache; TRIPPY_MCP_NO_UPDATE_CHECK=1 disables it)
@@ -144,7 +144,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const asset = rest[0];
       const amount = rest[1];
       if (!asset || !amount) {
-        out('usage: trippy-mcp sweep <INJ|USDC|SAI|0x…> <amount|"all">');
+        out('usage: trippy-mcp sweep <INJ|USDC|SPROUT|SAI|0x…> <amount|"all">');
         process.exitCode = 1;
         return;
       }

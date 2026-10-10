@@ -12,8 +12,11 @@ import { defineChain, type Address, type Chain } from "viem";
 
 export type NetworkName = "mainnet" | "testnet";
 
+/** The quote assets this package ships a name for. A slot's FEE TIER is not one: it names its base. */
+export type QuoteSymbol = "INJ" | "USDC" | "SAI" | "SPROUT";
+
 export interface QuoteAssetInfo {
-  symbol: "INJ" | "USDC" | "SAI";
+  symbol: QuoteSymbol;
   /** LaunchpadCore quote-asset slot id. */
   slot: number;
   /** ERC20 pair asset (WINJ9 for INJ — buyNative/sellNative wrap in-contract). */
@@ -210,13 +213,14 @@ export interface NetworkDef {
    * launch on a tier trades, prices and pays exactly like its base asset.
    *
    * Mirrors the pad's `QUOTE_FEE_TIERS` (frontend/src/chain/addresses.ts),
-   * which pins INJ's 3% tier to slot 6 on BOTH networks. Without this entry
-   * every slot-6 launch — about half of the atomic core's — failed
-   * `quoteInfo` with "unknown quote asset slot 6" and could not be quoted,
-   * bought or sold. `tradeFeeBps` is the tier's NOMINAL fee, for naming it in
-   * a menu; what a launch actually charges is its own snapshotted fee.
+   * which pins the 3% tiers to the same slots on BOTH networks: 6 → INJ (1),
+   * 7 → USDC (2), 9 → SPROUT (8). Without an entry every launch on that slot
+   * failed `quoteInfo` with "unknown quote asset slot N" and could not be
+   * quoted, bought or sold — slot 6 did exactly that to about half of the
+   * atomic core's launches. `tradeFeeBps` is the tier's NOMINAL fee, for naming
+   * it in a menu; what a launch actually charges is its own snapshotted fee.
    */
-  quoteFeeTiers: Record<number, { base: "INJ" | "USDC" | "SAI"; tradeFeeBps: number }>;
+  quoteFeeTiers: Record<number, { base: QuoteSymbol; tradeFeeBps: number }>;
   quoteAssets: Record<string, QuoteAssetInfo>;
   /** Choice v2 (Infinity CL on the EVM). Absent = no v2 venue on this network. */
   choiceV2?: ChoiceV2Config;
@@ -337,7 +341,11 @@ const MAINNET: NetworkDef = {
   // the default referral share goes to is an operator decision, and the atomic
   // core's own treasury (0x65Dc46Ee…) is codeless and could never claim it.
   defaultReferrer: "0xAB1C7326b8bcd3492FF56CdA88Ec40d0A417e40d",
-  quoteFeeTiers: { 6: { base: "INJ", tradeFeeBps: 300 } },
+  quoteFeeTiers: {
+    6: { base: "INJ", tradeFeeBps: 300 },
+    7: { base: "USDC", tradeFeeBps: 300 },
+    9: { base: "SPROUT", tradeFeeBps: 300 },
+  },
   quoteAssets: {
     INJ: {
       symbol: "INJ",
@@ -347,6 +355,10 @@ const MAINNET: NetworkDef = {
       decimals: 18,
       isNative: true,
     },
+    // The same pair asset, denom and slot on all three cores: the v2 core has
+    // carried it enabled since 2026-08-24 (read back 2026-10-10), and the atomic
+    // core leaves slot 2 unregistered until the pad Safe's `setQuoteAssetConfig`
+    // enables it there — `quoteMenu` reads that live, so nothing here changes.
     USDC: {
       symbol: "USDC",
       slot: 2,
@@ -360,6 +372,17 @@ const MAINNET: NetworkDef = {
       slot: 3,
       pairAsset: "0x8Dc3ECb97E6E5f08cd490bA3089DA0BB9D59ccB4",
       bankDenom: "factory/inj10aa0h5s0xwzv95a8pjhwluxcm5feeqygdk3lkm/SAI",
+      decimals: 18,
+      isNative: false,
+    },
+    // SPROUT, the pad's own token: launch 10150 on the atomic core, graduated
+    // to the Choice v2 wINJ/SPROUT pool. 🔴 Dozens of fake "SPROUT" ERC20s exist,
+    // so it is identified by THIS address only, never by symbol.
+    SPROUT: {
+      symbol: "SPROUT",
+      slot: 8,
+      pairAsset: "0x503f2A7bAc1E2ff2800Aa92EdB82abeF0bFA631E",
+      bankDenom: "erc20:0x503f2A7bAc1E2ff2800Aa92EdB82abeF0bFA631E",
       decimals: 18,
       isNative: false,
     },
@@ -478,7 +501,13 @@ const TESTNET: NetworkDef = {
     claimBase: "https://trippyinj.xyz/claim",
   },
   defaultReferrer: "0xBf08c09Fe227ada4A86d279e98E695344848d33D",
-  quoteFeeTiers: { 6: { base: "INJ", tradeFeeBps: 300 } },
+  // Same slot numbers as mainnet. Slots 7-9 are unregistered on testnet today;
+  // `quoteMenu` reads that live and offers none of them until they are.
+  quoteFeeTiers: {
+    6: { base: "INJ", tradeFeeBps: 300 },
+    7: { base: "USDC", tradeFeeBps: 300 },
+    9: { base: "SPROUT", tradeFeeBps: 300 },
+  },
   quoteAssets: {
     INJ: {
       symbol: "INJ",
@@ -501,6 +530,17 @@ const TESTNET: NetworkDef = {
       slot: 3,
       pairAsset: "0x7E6f4a01f2943d7d68C89999cFFC187A09f5D8A1",
       bankDenom: "factory/inj1tf79ks9y52f5wv9wywafc0era6uy6km8x40lny/SAI",
+      decimals: 18,
+      isNative: false,
+    },
+    // Testnet SPROUT (launch 2 on the 2026-09-08 core), the pad frontend's
+    // `sproutToken`. Its bank denom is the erc20: form, as the testnet Choice v2
+    // Vault's balance reports it.
+    SPROUT: {
+      symbol: "SPROUT",
+      slot: 8,
+      pairAsset: "0xEDF52618Cf3C61Be2a721d964C5064c87970331E",
+      bankDenom: "erc20:0xEDF52618Cf3C61Be2a721d964C5064c87970331E",
       decimals: 18,
       isNative: false,
     },
@@ -549,6 +589,17 @@ export function quoteAssetBySlot(def: NetworkDef, slot: number): QuoteAssetInfo 
   const tier = def.quoteFeeTiers?.[slot];
   const base = tier ? def.quoteAssets[tier.base] : undefined;
   return base ? { ...base, slot } : undefined;
+}
+
+/**
+ * The base slot a fee-tier slot belongs to (6 → 1, 7 → 2, 9 → 8); any other
+ * slot is its own base. Asset-level lookups (USD rate, symbol, routing) follow
+ * the base, while fees are always read per launch.
+ */
+export function baseQuoteSlot(def: NetworkDef, slot: number): number {
+  const tier = def.quoteFeeTiers?.[slot];
+  const base = tier ? def.quoteAssets[tier.base] : undefined;
+  return base ? base.slot : slot;
 }
 
 /** Every slot that is `symbol`'s asset: its base slot and its fee tiers. */

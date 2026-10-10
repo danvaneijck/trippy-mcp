@@ -182,6 +182,8 @@ describe("create_token", () => {
         }),
       },
       shroom: {
+        // create_token reads the live quote menu before anything else.
+        quoteMenu: async () => [{ symbol: "INJ", slot: 1, tradeFeeBps: 100, enabled: true }],
         createLaunch: async () => ({
           onchainId: "114",
           core: CORE_V2,

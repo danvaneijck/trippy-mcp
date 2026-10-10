@@ -129,6 +129,26 @@ export class ChoiceV2Venue {
     return { address: this.cfg.winj, native: true, symbol: "INJ", decimals: 18 };
   }
 
+  /**
+   * The currency a launch's graduated pool pairs its token with: the launch's
+   * own quote asset, as `getLaunch().pairAsset` reports it. wINJ is native INJ
+   * (the router wraps and unwraps); USDC, SPROUT and any other ERC20 quote is
+   * that ERC20, named and scaled from the network's quote table — matched by
+   * ADDRESS, because other tokens share those symbols — or, for a quote this
+   * build ships no entry for, from the token itself.
+   */
+  async pairCounter(pairAsset: Address | undefined): Promise<Counter> {
+    if (!pairAsset || pairAsset.toLowerCase() === this.cfg.winj.toLowerCase()) return this.nativeCounter;
+    const address = getAddress(pairAsset);
+    const known = Object.values(this.net.quoteAssets).find((q) => q.pairAsset.toLowerCase() === address.toLowerCase());
+    if (known) return { address, native: false, symbol: known.symbol, decimals: known.decimals };
+    const [decimals, symbol] = await Promise.all([
+      this.read<number>(address, ERC20_ABI, "decimals", []),
+      this.read<string>(address, ERC20_ABI, "symbol", []).catch(() => address),
+    ]);
+    return { address, native: false, symbol: String(symbol), decimals: Number(decimals) };
+  }
+
   isAllowedHook(hooks: string): boolean {
     const h = hooks.toLowerCase();
     return h === ZERO || this.cfg.allowedHooks.some((a) => a.address.toLowerCase() === h);
@@ -148,8 +168,17 @@ export class ChoiceV2Venue {
    * `settler` is the launch's OWN snapshotted settler (from `getLaunch`), and
    * it has to be one of the pinned InfinitySettlers — a launch that graduated
    * the CosmWasm way has no v2 position and must never be sent here.
+   *
+   * The pool pairs the token with the launch's own quote asset, so the route's
+   * counter is `pairAsset`'s (see `pairCounter`) unless the caller passes one
+   * for the same currency (wINJ as an ERC20 rather than native INJ, say).
+   * 🔴 It used to be native INJ unconditionally, which `finishRoute` refuses
+   * on a USDC- or SPROUT-quoted launch's pool: none of those could trade.
    */
-  async launchRoute(launch: { settler: Address; onchainId: bigint; token: Address }): Promise<V2Route> {
+  async launchRoute(
+    launch: { settler: Address; onchainId: bigint; token: Address; pairAsset?: Address },
+    counter?: Counter,
+  ): Promise<V2Route> {
     const settler = launch.settler.toLowerCase();
     if (!this.cfg.infinitySettlers.some((s) => s.toLowerCase() === settler)) {
       throw new ToolError(
@@ -172,7 +201,8 @@ export class ChoiceV2Venue {
       [pos.tokenId],
     );
     const key = normKey(rawKey);
-    return this.finishRoute(key, getAddress(launch.token), this.nativeCounter, "launch-locker");
+    const own = counter ?? (await this.pairCounter(launch.pairAsset));
+    return this.finishRoute(key, getAddress(launch.token), own, "launch-locker");
   }
 
   /**
@@ -303,9 +333,15 @@ export class ChoiceV2Venue {
     const held = await this.inputBalance(route, side);
     const q = await this.quote(route, side, amountIn, slippageBps);
     if (held < amountIn) {
+      // A buy on a pool paired with an ERC20 (a USDC- or SPROUT-quoted
+      // graduate) spends that ERC20, which a wallet funded with INJ lacks.
+      const erc20Buy = side === "buy" && !route.counter.native;
       throw new ToolError(
         "no_balance",
         `wallet holds ${formatUnits(held, q.inDecimals)} ${q.inSymbol} but this swap spends ${formatUnits(amountIn, q.inDecimals)}`,
+        erc20Buy
+          ? `this pool pairs the token with ${route.counter.symbol}: acquire ${route.counter.symbol} first: fund the agent wallet with it, or buy it with \`buy\` using query "${route.counter.address}" (by address: other tokens share the symbol)`
+          : undefined,
       );
     }
 

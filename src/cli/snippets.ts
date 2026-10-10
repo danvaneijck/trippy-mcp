@@ -38,7 +38,7 @@ Fund the agent wallet (this is its trading budget — start small):
   EVM form:    ${evm}
   Cosmos form: ${inj}
 
-Send INJ (gas + trading) and optionally USDC/SAI from any Injective wallet.
+Send INJ (gas + trading) and optionally USDC/SPROUT/SAI from any Injective wallet.
 Note: block explorers and MetaMask may show a ZERO balance for this address —
 that is an Injective EVM RPC quirk. \`trippy-mcp status\` shows the true bank
 balance.

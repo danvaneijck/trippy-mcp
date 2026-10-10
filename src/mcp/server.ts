@@ -357,7 +357,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "portfolio",
-    "Every token the agent wallet holds, valued in USD: amount, indicative price, USD value per holding and the total. Prices come from the quote-rate feed (INJ/USDC/SAI), the last curve trade (active launches), Choice token stats, or the Choice v2 indexer for EVM tokens that trade only there — always `quote` before trading on them. Spot holdings of THIS agent wallet only — bank balances plus the CW20 contracts this build knows to probe (SHROOM among them): perp positions and trading-subaccount balances are not included and belong to a different wallet (Injective SDK `account_positions`/`account_balances`). A CW20 balance cannot be enumerated from the chain, so a CW20 the package does not know about is invisible here even though `quote`/`sell` handle it fine — add its contract to `cw20Tokens` in config.json to surface it." + UNTRUSTED_NOTE,
+    "Every token the agent wallet holds, valued in USD: amount, indicative price, USD value per holding and the total. Prices come from the quote-rate feed (INJ/USDC/SPROUT/SAI), the last curve trade (active launches), Choice token stats, or the Choice v2 indexer for EVM tokens that trade only there — always `quote` before trading on them. Spot holdings of THIS agent wallet only — bank balances plus the CW20 contracts this build knows to probe (SHROOM among them): perp positions and trading-subaccount balances are not included and belong to a different wallet (Injective SDK `account_positions`/`account_balances`). A CW20 balance cannot be enumerated from the chain, so a CW20 the package does not know about is invisible here even though `quote`/`sell` handle it fine — add its contract to `cw20Tokens` in config.json to surface it." + UNTRUSTED_NOTE,
     {},
     (rt2) => t.portfolio(rt2),
   );
@@ -365,7 +365,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "quote",
-    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; a launch graduated from the ATOMIC core, and any EVM token with a Choice v2 pool, quotes ON CHAIN through Choice v2's CLQuoter (single-hop, the launch hook's fee included); other graduated/DEX tokens quote through the Choice v1 aggregator (counterToken defaults to INJ). A token listed on BOTH Choice venues is quoted on both and the better output is reported, with the other as `alternative`. Buy amounts are in the counter/quote asset; sell amounts in the token, and a sell takes `all` — sized against the live position exactly as `sell` would, so the whole-position trade can be previewed rather than retyped from `portfolio`. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
+    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; a launch graduated from the ATOMIC core, and any EVM token with a Choice v2 pool, quotes ON CHAIN through Choice v2's CLQuoter (single-hop, the launch hook's fee included); other graduated/DEX tokens quote through the Choice v1 aggregator (counterToken defaults to INJ). A token listed on BOTH Choice venues is quoted on both and the better output is reported, with the other as `alternative`. Buy amounts are in the counter/quote asset (a launch's own quote asset on its curve and on its graduated Choice v2 pool: INJ, USDC or SPROUT); sell amounts in the token, and a sell takes `all` — sized against the live position exactly as `sell` would, so the whole-position trade can be previewed rather than retyped from `portfolio`. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
       SPOT_ONLY_NOTE,
     {
       query,
@@ -374,7 +374,7 @@ export async function serve(): Promise<void> {
         .string()
         .describe('human units (e.g. "0.5"); "all" on a sell = the whole position'),
       slippageBps,
-      counterToken: z.string().optional().describe("counter asset (default INJ). Choice v1: a denom or CW20. Choice v2: INJ or an 0x / erc20: ERC20 paired directly with the token."),
+      counterToken: z.string().optional().describe("counter asset. Default INJ, except a launch graduated onto Choice v2, which defaults to its OWN quote asset (a USDC- or SPROUT-quoted launch's pool pairs it with USDC or SPROUT, so buy amounts are in that asset). Choice v1: a denom or CW20. Choice v2: INJ or an 0x / erc20: ERC20 paired directly with the token."),
     },
     (rt2, a: t.QuoteArgs) => t.quote(rt2, a),
   );
@@ -382,7 +382,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "buy",
-    "Execute a buy. Auto-routes like `quote` (on a token listed on both Choice venues, executes where the output is larger). On Choice v2 the swap calldata is built locally, never taken from an API, and native INJ is wrapped inside the router. Spends the quote/counter asset from the agent wallet; enforced by the local policy engine (per-tx cap, 24h budget, contract allowlist) — policy denials come back as errors. Returns the tx hash and fill details." +
+    "Execute a buy. Auto-routes like `quote` (on a token listed on both Choice venues, executes where the output is larger). On Choice v2 the swap calldata is built locally, never taken from an API, and native INJ is wrapped inside the router. Spends the quote/counter asset from the agent wallet: on a USDC- or SPROUT-quoted launch (curve or graduated pool) that is USDC or SPROUT, which the wallet must already hold (refused up front, naming the asset, when it does not); enforced by the local policy engine (per-tx cap, 24h budget, contract allowlist) — policy denials come back as errors. Returns the tx hash and fill details." +
       SPOT_ONLY_NOTE,
     { query, amount: z.string(), slippageBps, counterToken: z.string().optional() },
     (rt2, a: Omit<t.QuoteArgs, "side">) => t.buy(rt2, a),
@@ -421,17 +421,17 @@ export async function serve(): Promise<void> {
       website: z.string().optional(),
       telegram: z.string().optional(),
       quoteAsset: z
-        .enum(["INJ", "USDC", "SAI"])
+        .enum(["INJ", "USDC", "SPROUT", "SAI"])
         .optional()
         .describe(
-          "bonding-curve quote asset (default INJ). Must be enabled on the current core — mainnet's atomic core takes INJ only today; a disabled quote is refused up front with the list of enabled ones.",
+          "bonding-curve quote asset (default INJ): what buyers pay with, what the raise and fees are counted in, and what the graduated Choice v2 pool pairs the token with. USDC and SPROUT are ERC20 quotes: buying needs that token in the wallet (plus an exact approval, done for you). Only quotes the current core reports ENABLED are accepted, read live at call time — a disabled one is refused before anything is spent, naming the enabled ones. explain(\"shroom_pad_quotes\") lists what is enabled right now.",
         ),
       tradeFeeBps: z
         .number()
         .int()
         .optional()
         .describe(
-          "the quote's FEE TIER, in bps of every trade: 100 (1%, the default) or a higher tier the core offers on the same asset (INJ has a 300 = 3% tier). Frozen onto the launch, and kept for life by its graduated Choice v2 pool. The creator takes the same share of either tier, so a higher tier pays the creator more per trade and costs every trader more. Refused unless that tier is enabled live.",
+          "the quote's FEE TIER, in bps of every trade: 100 (1%, the default) or 300 (3%), each a separate quote slot on the same asset (INJ, USDC and SPROUT each have both). Frozen onto the launch, and kept for life by its graduated Choice v2 pool. The creator takes the same share of either tier, so a higher tier pays the creator more per trade and costs every trader more. Refused unless that tier is enabled live.",
         ),
       curve: z
         .string()
@@ -468,7 +468,7 @@ export async function serve(): Promise<void> {
         .string()
         .optional()
         .describe(
-          'holder gate token: "INJ" / "USDC" / "SAI", or an 0x ERC20 address. With gateDiscountBps > 0 it is a FEE DISCOUNT for qualifying holders and restricts nobody; with 0 it is a hard ACCESS gate that stops everyone else buying while the window is open.',
+          'holder gate token: "INJ" / "USDC" / "SPROUT" / "SAI", or an 0x ERC20 address. With gateDiscountBps > 0 it is a FEE DISCOUNT for qualifying holders and restricts nobody; with 0 it is a hard ACCESS gate that stops everyone else buying while the window is open.',
         ),
       gateMinBalance: z
         .string()
@@ -537,7 +537,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "sweep",
-    'Send funds back to the owner wallet fixed at init — the ONLY destination sweeps can use. `asset` is INJ | USDC | SAI | an ERC20 address; `amount` human units or "all" (INJ keeps a 0.05 gas reserve). This is not a general transfer tool and takes no destination: arbitrary sends are deliberately impossible here, so do not attempt to reach another address through it (the Injective SDK `transfer_send`, signed by the operator\'s own wallet, is the tool for that).',
+    'Send funds back to the owner wallet fixed at init — the ONLY destination sweeps can use. `asset` is INJ | USDC | SPROUT | SAI | an ERC20 address; `amount` human units or "all" (INJ keeps a 0.05 gas reserve). This is not a general transfer tool and takes no destination: arbitrary sends are deliberately impossible here, so do not attempt to reach another address through it (the Injective SDK `transfer_send`, signed by the operator\'s own wallet, is the tool for that).',
     { asset: z.string(), amount: z.string() },
     (rt2, a: { asset: string; amount: string }) => t.sweepTool(rt2, a),
   );

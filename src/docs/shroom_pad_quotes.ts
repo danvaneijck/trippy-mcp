@@ -16,10 +16,10 @@ import { SNAPSHOT_NOTE, UNKNOWN, type LiveParams, type QuoteParams } from "./par
 export const id = "shroom_pad_quotes";
 export const title = "SHROOM Pad: choosing a quote asset";
 export const summary =
-  "What INJ / USDC / SAI (and any newer slot) actually change about a launch — creator take, graduation target, decimals.";
+  "What INJ / USDC / SPROUT / SAI (and any newer slot) actually change about a launch — creator take, graduation target, decimals.";
 
 export const sources = [
-  "LaunchpadCore.getQuoteAssetConfig(slot) for slots 0-7 (live read)",
+  "LaunchpadCore.getQuoteAssetConfig(slot) for slots 0-9 (live read)",
   "LaunchpadCore.referralShareBps (live read)",
 ];
 
@@ -27,6 +27,7 @@ export const sources = [
 const CHARACTER: Record<string, string> = {
   INJ: "The native, most liquid quote. Buys and sells go through buyNative/sellNative with msg.value, so a trade needs no ERC20 approval and no wrapping step. This is the default for `create_token` and the counter asset Choice routes against by default, which makes it the cheapest option to enter and exit.",
   USDC: "A stable-denominated raise: the graduation target is a dollar amount rather than a moving INJ amount, so the size of the raise is knowable up front. FOOTGUN: USDC is 6-decimal, not 18. Every base-unit amount on a USDC launch is 1e6-scaled. The tools convert for you, but any arithmetic you do yourself against raw amounts must use 6.",
+  SPROUT: "The launchpad's own token as the quote. Buyers must hold SPROUT (an 18-decimal ERC20 that trades on Choice v2 against wINJ), every buy and sell is an ERC20 approve plus a curve call, and the raise, the fees and the graduated pool are all SPROUT-denominated, so the dollar size of each moves with SPROUT's price. Many fake tokens also call themselves SPROUT: the real one is identified by its pair-asset ADDRESS below, never by symbol.",
   SAI: "The creator-incentive quote: the creator's share of the trade fee is set far above the other quotes, so the creator earns materially more per unit of volume — and keeps earning it after graduation, because the CLMM pool's fees stream on the same split. SAI is also the only asset allowlisted as a holder-discount gate token, so a SAI-quoted launch is the one that can reward SAI holders with a fee discount.",
 };
 
@@ -100,7 +101,7 @@ token will trade well. The quote asset changes the terms, not the outcome.
    a factor of a trillion.
 2. **Slots beyond the ones listed can exist.** Quote assets are keyed by a
    uint8 and can be added by the owner without a contract redeploy. The table
-   above is read from the chain at call time for slots 0-7, so it shows what
+   above is read from the chain at call time for slots 0-9, so it shows what
    is actually enabled right now, not what this package shipped knowing about.
 
 ${SNAPSHOT_NOTE}`;

@@ -178,7 +178,8 @@ export interface ApiTrade {
 
 export interface QuotePriceRow {
   quoteAsset: number;
-  rateUsd: string;
+  /** Null (or absent) for a slot the API cannot price yet — read it as UNPRICED, never $0. */
+  rateUsd: string | null;
   source: string;
   fetchedAt: string;
 }

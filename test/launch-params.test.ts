@@ -265,6 +265,8 @@ describe("create_token reports the window it got", () => {
         }),
       },
       shroom: {
+        // create_token reads the live quote menu before anything else.
+        quoteMenu: async () => [{ symbol: "INJ", slot: 1, tradeFeeBps: 100, enabled: true }],
         createLaunch: async () => ({
           onchainId: "114",
           core: "0xd948740da926E8908A08414879490d0D8F96D463",

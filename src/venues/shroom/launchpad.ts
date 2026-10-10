@@ -22,8 +22,9 @@ import { formatUnits, maxUint256, parseUnits, zeroAddress, type Address } from "
 
 import type { PumpApi } from "../../api/pump.js";
 import type { EvmSigner, WriteTxResult } from "../../chain/evm.js";
-import type { CoreDeployment, NetworkDef, QuoteAssetInfo } from "../../chain/networks.js";
+import type { CoreDeployment, NetworkDef, QuoteAssetInfo, QuoteSymbol } from "../../chain/networks.js";
 import {
+  baseQuoteSlot,
   coreDeploymentFor,
   currentCoreDeployment,
   quoteAssetBySlot,
@@ -465,9 +466,10 @@ export class ShroomVenue {
    *
    * Never hard-coded: quotes are enabled and disabled by a core-admin
    * transaction with no redeploy, and the atomic mainnet core shipped with INJ
-   * (1%) and its 3% tier enabled and USDC/SAI not registered at all. A slot
-   * whose pair asset is not its base asset's is reported disabled, the same
-   * rule the pad's create form applies before it offers a tier.
+   * (1%) and its 3% tier enabled and USDC/SAI/SPROUT not registered at all,
+   * with USDC (2, 7) and SPROUT (8, 9) to be enabled later by the pad Safe. A
+   * slot whose pair asset is not its base asset's is reported disabled, the
+   * same rule the pad's create form applies before it offers a tier.
    */
   async quoteMenu(): Promise<
     { symbol: string; slot: number; tradeFeeBps: number; enabled: boolean }[]
@@ -598,19 +600,33 @@ export class ShroomVenue {
     return q;
   }
 
-  /** USD value of `amountWei` of the given quote asset (pump quote-prices). */
+  /**
+   * USD value of `amountWei` of the given quote asset (pump quote-prices), or
+   * null when the asset has no usable rate.
+   *
+   * A fee-tier slot is priced at its BASE asset's rate (9 → SPROUT's slot 8):
+   * the API copies a tier's rate from its base ("as:INJ"), but a tier it has
+   * not learned yet must not read as unpriced while its base is priced. The
+   * tier's own row is the fallback. A missing, null, zero or negative rate is
+   * UNPRICED — null, which the policy refuses as such — never a $0 that would
+   * pass every cap.
+   */
   async usdValue(slot: number, amountWei: bigint): Promise<number | null> {
-    const q = this.quoteInfo(slot);
+    const q = quoteAssetBySlot(this.net, slot);
+    if (!q) return null;
     try {
       if (!this.priceCache || Date.now() - this.priceCache.at > PRICE_CACHE_MS) {
         const { items } = await this.pump.quotePrices();
-        this.priceCache = {
-          at: Date.now(),
-          bySlot: new Map(items.map((r) => [r.quoteAsset, Number(r.rateUsd)])),
-        };
+        const bySlot = new Map<number, number>();
+        for (const r of items) {
+          const rate = r.rateUsd == null ? NaN : Number(r.rateUsd);
+          if (Number.isFinite(rate) && rate > 0) bySlot.set(Number(r.quoteAsset), rate);
+        }
+        this.priceCache = { at: Date.now(), bySlot };
       }
-      const rate = this.priceCache.bySlot.get(slot);
-      if (rate === undefined || !Number.isFinite(rate)) return null;
+      const rate =
+        this.priceCache.bySlot.get(baseQuoteSlot(this.net, slot)) ?? this.priceCache.bySlot.get(slot);
+      if (rate === undefined) return null;
       return Number(formatUnits(amountWei, q.decimals)) * rate;
     } catch {
       return null;
@@ -707,14 +723,19 @@ export class ShroomVenue {
 
   // ---- approvals -----------------------------------------------------------
 
+  /**
+   * Let the core pull `token` (the pair asset on an ERC20 buy, the launch token
+   * on a sell) when the standing allowance does not cover `need`.
+   */
   private async ensureApproval(token: Address, need: bigint): Promise<void> {
-    const have = await this.signer.readContract<bigint>({
-      address: token,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args: [this.signer.address, this.core],
-    });
-    if (have >= need) return;
+    const allowance = () =>
+      this.signer.readContract<bigint>({
+        address: token,
+        abi: ERC20_ABI,
+        functionName: "allowance",
+        args: [this.signer.address, this.core],
+      });
+    if ((await allowance()) >= need) return;
     await this.signer.writeTx({
       address: token,
       abi: ERC20_ABI,
@@ -722,6 +743,9 @@ export class ShroomVenue {
       args: [this.core, maxUint256],
       // Security-relevant counterparty is the SPENDER — always the core.
       intent: { kind: "approve", target: this.core, detail: `approve ${token} → LaunchpadCore` },
+      // The trade right after spends this allowance, so a lagging receipt must
+      // not let it run first.
+      confirm: async () => (await allowance()) >= need,
     });
   }
 
@@ -759,6 +783,20 @@ export class ShroomVenue {
           "guard_window",
           `guard window caps each wallet at ${formatUnits(cap, q.decimals)} ${q.symbol} until ${new Date(Number(launch.guardWindowEndsAt) * 1000).toISOString()}, and this buy is ${amountHuman}`,
           "buy up to the cap now and the rest once the window closes",
+        );
+      }
+    }
+
+    // An ERC20 quote (USDC, SPROUT, SAI) is spent from the wallet's token
+    // balance, not its INJ — and an agent funded with INJ alone holds none. Say
+    // so, by asset, before an approval is spent on a buy that cannot fill.
+    if (!q.isNative) {
+      const held = await this.erc20Balance(q.pairAsset, this.signer.address).catch(() => null);
+      if (held !== null && held < pairIn) {
+        throw new ToolError(
+          "no_balance",
+          `launch #${launchId} is priced in ${q.symbol}: this buy spends ${amountHuman} ${q.symbol} and the agent wallet holds ${formatUnits(held, q.decimals)}: acquire ${q.symbol} first`,
+          `fund the agent wallet with ${q.symbol}, or buy it with \`buy\` using query "${q.pairAsset}" (by address: other tokens share the symbol)`,
         );
       }
     }
@@ -1081,10 +1119,11 @@ export class ShroomVenue {
 
   async createLaunch(opts: {
     meta: LaunchMetadata;
-    quoteSymbol: "INJ" | "USDC" | "SAI";
+    quoteSymbol: QuoteSymbol;
     /**
      * The exact quote slot, when the caller picked a fee tier of `quoteSymbol`
-     * (INJ's 3% tier is slot 6). Omitted = the asset's base slot.
+     * (the 3% tiers are slots 6, 7 and 9 for INJ, USDC and SPROUT). Omitted =
+     * the asset's base slot.
      */
     quoteSlot?: number;
     /**
