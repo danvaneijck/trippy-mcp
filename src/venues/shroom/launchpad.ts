@@ -22,7 +22,7 @@ import { formatUnits, maxUint256, parseUnits, zeroAddress, type Address } from "
 
 import type { PumpApi } from "../../api/pump.js";
 import type { EvmSigner, WriteTxResult } from "../../chain/evm.js";
-import type { CoreDeployment, NetworkDef, QuoteAssetInfo } from "../../chain/networks.js";
+import type { CoreDeployment, NetworkDef, QuoteAssetInfo, QuoteSymbol } from "../../chain/networks.js";
 import {
   coreDeploymentFor,
   currentCoreDeployment,
@@ -465,9 +465,10 @@ export class ShroomVenue {
    *
    * Never hard-coded: quotes are enabled and disabled by a core-admin
    * transaction with no redeploy, and the atomic mainnet core shipped with INJ
-   * (1%) and its 3% tier enabled and USDC/SAI not registered at all. A slot
-   * whose pair asset is not its base asset's is reported disabled, the same
-   * rule the pad's create form applies before it offers a tier.
+   * (1%) and its 3% tier enabled and USDC/SAI/SPROUT not registered at all,
+   * with USDC (2, 7) and SPROUT (8, 9) to be enabled later by the pad Safe. A
+   * slot whose pair asset is not its base asset's is reported disabled, the
+   * same rule the pad's create form applies before it offers a tier.
    */
   async quoteMenu(): Promise<
     { symbol: string; slot: number; tradeFeeBps: number; enabled: boolean }[]
@@ -1081,10 +1082,11 @@ export class ShroomVenue {
 
   async createLaunch(opts: {
     meta: LaunchMetadata;
-    quoteSymbol: "INJ" | "USDC" | "SAI";
+    quoteSymbol: QuoteSymbol;
     /**
      * The exact quote slot, when the caller picked a fee tier of `quoteSymbol`
-     * (INJ's 3% tier is slot 6). Omitted = the asset's base slot.
+     * (the 3% tiers are slots 6, 7 and 9 for INJ, USDC and SPROUT). Omitted =
+     * the asset's base slot.
      */
     quoteSlot?: number;
     /**

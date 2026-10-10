@@ -421,17 +421,17 @@ export async function serve(): Promise<void> {
       website: z.string().optional(),
       telegram: z.string().optional(),
       quoteAsset: z
-        .enum(["INJ", "USDC", "SAI"])
+        .enum(["INJ", "USDC", "SPROUT", "SAI"])
         .optional()
         .describe(
-          "bonding-curve quote asset (default INJ). Must be enabled on the current core — mainnet's atomic core takes INJ only today; a disabled quote is refused up front with the list of enabled ones.",
+          "bonding-curve quote asset (default INJ): what buyers pay with, what the raise and fees are counted in, and what the graduated Choice v2 pool pairs the token with. USDC and SPROUT are ERC20 quotes: buying needs that token in the wallet (plus an exact approval, done for you). Only quotes the current core reports ENABLED are accepted, read live at call time — a disabled one is refused before anything is spent, naming the enabled ones. explain(\"shroom_pad_quotes\") lists what is enabled right now.",
         ),
       tradeFeeBps: z
         .number()
         .int()
         .optional()
         .describe(
-          "the quote's FEE TIER, in bps of every trade: 100 (1%, the default) or a higher tier the core offers on the same asset (INJ has a 300 = 3% tier). Frozen onto the launch, and kept for life by its graduated Choice v2 pool. The creator takes the same share of either tier, so a higher tier pays the creator more per trade and costs every trader more. Refused unless that tier is enabled live.",
+          "the quote's FEE TIER, in bps of every trade: 100 (1%, the default) or 300 (3%), each a separate quote slot on the same asset (INJ, USDC and SPROUT each have both). Frozen onto the launch, and kept for life by its graduated Choice v2 pool. The creator takes the same share of either tier, so a higher tier pays the creator more per trade and costs every trader more. Refused unless that tier is enabled live.",
         ),
       curve: z
         .string()
@@ -468,7 +468,7 @@ export async function serve(): Promise<void> {
         .string()
         .optional()
         .describe(
-          'holder gate token: "INJ" / "USDC" / "SAI", or an 0x ERC20 address. With gateDiscountBps > 0 it is a FEE DISCOUNT for qualifying holders and restricts nobody; with 0 it is a hard ACCESS gate that stops everyone else buying while the window is open.',
+          'holder gate token: "INJ" / "USDC" / "SPROUT" / "SAI", or an 0x ERC20 address. With gateDiscountBps > 0 it is a FEE DISCOUNT for qualifying holders and restricts nobody; with 0 it is a hard ACCESS gate that stops everyone else buying while the window is open.',
         ),
       gateMinBalance: z
         .string()

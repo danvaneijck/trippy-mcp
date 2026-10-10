@@ -33,6 +33,7 @@ import {
   coreDeployments,
   quoteAssetBySlot,
   type QuoteAssetInfo,
+  type QuoteSymbol,
 } from "../chain/networks.js";
 import { isWinjDenom, unwrapWinj, winjBalance } from "../chain/winj.js";
 import { smartQuery } from "../airdrops/wasm.js";
@@ -1272,8 +1273,8 @@ export interface CreateTokenArgs {
   twitter?: string;
   website?: string;
   telegram?: string;
-  quoteAsset?: "INJ" | "USDC" | "SAI";
-  /** The quote's fee tier in bps (100 = the base slot, 300 = INJ's 3% tier). */
+  quoteAsset?: QuoteSymbol;
+  /** The quote's fee tier in bps (100 = the base slot, 300 = the asset's 3% tier slot). */
   tradeFeeBps?: number;
   /**
    * Bonding curve, by preset name or curveId. Only where a CurveRegistry
@@ -1287,7 +1288,7 @@ export interface CreateTokenArgs {
   devBuyMaxBps?: number;
   /** Launch with a delay shorter than the keeper bind reliably fits inside. */
   allowShortDevBuyWindow?: boolean;
-  /** "INJ"/"USDC"/"SAI" or an 0x ERC20 address. */
+  /** "INJ"/"USDC"/"SPROUT"/"SAI" or an 0x ERC20 address. */
   gateToken?: string;
   gateMinBalance?: string;
   gateDiscountBps?: number;
@@ -1365,6 +1366,7 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
   const quoteSlot = await resolveQuoteSlot(rt, quoteSymbol, args.tradeFeeBps);
   const chosen = await resolveCurve(rt, args.curve, quoteSymbol, quoteSlot);
   const gate = await resolveGateArgs(rt, args);
+  await assertCanFundInitialBuy(rt, quoteSlot, args.initialBuy);
   if (args.devBuyMaxBps && !args.devBuyDelaySeconds) {
     throw new ToolError(
       "bad_dev_buy",
@@ -1501,22 +1503,38 @@ export async function createToken(rt: Runtime, args: CreateTokenArgs): Promise<u
  * curve is the quote asset's and there is nothing to report.
  */
 /**
- * Turn `tradeFeeBps` into the quote slot that charges it, from the core's LIVE
- * quote menu.
+ * Turn `quoteAsset` + `tradeFeeBps` into the quote slot that charges it, from
+ * the core's LIVE quote menu.
  *
- * Omitted means the asset's base slot, exactly as before tiers existed. A tier
- * is matched on the fee the chain reports for the slot, not on the nominal
- * figure in the network table, so a tier whose fee was retuned is still named
- * correctly — and one that is not enabled is refused here, with the menu,
- * rather than reverting `UnsupportedQuoteAsset` after the image upload.
+ * Omitted fee means the asset's base slot, exactly as before tiers existed. A
+ * tier is matched on the fee the chain reports for the slot, not on the
+ * nominal figure in the network table, so a tier whose fee was retuned is
+ * still named correctly. Either way a slot the chain does not report enabled
+ * (with this package's pair asset) is refused here, with the menu, before the
+ * image upload and the creation fee — never left to revert
+ * `UnsupportedQuoteAsset`. USDC and SPROUT ship in the table while still
+ * disabled on chain, so this is the refusal an agent meets until they open.
  */
 async function resolveQuoteSlot(
   rt: Runtime,
-  quoteSymbol: "INJ" | "USDC" | "SAI",
+  quoteSymbol: QuoteSymbol,
   tradeFeeBps: number | undefined,
-): Promise<number | undefined> {
-  if (tradeFeeBps === undefined) return undefined;
-  const menu = (await rt.shroom.quoteMenu()).filter((m) => m.symbol === quoteSymbol);
+): Promise<number> {
+  const asset = rt.net.quoteAssets[quoteSymbol];
+  if (!asset) throw new ToolError("bad_quote", `this network has no ${quoteSymbol} quote asset`);
+  const all = await rt.shroom.quoteMenu();
+  const menu = all.filter((m) => m.symbol === quoteSymbol);
+  if (tradeFeeBps === undefined) {
+    if (menu.find((m) => m.slot === asset.slot)?.enabled) return asset.slot;
+    const open = all.filter((m) => m.enabled);
+    throw new ToolError(
+      "quote_disabled",
+      `this core does not take new launches quoted in ${quoteSymbol} at its base fee tier`,
+      open.length
+        ? `enabled quotes here: ${open.map((m) => `${m.symbol} (slot ${m.slot}, ${m.tradeFeeBps / 100}% trade fee)`).join(", ")} — pass quoteAsset and tradeFeeBps to pick one`
+        : "no quote asset is enabled on this core right now — launches are closed",
+    );
+  }
   const hit = menu.find((m) => m.enabled && m.tradeFeeBps === tradeFeeBps);
   if (hit) return hit.slot;
   const offered = menu.filter((m) => m.enabled).map((m) => m.tradeFeeBps);
@@ -1529,10 +1547,43 @@ async function resolveQuoteSlot(
   );
 }
 
+/**
+ * Refuse an opening buy the wallet cannot pay for, BEFORE the launch exists.
+ *
+ * On an ERC20 quote (USDC, SPROUT, SAI) the opening buy spends that token, not
+ * INJ, and a wallet that holds none of it used to get the launch created, the
+ * fee spent, and then an `initialBuy.error` back from the separate buy. INJ is
+ * not checked here: its balance lives in the bank module, and the buy that
+ * follows reports a shortfall itself.
+ */
+async function assertCanFundInitialBuy(
+  rt: Runtime,
+  quoteSlot: number,
+  initialBuy: string | undefined,
+): Promise<void> {
+  if (!initialBuy) return;
+  const q = quoteAssetBySlot(rt.net, quoteSlot);
+  if (!q || q.isNative) return;
+  let need: bigint;
+  try {
+    need = parseUnits(initialBuy, q.decimals);
+  } catch {
+    throw new ToolError("bad_amount", `initialBuy "${initialBuy}" is not an amount of ${q.symbol}`);
+  }
+  const held = await rt.shroom.erc20Balance(q.pairAsset, rt.signer.address).catch(() => null);
+  if (held !== null && held < need) {
+    throw new ToolError(
+      "no_balance",
+      `this launch is priced in ${q.symbol} and the opening buy spends ${initialBuy} ${q.symbol}, but the agent wallet holds ${formatUnits(held, q.decimals)} — acquire ${q.symbol} first`,
+      `fund the agent wallet with ${q.symbol}, or buy it with \`buy\` using query "${q.pairAsset}" (by address: other tokens share the symbol), then launch again; or drop initialBuy`,
+    );
+  }
+}
+
 async function resolveCurve(
   rt: Runtime,
   choice: string | undefined,
-  quoteSymbol: "INJ" | "USDC" | "SAI",
+  quoteSymbol: QuoteSymbol,
   quoteSlot?: number,
 ): Promise<{ curveId: number; preset: CurvePreset } | null> {
   const omitted = choice === undefined || choice === "";
