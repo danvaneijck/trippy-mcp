@@ -24,6 +24,7 @@ import type { PumpApi } from "../../api/pump.js";
 import type { EvmSigner, WriteTxResult } from "../../chain/evm.js";
 import type { CoreDeployment, NetworkDef, QuoteAssetInfo, QuoteSymbol } from "../../chain/networks.js";
 import {
+  baseQuoteSlot,
   coreDeploymentFor,
   currentCoreDeployment,
   quoteAssetBySlot,
@@ -599,19 +600,33 @@ export class ShroomVenue {
     return q;
   }
 
-  /** USD value of `amountWei` of the given quote asset (pump quote-prices). */
+  /**
+   * USD value of `amountWei` of the given quote asset (pump quote-prices), or
+   * null when the asset has no usable rate.
+   *
+   * A fee-tier slot is priced at its BASE asset's rate (9 → SPROUT's slot 8):
+   * the API copies a tier's rate from its base ("as:INJ"), but a tier it has
+   * not learned yet must not read as unpriced while its base is priced. The
+   * tier's own row is the fallback. A missing, null, zero or negative rate is
+   * UNPRICED — null, which the policy refuses as such — never a $0 that would
+   * pass every cap.
+   */
   async usdValue(slot: number, amountWei: bigint): Promise<number | null> {
-    const q = this.quoteInfo(slot);
+    const q = quoteAssetBySlot(this.net, slot);
+    if (!q) return null;
     try {
       if (!this.priceCache || Date.now() - this.priceCache.at > PRICE_CACHE_MS) {
         const { items } = await this.pump.quotePrices();
-        this.priceCache = {
-          at: Date.now(),
-          bySlot: new Map(items.map((r) => [r.quoteAsset, Number(r.rateUsd)])),
-        };
+        const bySlot = new Map<number, number>();
+        for (const r of items) {
+          const rate = r.rateUsd == null ? NaN : Number(r.rateUsd);
+          if (Number.isFinite(rate) && rate > 0) bySlot.set(Number(r.quoteAsset), rate);
+        }
+        this.priceCache = { at: Date.now(), bySlot };
       }
-      const rate = this.priceCache.bySlot.get(slot);
-      if (rate === undefined || !Number.isFinite(rate)) return null;
+      const rate =
+        this.priceCache.bySlot.get(baseQuoteSlot(this.net, slot)) ?? this.priceCache.bySlot.get(slot);
+      if (rate === undefined) return null;
       return Number(formatUnits(amountWei, q.decimals)) * rate;
     } catch {
       return null;

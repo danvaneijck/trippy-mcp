@@ -391,3 +391,25 @@ describe("holder snapshots of an atomic launch", () => {
     expect(denom).toBe("erc20:0x86e8e94F3181b15d11bB0303b88d272AbD4fb00D");
   });
 });
+
+describe("USD for a fee-tier slot follows its base asset", () => {
+  const venue = (items: { quoteAsset: number; rateUsd: string | null }[]) =>
+    new ShroomVenue(NET, {} as never, { quotePrices: async () => ({ items }) } as never, null);
+  const THOUSAND = 1_000n * 10n ** 18n;
+
+  it("SPROUT's 3% slot is priced at slot 8's rate, and USDC's at slot 2's", async () => {
+    expect(await venue([{ quoteAsset: 8, rateUsd: "0.0005" }]).usdValue(9, THOUSAND)).toBeCloseTo(0.5);
+    expect(await venue([{ quoteAsset: 2, rateUsd: "1" }]).usdValue(7, 5_000_000n)).toBeCloseTo(5);
+  });
+
+  it("falls back to the tier's own row when the base has none", async () => {
+    expect(await venue([{ quoteAsset: 9, rateUsd: "0.0005" }]).usdValue(9, THOUSAND)).toBeCloseTo(0.5);
+  });
+
+  it("a missing, null or zero rate is UNPRICED, never $0", async () => {
+    expect(await venue([]).usdValue(8, THOUSAND)).toBeNull();
+    expect(await venue([{ quoteAsset: 8, rateUsd: null }]).usdValue(9, THOUSAND)).toBeNull();
+    expect(await venue([{ quoteAsset: 8, rateUsd: "0" }]).usdValue(8, THOUSAND)).toBeNull();
+    expect(await venue([{ quoteAsset: 1, rateUsd: "7" }]).usdValue(10, THOUSAND)).toBeNull();
+  });
+});
