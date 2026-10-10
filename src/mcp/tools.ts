@@ -1192,7 +1192,7 @@ async function quoteBothVenues(
   const [v1, v2] = await Promise.allSettled([
     quoteV1(rt, dual.v1TokenId, args.side, amount, slippageBps, args.counterToken),
     v2Able
-      ? quoteV2(rt, dual.v2, args.side, amount, slippageBps, args.counterToken)
+      ? quoteV2(rt, dual.v2, args.side, amount, slippageBps, v2CounterOf(args.counterToken))
       : Promise.reject(new ToolError("bad_counter", "not a Choice v2 counter")),
   ]);
   const v1Out = v1.status === "fulfilled" ? Number(v1.value.expectedOutput) : null;
@@ -1220,6 +1220,18 @@ async function quoteBothVenues(
   };
 }
 
+/**
+ * The v2 leg's counter in a two-venue comparison: the one named, else INJ.
+ *
+ * Spelled out because the two venues default differently. v1 spends INJ when
+ * no counter is named, while v2 reads "none named" as the pool's own quote
+ * asset — USDC on a USDC-quoted graduate — and comparing outputs bought with
+ * two different currencies would pick a venue on a meaningless number.
+ */
+function v2CounterOf(counterToken: string | undefined): string {
+  return counterToken?.trim() ? counterToken : "INJ";
+}
+
 /** Execute on whichever Choice venue quotes the larger output right now. */
 async function tradeOnBetterVenue(
   rt: Runtime,
@@ -1231,7 +1243,7 @@ async function tradeOnBetterVenue(
   const { pick, report } = await quoteBothVenues(rt, dual, args, amount, slippageBps);
   const res =
     pick === "choiceV2"
-      ? await tradeV2(rt, dual.v2, args.side, amount, slippageBps, args.counterToken)
+      ? await tradeV2(rt, dual.v2, args.side, amount, slippageBps, v2CounterOf(args.counterToken))
       : args.side === "buy"
         ? await rt.choice.swap(args.counterToken ?? DEFAULT_COUNTER, dual.v1TokenId, amount, slippageBps / 100)
         : await rt.choice.swap(dual.v1TokenId, args.counterToken ?? DEFAULT_COUNTER, amount, slippageBps / 100);

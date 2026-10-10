@@ -27,6 +27,7 @@ import {
   type SwapRequest,
 } from "../src/venues/choiceV2/plan.js";
 import { ChoiceV2Venue, PERMIT2_TTL_SECONDS } from "../src/venues/choiceV2/venue.js";
+import { v2Routes } from "../src/mcp/choiceV2Tools.js";
 import { encodeMetadataUri } from "../src/metadata.js";
 import { LaunchState } from "../src/venues/shroom/abi.js";
 
@@ -534,6 +535,108 @@ describe("the swap the venue signs", () => {
     const { venue, writes } = stubVenue({ balances: { [INJIVA.toLowerCase()]: 5n } });
     await expect(venue.swap(route(venue), "sell", 10n, 100)).rejects.toMatchObject({ code: "no_balance" });
     expect(writes).toHaveLength(0);
+  });
+});
+
+describe("a graduate quoted in USDC or SPROUT trades against its own quote asset", () => {
+  const USDC = NET.quoteAssets.USDC!.pairAsset;
+  const SPROUT = NET.quoteAssets.SPROUT!.pairAsset;
+  const LOCKER: Address = `0x${"1c".repeat(20)}`;
+  const POSM: Address = `0x${"9d".repeat(20)}`;
+  // USDC's address sorts below the token's, so it is currency0.
+  const KEY_USDC: PoolKey = { ...KEY_10006, currency0: USDC, currency1: INJIVA };
+
+  function launchVenue(key: PoolKey, balances: Record<string, bigint> = {}) {
+    const writes: Write[] = [];
+    const signer = {
+      address: `0x${"12".repeat(20)}` as Address,
+      readContract: async ({ address, functionName }: { address: string; functionName: string }) => {
+        switch (functionName) {
+          case "LOCKER":
+            return LOCKER;
+          case "POSITION_MANAGER":
+            return POSM;
+          case "getPosition":
+            return { tokenId: 77n };
+          case "getPoolAndPositionInfo":
+            return [key, 0n];
+          case "decimals":
+            return 18;
+          case "poolFeePips":
+            return 10_000;
+          case "balanceOf":
+            return balances[address.toLowerCase()] ?? 0n;
+          case "allowance":
+            return address.toLowerCase() === V2.permit2.toLowerCase() ? [0n, 0, 0] : 0n;
+          case "quoteExactInputSingle":
+            return [10n ** 21n, 100_000n];
+          default:
+            throw new Error(`unexpected read ${functionName}`);
+        }
+      },
+      writeTx: async (w: Write) => {
+        writes.push(w);
+        return { status: "dry-run" as const, hash: null };
+      },
+    };
+    const venue = new ChoiceV2Venue(NET, V2, signer as never, { pools: async () => [] } as never, {
+      nativeBalance: async () => 10n ** 21n,
+      usdValue: async () => 1,
+    });
+    return { venue, writes };
+  }
+  const launchArgs = (pairAsset: Address) => ({ settler: ATOMIC_SETTLER, onchainId: 10_200n, token: INJIVA, pairAsset });
+
+  it("the launch route's counter is the launch's pair asset, named by address", async () => {
+    const { venue } = launchVenue(KEY_USDC);
+    const r = await venue.launchRoute(launchArgs(USDC));
+    expect(r.counter).toEqual({ address: USDC, native: false, symbol: "USDC", decimals: 6 });
+    expect(r.poolId).toBe(poolIdOf(KEY_USDC));
+    expect((await venue.pairCounter(SPROUT)).symbol).toBe("SPROUT");
+  });
+
+  it("a wINJ launch still trades against native INJ", async () => {
+    const { venue } = launchVenue(KEY_10006);
+    expect((await venue.launchRoute(launchArgs(WINJ))).counter).toEqual(venue.nativeCounter);
+  });
+
+  it("forcing native INJ onto a USDC pool is refused, as it always was", async () => {
+    const { venue } = launchVenue(KEY_USDC);
+    await expect(venue.launchRoute(launchArgs(USDC), venue.nativeCounter)).rejects.toMatchObject({ code: "bad_pool" });
+  });
+
+  it("v2Routes with no counter named takes the launch's own pool; a named INJ looks elsewhere", async () => {
+    const { venue } = launchVenue(KEY_USDC);
+    const rt = {
+      choiceV2: venue,
+      shroom: { forLaunch: () => ({ getLaunchView: async () => ({ settler: ATOMIC_SETTLER, token: INJIVA, pairAsset: USDC }) }) },
+    } as unknown as Runtime;
+    const target = { token: INJIVA, launch: { id: "1500", onchainId: "10200" } as unknown as ApiLaunch };
+    const own = await v2Routes(rt, target);
+    expect(own.routes).toHaveLength(1);
+    expect(own.routes[0]!.counter.symbol).toBe("USDC");
+    const inj = await v2Routes(rt, target, venue.nativeCounter);
+    expect(inj.routes).toEqual([]);
+    expect(inj.warnings[0]).toContain("priced in USDC");
+  });
+
+  it("a buy spends USDC through Permit2, and a short wallet is told to acquire USDC", async () => {
+    const { venue, writes } = launchVenue(KEY_USDC, { [USDC.toLowerCase()]: 10_000_000n });
+    const r = await venue.launchRoute(launchArgs(USDC));
+    await venue.swap(r, "buy", 5_000_000n, 100);
+    expect(writes.map((w) => `${w.functionName}@${w.address}`)).toEqual([
+      `approve@${USDC}`,
+      `approve@${V2.permit2}`,
+      `execute@${V2.universalRouter}`,
+    ]);
+    expect(writes[2]!.value).toBe(0n);
+
+    const short = launchVenue(KEY_USDC);
+    await expect(short.venue.swap(r, "buy", 5_000_000n, 100)).rejects.toMatchObject({
+      code: "no_balance",
+      hint: expect.stringContaining("acquire USDC first"),
+    });
+    expect(short.writes).toHaveLength(0);
   });
 });
 

@@ -365,7 +365,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "quote",
-    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; a launch graduated from the ATOMIC core, and any EVM token with a Choice v2 pool, quotes ON CHAIN through Choice v2's CLQuoter (single-hop, the launch hook's fee included); other graduated/DEX tokens quote through the Choice v1 aggregator (counterToken defaults to INJ). A token listed on BOTH Choice venues is quoted on both and the better output is reported, with the other as `alternative`. Buy amounts are in the counter/quote asset; sell amounts in the token, and a sell takes `all` — sized against the live position exactly as `sell` would, so the whole-position trade can be previewed rather than retyped from `portfolio`. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
+    "Preview a buy or sell without executing. Auto-routes: active bonding-curve launches quote on-chain via SHROOM Pad; a launch graduated from the ATOMIC core, and any EVM token with a Choice v2 pool, quotes ON CHAIN through Choice v2's CLQuoter (single-hop, the launch hook's fee included); other graduated/DEX tokens quote through the Choice v1 aggregator (counterToken defaults to INJ). A token listed on BOTH Choice venues is quoted on both and the better output is reported, with the other as `alternative`. Buy amounts are in the counter/quote asset (a launch's own quote asset on its curve and on its graduated Choice v2 pool: INJ, USDC or SPROUT); sell amounts in the token, and a sell takes `all` — sized against the live position exactly as `sell` would, so the whole-position trade can be previewed rather than retyped from `portfolio`. Every leg is returned in quote-token units AND in USD (`amountInUsd`, `expectedOutputUsd`/`pairOutUsd`, `feeUsd`), so the size of a trade is legible without a second price lookup; a USD field is null when the token cannot be priced." +
       SPOT_ONLY_NOTE,
     {
       query,
@@ -374,7 +374,7 @@ export async function serve(): Promise<void> {
         .string()
         .describe('human units (e.g. "0.5"); "all" on a sell = the whole position'),
       slippageBps,
-      counterToken: z.string().optional().describe("counter asset (default INJ). Choice v1: a denom or CW20. Choice v2: INJ or an 0x / erc20: ERC20 paired directly with the token."),
+      counterToken: z.string().optional().describe("counter asset. Default INJ, except a launch graduated onto Choice v2, which defaults to its OWN quote asset (a USDC- or SPROUT-quoted launch's pool pairs it with USDC or SPROUT, so buy amounts are in that asset). Choice v1: a denom or CW20. Choice v2: INJ or an 0x / erc20: ERC20 paired directly with the token."),
     },
     (rt2, a: t.QuoteArgs) => t.quote(rt2, a),
   );

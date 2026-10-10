@@ -63,30 +63,58 @@ export async function v2Counter(rt: Runtime, counterToken?: string): Promise<Cou
  * settler, never discovered; it is checked against the indexer's `v2PoolId` as
  * a canary, and a disagreement is reported rather than resolved in the API's
  * favour. Anything else is discovered through the API and verified on chain.
+ *
+ * `counter` undefined means "the natural one": for a v2 graduate, the launch's
+ * OWN quote asset (`getLaunch().pairAsset` — USDC or SPROUT as well as INJ),
+ * since that is the only currency its pool holds; for anything else, native
+ * INJ. A counter the caller named is honoured: on a graduate it uses the
+ * launch's pool when it is that pool's currency, and is looked for among
+ * discovered pools otherwise.
  */
 export async function v2Routes(
   rt: Runtime,
   target: V2Target,
-  counter: Counter,
+  counter?: Counter,
 ): Promise<{ routes: V2Route[]; warnings: string[] }> {
   const v = venueOf(rt);
   const warnings: string[] = [];
-  if (target.launch && counter.native) {
+  if (target.launch) {
     const launch = target.launch;
     const onchainId = BigInt(launch.onchainId ?? launch.id);
     const live = await rt.shroom.forLaunch(launch).getLaunchView(onchainId);
     if (v.cfg.infinitySettlers.some((s) => s.toLowerCase() === live.settler.toLowerCase())) {
-      const route = await v.launchRoute({ settler: live.settler, onchainId, token: live.token });
-      if (launch.v2PoolId && launch.v2PoolId.toLowerCase() !== route.poolId.toLowerCase()) {
-        warnings.push(
-          `the pad API names pool ${launch.v2PoolId} for this launch, but the chain says ${route.poolId} — trading the chain's`,
+      const own = await v.pairCounter(live.pairAsset);
+      if (!counter || counter.address.toLowerCase() === own.address.toLowerCase()) {
+        const route = await v.launchRoute(
+          { settler: live.settler, onchainId, token: live.token, pairAsset: live.pairAsset },
+          counter ?? own,
         );
+        if (launch.v2PoolId && launch.v2PoolId.toLowerCase() !== route.poolId.toLowerCase()) {
+          warnings.push(
+            `the pad API names pool ${launch.v2PoolId} for this launch, but the chain says ${route.poolId} — trading the chain's`,
+          );
+        }
+        return { routes: [route], warnings };
       }
-      return { routes: [route], warnings };
+      warnings.push(
+        `this launch is priced in ${own.symbol} and its graduated pool pairs it with ${own.symbol}; looking for another pool against ${counter.symbol}`,
+      );
     }
   }
-  const routes = await v.discoverRoutes(target.token, counter);
+  const routes = await v.discoverRoutes(target.token, counter ?? v.nativeCounter);
   return { routes, warnings };
+}
+
+/**
+ * The counter a `quote`/`buy`/`sell` names, or undefined when it names none —
+ * which `v2Routes` reads as the target's natural counter (a graduate's own
+ * quote asset). Refuses a counter v2 cannot express.
+ */
+async function namedCounter(rt: Runtime, counterToken?: string): Promise<Counter | undefined> {
+  if (!counterToken?.trim()) return undefined;
+  const counter = await v2Counter(rt, counterToken);
+  if (!counter) throw new ToolError("bad_counter", `${counterToken} is not a counter asset Choice v2 can trade against`);
+  return counter;
 }
 
 /** The route that quotes best for this exact input, with its quote. */
@@ -118,10 +146,10 @@ async function bestQuote(
   return { q: best, considered: routes.length };
 }
 
-function noPool(target: V2Target, counter: Counter): ToolError {
+function noPool(target: V2Target, counter: Counter | undefined): ToolError {
   return new ToolError(
     "no_pool",
-    `no verified Choice v2 pool trades ${target.token} against ${counter.symbol}`,
+    `no verified Choice v2 pool trades ${target.token} against ${counter?.symbol ?? "INJ"}`,
     "pools are single-hop: the token has to be paired directly with the counter asset, behind no hook or one of Choice's launch hooks",
   );
 }
@@ -135,12 +163,14 @@ export async function quoteV2(
   slippageBps: number,
   counterToken?: string,
 ): Promise<{ summary: Record<string, unknown>; q: V2Quote; expectedOutHuman: number }> {
-  const counter = await v2Counter(rt, counterToken);
-  if (!counter) throw new ToolError("bad_counter", `${counterToken} is not a counter asset Choice v2 can trade against`);
-  const { routes, warnings } = await v2Routes(rt, target, counter);
-  if (routes.length === 0) throw noPool(target, counter);
+  const named = await namedCounter(rt, counterToken);
+  const { routes, warnings } = await v2Routes(rt, target, named);
+  if (routes.length === 0) throw noPool(target, named);
   const { q, considered } = await bestQuote(rt, routes, side, amount, slippageBps);
   const v = venueOf(rt);
+  // The counter the chosen pool actually trades against: on a graduate with no
+  // counter named, the launch's own quote asset.
+  const counter = q.route.counter;
   const tokenIn = side === "buy" ? (counter.native ? "native" : counter.address) : q.route.token;
   const tokenOut = side === "buy" ? q.route.token : counter.native ? "native" : counter.address;
   const [amountInUsd, expectedOutputUsd, held] = await Promise.all([
@@ -168,6 +198,7 @@ export async function quoteV2(
       token: q.route.token,
       ...(target.launch ? { launchId: target.launch.id } : {}),
       counter: counter.native ? "INJ" : counter.address,
+      ...(counter.native ? {} : { counterSymbol: counter.symbol }),
       amountIn: `${formatUnits(q.amountIn, q.inDecimals)} ${q.inSymbol}`,
       amountInUsd: side === "buy" ? amountInUsd : (amountInUsd ?? expectedOutputUsd),
       expectedOutput: `${formatUnits(q.amountOut, q.outDecimals)} ${q.outSymbol}`,
@@ -193,10 +224,9 @@ export async function tradeV2(
   slippageBps: number,
   counterToken?: string,
 ): Promise<V2TradeResult & { launchId?: string }> {
-  const counter = await v2Counter(rt, counterToken);
-  if (!counter) throw new ToolError("bad_counter", `${counterToken} is not a counter asset Choice v2 can trade against`);
-  const { routes, warnings } = await v2Routes(rt, target, counter);
-  if (routes.length === 0) throw noPool(target, counter);
+  const named = await namedCounter(rt, counterToken);
+  const { routes, warnings } = await v2Routes(rt, target, named);
+  if (routes.length === 0) throw noPool(target, named);
   const { q } = await bestQuote(rt, routes, side, amount, slippageBps);
   const res = await venueOf(rt).swap(q.route, side, q.amountIn, slippageBps);
   return {
@@ -209,10 +239,11 @@ export async function tradeV2(
 /** `token_info` for a v2-traded token: the indexer's view plus the pool as verified on chain. */
 export async function tokenInfoV2(rt: Runtime, target: V2Target): Promise<Record<string, unknown>> {
   const api = rt.choiceV2Api;
-  const v = venueOf(rt);
+  // Refuse a network with no v2 up front, not as a pool warning below.
+  venueOf(rt);
   const [token, routed] = await Promise.all([
     api?.token(target.token).catch(() => null) ?? null,
-    v2Routes(rt, target, v.nativeCounter).catch((e: unknown) => ({
+    v2Routes(rt, target).catch((e: unknown) => ({
       routes: [] as V2Route[],
       warnings: [`could not verify a pool on chain: ${e instanceof Error ? e.message : String(e)}`],
     })),
@@ -239,9 +270,8 @@ export async function tokenInfoV2(rt: Runtime, target: V2Target): Promise<Record
 
 /** The pool a read tool should chart / tape: the launch's own, else the deepest verified one. */
 async function primaryPool(rt: Runtime, target: V2Target): Promise<V2Route> {
-  const v = venueOf(rt);
-  const { routes } = await v2Routes(rt, target, v.nativeCounter);
-  if (routes.length === 0) throw noPool(target, v.nativeCounter);
+  const { routes } = await v2Routes(rt, target);
+  if (routes.length === 0) throw noPool(target, undefined);
   return routes[0]!;
 }
 

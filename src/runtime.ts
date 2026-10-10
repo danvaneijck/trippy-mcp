@@ -216,8 +216,12 @@ export function buildRuntime(passphrase?: string): Runtime {
 /**
  * USD value of a v2 swap leg. INJ and wINJ go through the pad's own quote-rate
  * feed — the same mark every other USD figure here uses, and the leg a
- * launch-token trade almost always has. Anything else takes the v2 indexer's
- * stable-anchored price, which is null for a token it cannot anchor.
+ * launch-token trade almost always has. So does any other pad quote asset
+ * (USDC, SPROUT), matched by ADDRESS: it is the counter of a graduate quoted
+ * in it, and the pad prices SPROUT off its own recorded pool rather than
+ * whichever pool is deepest. Anything else, or a quote asset the feed has no
+ * rate for, takes the v2 indexer's stable-anchored price, which is null for a
+ * token it cannot anchor.
  */
 export async function choiceV2UsdValue(
   net: NetworkDef,
@@ -230,6 +234,13 @@ export async function choiceV2UsdValue(
   const inj = net.quoteAssets.INJ;
   if (inj && (token === "native" || token.toLowerCase() === net.choiceV2?.winj.toLowerCase())) {
     return shroom.usdValue(inj.slot, amount);
+  }
+  const quote = Object.values(net.quoteAssets).find(
+    (q) => !q.isNative && q.pairAsset.toLowerCase() === token.toLowerCase(),
+  );
+  if (quote && quote.decimals === decimals) {
+    const usd = await shroom.usdValue(quote.slot, amount);
+    if (usd !== null) return usd;
   }
   const t = await api.token(token).catch(() => null);
   const price = t?.priceUsd === null || t?.priceUsd === undefined ? NaN : Number(t.priceUsd);
