@@ -413,3 +413,65 @@ describe("USD for a fee-tier slot follows its base asset", () => {
     expect(await venue([{ quoteAsset: 1, rateUsd: "7" }]).usdValue(10, THOUSAND)).toBeNull();
   });
 });
+
+describe("curve trades on an ERC20 quote (SPROUT, slot 8)", () => {
+  const TOKEN = `0x${"77".repeat(20)}`;
+  function sproutVenue(balances: Record<string, bigint>) {
+    const writes: { address: string; functionName: string; args: unknown[]; value?: bigint }[] = [];
+    const signer = {
+      address: `0x${"12".repeat(20)}`,
+      readContract: async ({ address, functionName }: { address: string; functionName: string }) => {
+        switch (functionName) {
+          case "paused":
+            return false;
+          case "getLaunch":
+            return { ...tierLaunch(), quoteAsset: 8, pairAsset: SPROUT, tradeFeeBps: 100, bankDenom: `erc20:${SPROUT}` };
+          case "quoteBuy":
+            return [10n ** 24n, 10n ** 19n, 0n];
+          case "quoteSell":
+            return [5n * 10n ** 20n, 5n * 10n ** 18n];
+          case "balanceOf":
+            return balances[address.toLowerCase()] ?? 0n;
+          case "allowance":
+            return 0n;
+          default:
+            throw new Error(`unexpected read ${functionName}`);
+        }
+      },
+      writeTx: async (req: { address: string; functionName: string; args: unknown[]; value?: bigint }) => {
+        writes.push({ address: req.address, functionName: req.functionName, args: req.args, value: req.value });
+        return { status: "dry-run" as const, hash: null };
+      },
+    };
+    const pump = { quotePrices: async () => ({ items: [{ quoteAsset: 8, rateUsd: "0.0005" }] }) };
+    return { venue: new ShroomVenue(NET, signer as never, pump as never, null), writes };
+  }
+
+  it("a buy approves EXACTLY the spend on SPROUT, then calls buy with no value", async () => {
+    const { venue, writes } = sproutVenue({ [SPROUT.toLowerCase()]: 5_000n * 10n ** 18n });
+    const res = await venue.buy(10_200n, "1000", 100);
+    expect(writes.map((w) => `${w.functionName}@${w.address}`)).toEqual([`approve@${SPROUT}`, `buy@${ATOMIC}`]);
+    expect(writes[0]!.args).toEqual([ATOMIC, 1_000n * 10n ** 18n]);
+    expect(writes[1]!.value).toBeUndefined();
+    expect(res.quoteSymbol).toBe("SPROUT");
+  });
+
+  it("a wallet without the SPROUT is told to acquire it, before any approval", async () => {
+    const { venue, writes } = sproutVenue({});
+    await expect(venue.buy(10_200n, "1000", 100)).rejects.toMatchObject({
+      code: "no_balance",
+      message: expect.stringContaining("priced in SPROUT"),
+      hint: expect.stringContaining(SPROUT),
+    });
+    expect(writes).toHaveLength(0);
+  });
+
+  it("a sell approves exactly the tokens sold and takes SPROUT back", async () => {
+    const { venue, writes } = sproutVenue({ [TOKEN.toLowerCase()]: 10n ** 24n });
+    const res = await venue.sell(10_200n, "all", 100);
+    expect(writes.map((w) => `${w.functionName}@${w.address}`)).toEqual([`approve@${TOKEN}`, `sell@${ATOMIC}`]);
+    expect(writes[0]!.args).toEqual([ATOMIC, 10n ** 24n]);
+    expect(res.pairAmount).toBe("500");
+    expect(res.quoteSymbol).toBe("SPROUT");
+  });
+});

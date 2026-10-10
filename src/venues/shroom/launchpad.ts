@@ -12,13 +12,14 @@
  *  - near-graduation buys partial-fill: size minTokenOut off quoted tokenOut,
  *    surface the refund
  *  - sell minPairOut compares NET of fee (directly against quoteSell.pairOut)
- *  - sells need an ERC20 approve of the LAUNCH token (both variants)
+ *  - sells need an ERC20 approve of the LAUNCH token (both variants); every
+ *    approval to the core is EXACT, never max
  *  - USDC quote is 6-decimal — all conversions go through QuoteAssetInfo
  *  - createLaunch does not make a tradable token: keeper binds Reserved(7) →
  *    Trading(1); Cancelled(8) means bind deadline passed → withdrawRefund()
  */
 
-import { formatUnits, maxUint256, parseUnits, zeroAddress, type Address } from "viem";
+import { formatUnits, parseUnits, zeroAddress, type Address } from "viem";
 
 import type { PumpApi } from "../../api/pump.js";
 import type { EvmSigner, WriteTxResult } from "../../chain/evm.js";
@@ -723,21 +724,40 @@ export class ShroomVenue {
 
   // ---- approvals -----------------------------------------------------------
 
+  /**
+   * Let the core pull exactly `need` of `token` — the pair asset on an ERC20
+   * buy, the launch token on a sell.
+   *
+   * EXACT, never `maxUint256`: the trade consumes it (all but a graduation
+   * refund on a buy that crosses the target), so no standing allowance is left
+   * on a USDC or SPROUT balance (or a bag) for a later call to draw on — the
+   * same rule the Choice v2 path holds Permit2 to. It costs an approval per
+   * ERC20 trade, which on Injective is cents.
+   */
   private async ensureApproval(token: Address, need: bigint): Promise<void> {
-    const have = await this.signer.readContract<bigint>({
-      address: token,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args: [this.signer.address, this.core],
-    });
-    if (have >= need) return;
+    const allowance = () =>
+      this.signer.readContract<bigint>({
+        address: token,
+        abi: ERC20_ABI,
+        functionName: "allowance",
+        args: [this.signer.address, this.core],
+      });
+    if ((await allowance()) >= need) return;
     await this.signer.writeTx({
       address: token,
       abi: ERC20_ABI,
       functionName: "approve",
-      args: [this.core, maxUint256],
+      args: [this.core, need],
       // Security-relevant counterparty is the SPENDER — always the core.
-      intent: { kind: "approve", target: this.core, detail: `approve ${token} → LaunchpadCore` },
+      intent: {
+        kind: "approve",
+        target: this.core,
+        detail: `approve ${token} → LaunchpadCore for exactly ${need}`,
+        approval: { amount: need },
+      },
+      // The trade right after spends this allowance, so a lagging receipt must
+      // not let it run first.
+      confirm: async () => (await allowance()) >= need,
     });
   }
 
@@ -775,6 +795,20 @@ export class ShroomVenue {
           "guard_window",
           `guard window caps each wallet at ${formatUnits(cap, q.decimals)} ${q.symbol} until ${new Date(Number(launch.guardWindowEndsAt) * 1000).toISOString()}, and this buy is ${amountHuman}`,
           "buy up to the cap now and the rest once the window closes",
+        );
+      }
+    }
+
+    // An ERC20 quote (USDC, SPROUT, SAI) is spent from the wallet's token
+    // balance, not its INJ — and an agent funded with INJ alone holds none. Say
+    // so, by asset, before an approval is spent on a buy that cannot fill.
+    if (!q.isNative) {
+      const held = await this.erc20Balance(q.pairAsset, this.signer.address).catch(() => null);
+      if (held !== null && held < pairIn) {
+        throw new ToolError(
+          "no_balance",
+          `launch #${launchId} is priced in ${q.symbol}: this buy spends ${amountHuman} ${q.symbol} and the agent wallet holds ${formatUnits(held, q.decimals)} — acquire ${q.symbol} first`,
+          `fund the agent wallet with ${q.symbol}, or buy it with \`buy\` using query "${q.pairAsset}" (by address: other tokens share the symbol)`,
         );
       }
     }
