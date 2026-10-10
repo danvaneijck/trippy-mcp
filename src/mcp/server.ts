@@ -382,7 +382,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "buy",
-    "Execute a buy. Auto-routes like `quote` (on a token listed on both Choice venues, executes where the output is larger). On Choice v2 the swap calldata is built locally, never taken from an API, and native INJ is wrapped inside the router. Spends the quote/counter asset from the agent wallet: on a USDC- or SPROUT-quoted launch (curve or graduated pool) that is USDC or SPROUT, which the wallet must already hold (refused up front, naming the asset, when it does not), and an ERC20 spend is approved for exactly the amount; enforced by the local policy engine (per-tx cap, 24h budget, contract allowlist) — policy denials come back as errors. Returns the tx hash and fill details." +
+    "Execute a buy. Auto-routes like `quote` (on a token listed on both Choice venues, executes where the output is larger). On Choice v2 the swap calldata is built locally, never taken from an API, and native INJ is wrapped inside the router. Spends the quote/counter asset from the agent wallet: on a USDC- or SPROUT-quoted launch (curve or graduated pool) that is USDC or SPROUT, which the wallet must already hold (refused up front, naming the asset, when it does not); enforced by the local policy engine (per-tx cap, 24h budget, contract allowlist) — policy denials come back as errors. Returns the tx hash and fill details." +
       SPOT_ONLY_NOTE,
     { query, amount: z.string(), slippageBps, counterToken: z.string().optional() },
     (rt2, a: Omit<t.QuoteArgs, "side">) => t.buy(rt2, a),

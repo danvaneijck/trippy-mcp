@@ -12,14 +12,13 @@
  *  - near-graduation buys partial-fill: size minTokenOut off quoted tokenOut,
  *    surface the refund
  *  - sell minPairOut compares NET of fee (directly against quoteSell.pairOut)
- *  - sells need an ERC20 approve of the LAUNCH token (both variants); every
- *    approval to the core is EXACT, never max
+ *  - sells need an ERC20 approve of the LAUNCH token (both variants)
  *  - USDC quote is 6-decimal — all conversions go through QuoteAssetInfo
  *  - createLaunch does not make a tradable token: keeper binds Reserved(7) →
  *    Trading(1); Cancelled(8) means bind deadline passed → withdrawRefund()
  */
 
-import { formatUnits, parseUnits, zeroAddress, type Address } from "viem";
+import { formatUnits, maxUint256, parseUnits, zeroAddress, type Address } from "viem";
 
 import type { PumpApi } from "../../api/pump.js";
 import type { EvmSigner, WriteTxResult } from "../../chain/evm.js";
@@ -725,14 +724,8 @@ export class ShroomVenue {
   // ---- approvals -----------------------------------------------------------
 
   /**
-   * Let the core pull exactly `need` of `token` — the pair asset on an ERC20
-   * buy, the launch token on a sell.
-   *
-   * EXACT, never `maxUint256`: the trade consumes it (all but a graduation
-   * refund on a buy that crosses the target), so no standing allowance is left
-   * on a USDC or SPROUT balance (or a bag) for a later call to draw on — the
-   * same rule the Choice v2 path holds Permit2 to. It costs an approval per
-   * ERC20 trade, which on Injective is cents.
+   * Let the core pull `token` (the pair asset on an ERC20 buy, the launch token
+   * on a sell) when the standing allowance does not cover `need`.
    */
   private async ensureApproval(token: Address, need: bigint): Promise<void> {
     const allowance = () =>
@@ -747,14 +740,9 @@ export class ShroomVenue {
       address: token,
       abi: ERC20_ABI,
       functionName: "approve",
-      args: [this.core, need],
+      args: [this.core, maxUint256],
       // Security-relevant counterparty is the SPENDER — always the core.
-      intent: {
-        kind: "approve",
-        target: this.core,
-        detail: `approve ${token} → LaunchpadCore for exactly ${need}`,
-        approval: { amount: need },
-      },
+      intent: { kind: "approve", target: this.core, detail: `approve ${token} → LaunchpadCore` },
       // The trade right after spends this allowance, so a lagging receipt must
       // not let it run first.
       confirm: async () => (await allowance()) >= need,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { maxUint256 } from "viem";
 
 import { launchTokenDenom } from "../src/airdrops/sources.js";
 import { asApiLaunchId, type ApiLaunch } from "../src/api/pump.js";
@@ -447,11 +448,11 @@ describe("curve trades on an ERC20 quote (SPROUT, slot 8)", () => {
     return { venue: new ShroomVenue(NET, signer as never, pump as never, null), writes };
   }
 
-  it("a buy approves EXACTLY the spend on SPROUT, then calls buy with no value", async () => {
+  it("a buy approves the core for SPROUT, then calls buy with no value", async () => {
     const { venue, writes } = sproutVenue({ [SPROUT.toLowerCase()]: 5_000n * 10n ** 18n });
     const res = await venue.buy(10_200n, "1000", 100);
     expect(writes.map((w) => `${w.functionName}@${w.address}`)).toEqual([`approve@${SPROUT}`, `buy@${ATOMIC}`]);
-    expect(writes[0]!.args).toEqual([ATOMIC, 1_000n * 10n ** 18n]);
+    expect(writes[0]!.args).toEqual([ATOMIC, maxUint256]);
     expect(writes[1]!.value).toBeUndefined();
     expect(res.quoteSymbol).toBe("SPROUT");
   });
@@ -466,11 +467,11 @@ describe("curve trades on an ERC20 quote (SPROUT, slot 8)", () => {
     expect(writes).toHaveLength(0);
   });
 
-  it("a sell approves exactly the tokens sold and takes SPROUT back", async () => {
+  it("a sell approves the launch token and takes SPROUT back", async () => {
     const { venue, writes } = sproutVenue({ [TOKEN.toLowerCase()]: 10n ** 24n });
     const res = await venue.sell(10_200n, "all", 100);
     expect(writes.map((w) => `${w.functionName}@${w.address}`)).toEqual([`approve@${TOKEN}`, `sell@${ATOMIC}`]);
-    expect(writes[0]!.args).toEqual([ATOMIC, 10n ** 24n]);
+    expect(writes[0]!.args).toEqual([ATOMIC, maxUint256]);
     expect(res.pairAmount).toBe("500");
     expect(res.quoteSymbol).toBe("SPROUT");
   });
