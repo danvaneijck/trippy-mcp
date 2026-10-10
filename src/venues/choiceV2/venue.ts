@@ -340,7 +340,7 @@ export class ChoiceV2Venue {
         "no_balance",
         `wallet holds ${formatUnits(held, q.inDecimals)} ${q.inSymbol} but this swap spends ${formatUnits(amountIn, q.inDecimals)}`,
         erc20Buy
-          ? `this pool pairs the token with ${route.counter.symbol}: acquire ${route.counter.symbol} first — fund the agent wallet with it, or buy it with \`buy\` using query "${route.counter.address}" (by address: other tokens share the symbol)`
+          ? `this pool pairs the token with ${route.counter.symbol}: acquire ${route.counter.symbol} first: fund the agent wallet with it, or buy it with \`buy\` using query "${route.counter.address}" (by address: other tokens share the symbol)`
           : undefined,
       );
     }

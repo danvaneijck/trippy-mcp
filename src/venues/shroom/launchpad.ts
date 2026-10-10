@@ -807,7 +807,7 @@ export class ShroomVenue {
       if (held !== null && held < pairIn) {
         throw new ToolError(
           "no_balance",
-          `launch #${launchId} is priced in ${q.symbol}: this buy spends ${amountHuman} ${q.symbol} and the agent wallet holds ${formatUnits(held, q.decimals)} — acquire ${q.symbol} first`,
+          `launch #${launchId} is priced in ${q.symbol}: this buy spends ${amountHuman} ${q.symbol} and the agent wallet holds ${formatUnits(held, q.decimals)}: acquire ${q.symbol} first`,
           `fund the agent wallet with ${q.symbol}, or buy it with \`buy\` using query "${q.pairAsset}" (by address: other tokens share the symbol)`,
         );
       }

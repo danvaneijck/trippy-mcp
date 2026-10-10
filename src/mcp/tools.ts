@@ -1543,7 +1543,7 @@ async function resolveQuoteSlot(
       "quote_disabled",
       `this core does not take new launches quoted in ${quoteSymbol} at its base fee tier`,
       open.length
-        ? `enabled quotes here: ${open.map((m) => `${m.symbol} (slot ${m.slot}, ${m.tradeFeeBps / 100}% trade fee)`).join(", ")} — pass quoteAsset and tradeFeeBps to pick one`
+        ? `enabled quotes here: ${open.map((m) => `${m.symbol} (slot ${m.slot}, ${m.tradeFeeBps / 100}% trade fee)`).join(", ")}; pass quoteAsset and tradeFeeBps to pick one`
         : "no quote asset is enabled on this core right now — launches are closed",
     );
   }
@@ -1586,7 +1586,7 @@ async function assertCanFundInitialBuy(
   if (held !== null && held < need) {
     throw new ToolError(
       "no_balance",
-      `this launch is priced in ${q.symbol} and the opening buy spends ${initialBuy} ${q.symbol}, but the agent wallet holds ${formatUnits(held, q.decimals)} — acquire ${q.symbol} first`,
+      `this launch is priced in ${q.symbol} and the opening buy spends ${initialBuy} ${q.symbol}, but the agent wallet holds ${formatUnits(held, q.decimals)}: acquire ${q.symbol} first`,
       `fund the agent wallet with ${q.symbol}, or buy it with \`buy\` using query "${q.pairAsset}" (by address: other tokens share the symbol), then launch again; or drop initialBuy`,
     );
   }
