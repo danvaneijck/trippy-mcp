@@ -357,7 +357,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "portfolio",
-    "Every token the agent wallet holds, valued in USD: amount, indicative price, USD value per holding and the total. Prices come from the quote-rate feed (INJ/USDC/SAI), the last curve trade (active launches), Choice token stats, or the Choice v2 indexer for EVM tokens that trade only there — always `quote` before trading on them. Spot holdings of THIS agent wallet only — bank balances plus the CW20 contracts this build knows to probe (SHROOM among them): perp positions and trading-subaccount balances are not included and belong to a different wallet (Injective SDK `account_positions`/`account_balances`). A CW20 balance cannot be enumerated from the chain, so a CW20 the package does not know about is invisible here even though `quote`/`sell` handle it fine — add its contract to `cw20Tokens` in config.json to surface it." + UNTRUSTED_NOTE,
+    "Every token the agent wallet holds, valued in USD: amount, indicative price, USD value per holding and the total. Prices come from the quote-rate feed (INJ/USDC/SPROUT/SAI), the last curve trade (active launches), Choice token stats, or the Choice v2 indexer for EVM tokens that trade only there — always `quote` before trading on them. Spot holdings of THIS agent wallet only — bank balances plus the CW20 contracts this build knows to probe (SHROOM among them): perp positions and trading-subaccount balances are not included and belong to a different wallet (Injective SDK `account_positions`/`account_balances`). A CW20 balance cannot be enumerated from the chain, so a CW20 the package does not know about is invisible here even though `quote`/`sell` handle it fine — add its contract to `cw20Tokens` in config.json to surface it." + UNTRUSTED_NOTE,
     {},
     (rt2) => t.portfolio(rt2),
   );
@@ -537,7 +537,7 @@ export async function serve(): Promise<void> {
   register(
     server,
     "sweep",
-    'Send funds back to the owner wallet fixed at init — the ONLY destination sweeps can use. `asset` is INJ | USDC | SAI | an ERC20 address; `amount` human units or "all" (INJ keeps a 0.05 gas reserve). This is not a general transfer tool and takes no destination: arbitrary sends are deliberately impossible here, so do not attempt to reach another address through it (the Injective SDK `transfer_send`, signed by the operator\'s own wallet, is the tool for that).',
+    'Send funds back to the owner wallet fixed at init — the ONLY destination sweeps can use. `asset` is INJ | USDC | SPROUT | SAI | an ERC20 address; `amount` human units or "all" (INJ keeps a 0.05 gas reserve). This is not a general transfer tool and takes no destination: arbitrary sends are deliberately impossible here, so do not attempt to reach another address through it (the Injective SDK `transfer_send`, signed by the operator\'s own wallet, is the tool for that).',
     { asset: z.string(), amount: z.string() },
     (rt2, a: { asset: string; amount: string }) => t.sweepTool(rt2, a),
   );

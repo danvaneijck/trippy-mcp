@@ -164,7 +164,7 @@ trippy-mcp export-key --yes-i-understand
 - Gas is billed at the **limit**, not usage — the signer estimates and adds a small buffer instead of flat limits.
 - Public RPCs 502 intermittently and receipts lag — requests retry across endpoints, and a missing receipt triggers a state re-read instead of a false failure.
 - SHROOM Pad runs **three cores** on mainnet. New launches go to the **atomic** core (`0x1333…`, launch ids from 10000), which issues and binds the token inside the create transaction; the two older cores (`0xd948…`, `0xeBF6…`) are closed to new launches but keep trading, graduating and paying out. Every launch-scoped tool binds to the core on the launch row, and `claim_fees` reads all three. On the older cores a launch starts **Reserved** until the keeper binds it (~seconds): `create_token` waits and reports honestly.
-- Quote assets are read **live**: `create_token` refuses a quote the core has not enabled (mainnet's atomic core takes INJ today, at 1% or its 3% fee tier) before spending anything.
+- Quote assets are read **live**: `create_token` takes INJ, USDC or SPROUT, each at a 1% or 3% fee tier (slots 1/6, 2/7, 8/9), and refuses any slot the core has not enabled before spending anything. A USDC- or SPROUT-quoted launch is bought with that token (exact approval, balance checked first), and its graduated Choice v2 pool pairs with it too. SPROUT is matched by address only: plenty of other tokens call themselves SPROUT.
 
 ## Development
 

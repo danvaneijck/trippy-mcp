@@ -77,7 +77,7 @@ export interface SweepResult {
 }
 
 /**
- * Send funds home. `asset` is INJ | USDC | SAI | an ERC20 address; `amount`
+ * Send funds home. `asset` is INJ | USDC | SPROUT | SAI | an ERC20 address; `amount`
  * human units or "all" (INJ keeps a 0.05 gas reserve).
  */
 export async function sweep(rt: Runtime, asset: string, amount: string | "all"): Promise<SweepResult> {
@@ -107,7 +107,7 @@ export async function sweep(rt: Runtime, asset: string, amount: string | "all"):
   const known = rt.net.quoteAssets[asset.toUpperCase()];
   const token = (known ? known.pairAsset : asset) as Address;
   if (!/^0x[0-9a-fA-F]{40}$/.test(token)) {
-    throw new ToolError("bad_asset", "asset must be INJ, USDC, SAI or an ERC20 0x address");
+    throw new ToolError("bad_asset", "asset must be INJ, USDC, SPROUT, SAI or an ERC20 0x address");
   }
   const decimals = known
     ? known.decimals
