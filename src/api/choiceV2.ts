@@ -9,6 +9,7 @@
  */
 
 import { ToolError } from "../errors.js";
+import { apiFetch } from "./http.js";
 
 export interface V2TokenRef {
   address: string;
@@ -82,7 +83,7 @@ export class ChoiceV2Api {
       .filter(([, v]) => v !== undefined && v !== "")
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
       .join("&");
-    const res = await fetch(`${this.base.replace(/\/$/, "")}${path}${qs ? `?${qs}` : ""}`);
+    const res = await apiFetch(`${this.base.replace(/\/$/, "")}${path}${qs ? `?${qs}` : ""}`);
     if (!res.ok) {
       throw new ToolError("choice_v2_api", `Choice v2 API ${path} answered ${res.status}`);
     }
