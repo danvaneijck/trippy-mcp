@@ -7,6 +7,7 @@
  */
 
 import { ToolError } from "../errors.js";
+import { apiFetch } from "./http.js";
 
 /**
  * The pad API's SURROGATE launch id — the only id any endpoint on this client
@@ -246,7 +247,7 @@ export class PumpApi {
             .map(([k, v]) => [k, String(v)] as [string, string]),
         ).toString()}`
       : "";
-    const res = await fetch(this.url(path) + qs);
+    const res = await apiFetch(this.url(path) + qs);
     if (!res.ok) {
       throw new ToolError("api_error", `pump API ${path} failed (HTTP ${res.status})`);
     }
@@ -254,7 +255,7 @@ export class PumpApi {
   }
 
   private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(this.url(path), {
+    const res = await apiFetch(this.url(path), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -345,7 +346,7 @@ export class PumpApi {
   async uploadImage(bytes: Uint8Array, filename: string, mime: string): Promise<{ cid: string; url: string }> {
     const form = new FormData();
     form.append("file", new Blob([bytes as unknown as ArrayBuffer], { type: mime }), filename);
-    const res = await fetch(this.url("/uploads/image"), { method: "POST", body: form });
+    const res = await apiFetch(this.url("/uploads/image"), { method: "POST", body: form });
     const payload = (await res.json().catch(() => ({}))) as { cid?: string; url?: string; error?: string };
     if (!res.ok || !payload.url) {
       throw new ToolError(
@@ -422,7 +423,7 @@ export class PumpApi {
 
   /** The URL `tokenURI` points at — fetched raw so the card can be validated. */
   async agentCard(address: string): Promise<unknown> {
-    const res = await fetch(this.url(`/agents/${address.toLowerCase()}/agent-card.json`));
+    const res = await apiFetch(this.url(`/agents/${address.toLowerCase()}/agent-card.json`));
     if (!res.ok) {
       throw new ToolError(
         "api_error",

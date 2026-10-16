@@ -8,6 +8,7 @@
  */
 
 import { ToolError } from "../errors.js";
+import { apiFetch } from "./http.js";
 
 export interface SorExecute {
   type: string;
@@ -61,7 +62,7 @@ export class ChoiceApi {
     amount: string | number,
     slippagePct: number,
   ): Promise<SorQuoteResponse> {
-    const res = await fetch(this.url("/api/quote"), {
+    const res = await apiFetch(this.url("/api/quote"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -94,7 +95,7 @@ export class ChoiceApi {
             .map(([k, v]) => [k, String(v)] as [string, string]),
         ).toString()}`
       : "";
-    const res = await fetch(this.url(`/api/agent${path}`) + qs);
+    const res = await apiFetch(this.url(`/api/agent${path}`) + qs);
     if (!res.ok) {
       throw new ToolError("api_error", `Choice agent API ${path} failed (HTTP ${res.status})`);
     }
