@@ -1,6 +1,6 @@
 /**
- * Hasura persistence for claim-drop leaves and the campaign registry — the same
- * public tables the trippytools site writes, so an agent-created drop is
+ * Persistence for claim-drop leaves and the campaign registry — the same public
+ * tables the trippytools site writes, so an agent-created drop is
  * indistinguishable to the claim page at /claim/<id>.
  *
  * Leaves are CONTENT-ADDRESSED BY MERKLE ROOT: the same tree always maps to the
@@ -8,13 +8,16 @@
  * is idempotent. A claim page resolves campaign id -> root (on-chain) -> leaves
  * (here), rebuilds the tree locally and derives its own proof.
  *
- * Both mutations are ON CONFLICT DO NOTHING (`update_columns: []`), and `anon`
- * has no update grant — so a published row can never be rewritten by a later
- * insert. A conflicting insert returns null instead of the row, which is what
- * makes the squat check below both necessary and possible.
+ * The leaves mutation is ON CONFLICT DO NOTHING (`update_columns: []`), and
+ * `anon` has no update grant — so a published row can never be rewritten by a
+ * later insert. A conflicting insert returns null instead of the row, which is
+ * what makes the squat check below both necessary and possible.
  *
- * Plain fetch rather than a GraphQL client: two mutations and one query do not
- * justify a dependency in a package that ships to npm.
+ * Campaign rows are not written through Hasura: `recordCampaign` asks trippinj
+ * to record the campaign, and trippinj builds the row from the contract's state.
+ *
+ * Plain fetch rather than a GraphQL client: a few mutations and one query do
+ * not justify a dependency in a package that ships to npm.
  */
 
 import { ToolError } from "../errors.js";
@@ -31,22 +34,6 @@ const UPSERT_LEAVES = `
 const GET_LEAVES_BY_ROOT = `
   query GetClaimDropLeaves($root: String!) {
     claim_drop_leaves_by_pk(root: $root) { root total leaves }
-  }`;
-
-const INSERT_CAMPAIGN = `
-  mutation InsertClaimDropCampaign(
-    $contract: String!, $campaign_id: bigint!, $root: String!, $denom: String!,
-    $symbol: String, $decimals: Int, $meta: jsonb, $creator: String!,
-    $tx_hash: String, $network: String!
-  ) {
-    insert_claim_drop_campaign_one(
-      object: {
-        contract: $contract, campaign_id: $campaign_id, root: $root, denom: $denom,
-        symbol: $symbol, decimals: $decimals, meta: $meta, creator: $creator,
-        tx_hash: $tx_hash, network: $network
-      }
-      on_conflict: { constraint: claim_drop_campaign_pkey, update_columns: [] }
-    ) { campaign_id }
   }`;
 
 async function gql<T>(url: string, query: string, variables: Record<string, unknown>): Promise<T> {
@@ -219,31 +206,28 @@ export async function recordAirdropLog(hasuraUrl: string, row: AirdropLogRow): P
   });
 }
 
+/**
+ * Record a published campaign in the trippinj campaign index (the claim page's
+ * "my drops"). Only the campaign's coordinates are sent: trippinj reads the row
+ * from the contract, and keeps `txHash` only if that tx checks out on-chain.
+ * Idempotent, so a retry just re-syncs the row.
+ */
 export async function recordCampaign(
-  hasuraUrl: string,
-  row: {
-    network: string;
-    contract: string;
-    campaignId: number;
-    root: string;
-    denom: string;
-    symbol: string | null;
-    decimals: number;
-    meta: Record<string, unknown>;
-    creator: string;
-    txHash: string | null;
-  },
+  campaignsUrl: string,
+  row: { network: string; contract: string; campaignId: number; txHash: string | null },
 ): Promise<void> {
-  await gql(hasuraUrl, INSERT_CAMPAIGN, {
-    network: row.network,
-    contract: row.contract,
-    campaign_id: row.campaignId,
-    root: row.root,
-    denom: row.denom,
-    symbol: row.symbol,
-    decimals: row.decimals,
-    meta: row.meta,
-    creator: row.creator,
-    tx_hash: row.txHash,
+  const res = await fetch(campaignsUrl, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      network: row.network,
+      contract: row.contract,
+      campaign_id: row.campaignId,
+      tx_hash: row.txHash,
+    }),
   });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new ToolError("hasura_error", `campaign index returned HTTP ${res.status}${body?.error ? `: ${body.error}` : ""}`);
+  }
 }
