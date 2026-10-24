@@ -571,16 +571,10 @@ export async function execute(
   const notes: string[] = [];
   if (campaignId !== null) {
     try {
-      await recordCampaign(rt.net.claimDrops.hasuraUrl, {
+      await recordCampaign(rt.net.claimDrops.campaignsUrl, {
         network: rt.net.name,
         contract,
         campaignId,
-        root: tree.rootHex,
-        denom: plan.denom,
-        symbol: plan.symbol,
-        decimals: plan.decimals,
-        meta: plan.meta,
-        creator: rt.injAddress,
         txHash: res.txHash,
       });
     } catch (e) {
