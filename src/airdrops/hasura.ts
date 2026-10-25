@@ -129,54 +129,39 @@ export async function publishLeaves(
 // ---- push-drop history ----------------------------------------------------
 // The site's airdrop history is a different set of tables from the claim-drop
 // registry above, because a push drop has no campaign to register — it is just
-// transactions. Mirroring the insert is what makes an agent's push drops show
-// up in the same history as the ones a human ran, with the criteria string the
-// plan already carries.
+// transactions. Recording it is what makes an agent's push drops show up in the
+// same history as the ones a human ran, with the criteria string the plan
+// already carries.
 //
-// Three writes, in this order, because the log row has foreign keys onto the
-// other two: the token, then the wallets, then the log. Both of the first two
-// are ON CONFLICT DO NOTHING, so re-running them is free.
+// trippinj writes the row (`POST /airdrops/log`) from the transactions: the
+// sender, token, recipients and amounts are read off the MsgMultiSends, so only
+// the hashes and the free text go up, and anon can no longer insert history,
+// token or wallet rows through Hasura.
 
-const INSERT_TOKEN = `
-  mutation InsertToken($objects: [token_tracker_token_insert_input!]!) {
-    insert_token_tracker_token(
-      objects: $objects
-      on_conflict: { constraint: token_tracker_token_pkey, update_columns: [] }
-    ) { affected_rows }
-  }`;
-
-const INSERT_WALLETS = `
-  mutation InsertWallets($objects: [wallet_tracker_wallet_insert_input!]!) {
-    insert_wallet_tracker_wallet(
-      objects: $objects
-      on_conflict: { constraint: wallet_tracker_wallet_pkey, update_columns: [] }
-    ) { affected_rows }
-  }`;
-
-const INSERT_AIRDROP_LOG = `
-  mutation InsertAirdropLog(
-    $time: timestamptz!, $token_dropped_id: String!, $wallet_id: String!,
-    $amount_dropped: float8, $participants: [airdrop_tracker_airdroplog_participants_insert_input!]!,
-    $criteria: String, $description: String, $total_participants: Int!,
-    $tx_hashes: String, $fee: float8
-  ) {
-    insert_airdrop_tracker_airdroplog_one(object: {
-      time: $time, token_dropped_id: $token_dropped_id, wallet_id: $wallet_id,
-      amount_dropped: $amount_dropped, criteria: $criteria, description: $description,
-      total_participants: $total_participants, participants: { data: $participants },
-      tx_hashes: $tx_hashes, fee: $fee
-    }) { id }
-  }`;
+/** The backend's per-request cap on tx hashes. */
+const MAX_HASHES_PER_RECORD = 200;
 
 export interface AirdropLogRow {
-  denom: string;
-  sender: string;
-  /** Whole tokens actually sent, as a number — the column is a float8. */
-  amountDropped: number;
-  recipients: string[];
   criteria: string;
   description: string;
   txHashes: string[];
+}
+
+/**
+ * Batches of at most MAX_HASHES_PER_RECORD; each one after the first repeats a
+ * hash of the one before, so the backend adds it to the same history row.
+ */
+export function recordBatches(txHashes: string[]): string[][] {
+  const batches: string[][] = [];
+  let i = 0;
+  while (i < txHashes.length) {
+    const prev = txHashes[i - 1];
+    const carry = batches.length > 0 && prev !== undefined ? [prev] : [];
+    const take = MAX_HASHES_PER_RECORD - carry.length;
+    batches.push([...carry, ...txHashes.slice(i, i + take)]);
+    i += take;
+  }
+  return batches;
 }
 
 /**
@@ -184,26 +169,33 @@ export interface AirdropLogRow {
  *
  * Best-effort by contract: the transactions have already landed by the time
  * this runs, so a logging failure is a missing history row, not a failed drop.
- * The caller reports it as a note and moves on.
+ * The caller reports it as a note and moves on. A 404 (the LCD has not indexed
+ * the newest tx yet) or a 502 is retried; any other refusal is final.
  */
-export async function recordAirdropLog(hasuraUrl: string, row: AirdropLogRow): Promise<void> {
-  await gql(hasuraUrl, INSERT_TOKEN, { objects: [{ address: row.denom }] });
-  await gql(hasuraUrl, INSERT_WALLETS, {
-    objects: row.recipients.map((address) => ({ address, burn_address: false })),
-  });
-  await gql(hasuraUrl, INSERT_AIRDROP_LOG, {
-    time: new Date().toISOString(),
-    token_dropped_id: row.denom,
-    wallet_id: row.sender,
-    amount_dropped: row.amountDropped,
-    total_participants: row.recipients.length,
-    participants: row.recipients.map((wallet_id) => ({ wallet_id })),
-    criteria: row.criteria,
-    description: row.description,
-    tx_hashes: row.txHashes.join(","),
-    // Agent-created drops are not charged the site's SHROOM fee.
-    fee: 0,
-  });
+export async function recordAirdropLog(
+  airdropLogUrl: string,
+  row: AirdropLogRow,
+  opts: { retryDelayMs?: number } = {},
+): Promise<void> {
+  const delay = opts.retryDelayMs ?? 3000;
+  for (const batch of recordBatches(row.txHashes)) {
+    for (let attempt = 1; ; attempt++) {
+      const res = await fetch(airdropLogUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tx_hashes: batch, criteria: row.criteria, description: row.description }),
+      });
+      if (res.ok) break;
+      const body = (await res.json().catch(() => null)) as { error?: string } | null;
+      if ((res.status !== 404 && res.status !== 502) || attempt >= 3) {
+        throw new ToolError(
+          "hasura_error",
+          `airdrop history returned HTTP ${res.status}${body?.error ? `: ${body.error}` : ""}`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, delay * attempt));
+    }
+  }
 }
 
 /**

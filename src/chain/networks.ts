@@ -41,13 +41,18 @@ export interface ClaimDropsConfig {
    * overridable per-install for that reason.
    */
   leavesBase: string;
-  /** Hasura GraphQL endpoint (anon role: leaves insert, reads, airdrop log). */
+  /** Hasura GraphQL endpoint (anon role: leaves insert and reads). */
   hasuraUrl: string;
   /**
    * trippinj endpoint that records a published campaign in the campaign index
    * (built server-side from the contract's state; anon cannot insert rows).
    */
   campaignsUrl: string;
+  /**
+   * trippinj endpoint that records a push drop in the site's airdrop history
+   * (built server-side from the drop's transactions; mainnet only).
+   */
+  airdropLogUrl: string;
   /** Claim page an agent hands to recipients. */
   claimBase: string;
 }
@@ -340,6 +345,7 @@ const MAINNET: NetworkDef = {
     leavesBase: "https://api.trippyinj.xyz/claim-drops/leaves",
     hasuraUrl: "https://api.trippyinj.xyz/v1/graphql",
     campaignsUrl: "https://api.trippyinj.xyz/claim-drops/campaigns",
+    airdropLogUrl: "https://api.trippyinj.xyz/airdrops/log",
     claimBase: "https://trippyinj.xyz/claim",
   },
   // The v2 core's treasury EOA (it has no code, so it CAN claim a pull-based
@@ -505,6 +511,7 @@ const TESTNET: NetworkDef = {
     leavesBase: "https://api.trippyinj.xyz/claim-drops/leaves",
     hasuraUrl: "https://api.trippyinj.xyz/v1/graphql",
     campaignsUrl: "https://api.trippyinj.xyz/claim-drops/campaigns",
+    airdropLogUrl: "https://api.trippyinj.xyz/airdrops/log",
     claimBase: "https://trippyinj.xyz/claim",
   },
   defaultReferrer: "0xBf08c09Fe227ada4A86d279e98E695344848d33D",

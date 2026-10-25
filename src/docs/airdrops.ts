@@ -186,9 +186,11 @@ which would build a fresh plan that knows nothing about who has been paid.
 \`airdrop_status\` on a push planId reports paid/total, the landed tx hashes,
 any unsendable addresses and whether a send is still in the air. Push drops on
 MAINNET are written to the site's airdrop history with the plan's criteria
-string, including the recipients a resumed run settled rather than sent; that
-history has no notion of networks, so drops on any other network are left out of
-it deliberately.
+string, including the recipients a resumed run settled rather than sent. The
+site builds each history row from the drop's transactions, so a run whose tx
+hash could not be recovered is left out (the result says so). That history has
+no notion of networks, so drops on any other network are left out of it
+deliberately.
 
 ## After it is live: \`airdrop_manage\`
 
