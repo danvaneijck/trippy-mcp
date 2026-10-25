@@ -704,20 +704,17 @@ function requireOwnPlan(rt: Runtime, plan: StoredPlan): void {
  * Mirror a finished push drop into the site's airdrop history.
  *
  * Best-effort and deliberately last: the transactions have already landed, so a
- * Hasura failure is a missing history row, never a failed drop. Only recipients
- * a landed transaction actually paid are logged, so a partial run reads as what
+ * recording failure is a missing history row, never a failed drop. trippinj
+ * builds the row from this run's transactions, so a partial run reads as what
  * it was.
  *
  * MAINNET ONLY, and not for a policy reason — for a schema one. The claim-drop
  * tables carry a `network` column, so a testnet campaign is distinguishable
  * there; these three do not. `airdrop_tracker_airdroplog` has no network
  * column, and the two tables its foreign keys point at (`token_tracker_token`,
- * `wallet_tracker_wallet`) are the site's shared token and wallet registries.
- * Writing a testnet drop would therefore put a testnet denom in the site's
- * token table and a row with unresolvable tx hashes in the airdrop history real
- * users read, with nothing to filter it back out by. The Hasura endpoint is the
- * same production host on both networks, so this is the only place the
- * distinction can be made.
+ * `wallet_tracker_wallet`) are the site's shared token and wallet registries,
+ * so the history endpoint reads mainnet only. Skipping it here says so in the
+ * result instead of failing.
  */
 async function logPushDrop(rt: Runtime, plan: StoredPlan, run: PushRun): Promise<void> {
   const result = run.result;
@@ -744,28 +741,28 @@ async function logPushDrop(rt: Runtime, plan: StoredPlan, run: PushRun): Promise
   const recipients = plan.leaves.filter((l) => paid.has(l.address));
   if (recipients.length === 0) return;
 
-  const totalBase = recipients.reduce((s, l) => s + BigInt(l.amount), 0n);
   const unsendable = (result.unsendable as { address: string }[] | undefined)?.length ?? 0;
   // This run's hashes only. `result.txHashes` carries the checkpoint's whole
   // history, so using it would stamp a resumed run's row with the transactions
   // an earlier row already claimed, and the two rows would stop partitioning.
   const txHashes = run.txHashesThisRun;
+  if (txHashes.length === 0) {
+    // The history is built from the transactions, so recipients confirmed paid
+    // only by re-reading their balances have nothing to record it from.
+    const notes = (result.notes as string[] | undefined) ?? [];
+    notes.push(
+      "this run was NOT written to the site's airdrop history: its transaction hash could not be recovered, and the history is built from the transactions — the recipients are paid regardless",
+    );
+    result.notes = notes;
+    return;
+  }
   try {
-    await recordAirdropLog(rt.net.claimDrops.hasuraUrl, {
-      denom: plan.denom,
-      sender: plan.sender,
-      amountDropped: Number(fromBaseUnits(totalBase.toString(), plan.decimals)),
-      recipients: recipients.map((l) => l.address),
+    await recordAirdropLog(rt.net.claimDrops.airdropLogUrl, {
       criteria: plan.criteria,
       description:
         `${(plan.meta.description as string | undefined) ?? ""} [created by ${plan.meta.createdBy ?? "trippy-mcp"}]` +
         (unsendable > 0
           ? ` [partial: ${unsendable} unsendable address(es) skipped]`
-          : "") +
-        // A row with no transaction to point at needs to say why, or it reads
-        // as a drop that never happened rather than one whose hash was lost.
-        (txHashes.length === 0
-          ? " [tx hash unrecoverable — these recipients were confirmed paid by re-reading their balances on chain]"
           : ""),
       txHashes,
     });
