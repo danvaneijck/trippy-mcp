@@ -155,7 +155,8 @@ export function recordBatches(txHashes: string[]): string[][] {
   const batches: string[][] = [];
   let i = 0;
   while (i < txHashes.length) {
-    const carry = batches.length > 0 ? [txHashes[i - 1]] : [];
+    const prev = txHashes[i - 1];
+    const carry = batches.length > 0 && prev !== undefined ? [prev] : [];
     const take = MAX_HASHES_PER_RECORD - carry.length;
     batches.push([...carry, ...txHashes.slice(i, i + take)]);
     i += take;
